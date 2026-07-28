@@ -674,6 +674,37 @@ impl BlockEngine {
                         }
                     }
                 }
+                proto::hub_event::Body::MergeOnChainEventBody(merge_on_chain_event_body) => {
+                    // Shard 0 fans channel-register onchain events to every data shard so
+                    // their replica folds can rebuild the ownership indexes and emit hints
+                    // (ShardEngine::handle_block_event). Carry the whole original event,
+                    // mirroring the MergeMessage template above. Only channel registers fan
+                    // out, and only once the feature is active; every other onchain event is
+                    // skipped silently, mirroring the pre-feature gasless-key gate.
+                    let Some(on_chain_event) = merge_on_chain_event_body.on_chain_event else {
+                        continue;
+                    };
+                    if on_chain_event.r#type() != proto::OnChainEventType::EventTypeChannelRegister
+                        || !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents)
+                    {
+                        continue;
+                    }
+                    max_block_event_seqnum += 1;
+                    let data = BlockEventData {
+                        seqnum: max_block_event_seqnum,
+                        r#type: BlockEventType::MergeOnChainEvent as i32,
+                        block_number: height.block_number,
+                        event_index: events.len() as u64,
+                        block_timestamp: timestamp.to_u64(),
+                        body: Some(block_event_data::Body::MergeOnChainEventEventBody(
+                            proto::MergeOnChainEventEventBody {
+                                on_chain_event: Some(on_chain_event),
+                            },
+                        )),
+                    };
+                    let event = Self::build_block_event(data);
+                    events.push(event);
+                }
                 _ => {}
             }
         }

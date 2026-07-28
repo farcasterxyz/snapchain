@@ -3,10 +3,10 @@ use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    self, on_chain_event, on_chain_event::Body, ChannelRegisterBody, ChannelRegisterEventType,
-    FarcasterNetwork, HubEvent, HubEventType, IdRegisterEventBody, IdRegisterEventType,
-    MergeOnChainEventBody, OnChainEvent, OnChainEventType, SignerEventBody, SignerEventType,
-    TierType,
+    self, on_chain_event, on_chain_event::Body, ChannelOwnerChangeCause, ChannelRegisterBody,
+    ChannelRegisterEventType, FarcasterNetwork, HubEvent, HubEventType, IdRegisterEventBody,
+    IdRegisterEventType, MergeOnChainEventBody, OnChainEvent, OnChainEventType, SignerEventBody,
+    SignerEventType, TierType,
 };
 use crate::proto::{LendStorageBody, StorageUnitType};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
@@ -287,17 +287,35 @@ fn read_channel_owner_by_channel_key(
     }
 }
 
+/// The ownership change a channel-register fold actually recorded. Produced only
+/// when a REGISTER or TRANSFER wrote a new owner; consumed by the data-shard
+/// replica arm to emit a `ChannelOwnerChangeHint`. `owner_address` is the final
+/// recorded owner (so a hint never carries an address the fold skipped or lost to
+/// LWW), and `cause` is deliberately limited to REGISTER/TRANSFER — RENEW extends
+/// expiry without changing ownership, so it produces no change (the proto
+/// `ChannelOwnerChangeCause` enum has no RENEW variant by design).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChannelOwnerChange {
+    pub channel_key: String,
+    pub owner_address: Vec<u8>,
+    pub cause: ChannelOwnerChangeCause,
+}
+
 fn build_secondary_indices_for_channel_register(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     onchain_event: &OnChainEvent,
     channel_register_body: &ChannelRegisterBody,
-) -> Result<(), OnchainEventStorageError> {
+) -> Result<Option<ChannelOwnerChange>, OnchainEventStorageError> {
     if !validate_channel_label(&channel_register_body.label) {
-        return Ok(());
+        return Ok(None);
     }
 
-    match channel_register_body.event_type() {
+    // Each arm writes exactly as before; the only added behavior is reporting which
+    // writes were an ownership change. REGISTER/TRANSFER that actually wrote →
+    // `Some`; every skip (validation, LWW-older, unknown label/key), RENEW, and the
+    // unrecognized-type arm → `None`.
+    let change = match channel_register_body.event_type() {
         ChannelRegisterEventType::Register => {
             if !validate_channel_owner_address(&channel_register_body.owner_address)
                 || !validate_channel_key_label(
@@ -305,7 +323,7 @@ fn build_secondary_indices_for_channel_register(
                     &channel_register_body.label,
                 )
             {
-                return Ok(());
+                return Ok(None);
             }
 
             let by_channel_key =
@@ -315,7 +333,7 @@ fn build_secondary_indices_for_channel_register(
                 read_channel_owner_by_channel_key(db, txn, &channel_register_body.channel_key)?;
             if let Some(existing_owner) = &existing_owner {
                 if incoming_channel_event_is_older(existing_owner, onchain_event) {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
 
@@ -333,13 +351,18 @@ fn build_secondary_indices_for_channel_register(
                 &channel_owner.owner_address,
             )?;
             txn.put(by_channel_key, channel_owner.encode_to_vec());
+            Some(ChannelOwnerChange {
+                channel_key: channel_register_body.channel_key.clone(),
+                owner_address: channel_owner.owner_address,
+                cause: ChannelOwnerChangeCause::Register,
+            })
         }
         ChannelRegisterEventType::Renew => {
             if !validate_channel_key_label(
                 &channel_register_body.channel_key,
                 &channel_register_body.label,
             ) {
-                return Ok(());
+                return Ok(None);
             }
 
             let Some(mut channel_owner) =
@@ -349,10 +372,10 @@ fn build_secondary_indices_for_channel_register(
                     "Skipping channel renew for unknown channel key {}",
                     channel_register_body.channel_key
                 );
-                return Ok(());
+                return Ok(None);
             };
             if incoming_channel_event_is_older(&channel_owner, onchain_event) {
-                return Ok(());
+                return Ok(None);
             }
             channel_owner.expiry = channel_register_body.expiry;
             set_channel_owner_event_position(&mut channel_owner, onchain_event);
@@ -360,10 +383,13 @@ fn build_secondary_indices_for_channel_register(
                 make_channel_register_by_channel_key(&channel_register_body.channel_key),
                 channel_owner.encode_to_vec(),
             );
+            // Renew applies its write but is not an ownership change: an expiry
+            // extension keeps the same owner, so no hint fires.
+            None
         }
         ChannelRegisterEventType::Transfer => {
             if !validate_channel_owner_address(&channel_register_body.owner_address) {
-                return Ok(());
+                return Ok(None);
             }
 
             let Some(channel_key) = get_from_db_or_txn(
@@ -376,7 +402,7 @@ fn build_secondary_indices_for_channel_register(
                     "Skipping channel transfer for unknown label 0x{}",
                     hex::encode(&channel_register_body.label)
                 );
-                return Ok(());
+                return Ok(None);
             };
             let channel_key =
                 String::from_utf8(channel_key).map_err(|err| DecodeError::new(err.to_string()))?;
@@ -386,10 +412,10 @@ fn build_secondary_indices_for_channel_register(
                     "Skipping channel transfer for unknown channel key {}",
                     channel_key
                 );
-                return Ok(());
+                return Ok(None);
             };
             if incoming_channel_event_is_older(&channel_owner, onchain_event) {
-                return Ok(());
+                return Ok(None);
             }
             let old_owner_address = channel_owner.owner_address.clone();
             channel_owner.owner_address = channel_register_body.owner_address.clone();
@@ -404,6 +430,11 @@ fn build_secondary_indices_for_channel_register(
                 make_channel_register_by_channel_key(&channel_key),
                 channel_owner.encode_to_vec(),
             );
+            Some(ChannelOwnerChange {
+                channel_key,
+                owner_address: channel_owner.owner_address,
+                cause: ChannelOwnerChangeCause::Transfer,
+            })
         }
         ChannelRegisterEventType::None => {
             // `event_type()` maps any unrecognized i32 (including 0, or a future on-chain
@@ -414,10 +445,34 @@ fn build_secondary_indices_for_channel_register(
                 "Skipping channel register index update for unrecognized event_type {} (channel_key {})",
                 channel_register_body.event_type, channel_register_body.channel_key
             );
+            None
         }
-    }
+    };
 
-    Ok(())
+    Ok(change)
+}
+
+/// Data-shard replica entry point: runs ONLY the channel-register
+/// secondary-index fold against `db`/`txn` — it does not write the primary
+/// onchain-event record and does not touch the trie (those live in the shard-0
+/// merge path). Non-channel events fold to `None`. Returns the ownership change a
+/// REGISTER/TRANSFER recorded so the caller can emit a `ChannelOwnerChangeHint`.
+pub(crate) fn fold_channel_register_replica(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    onchain_event: &OnChainEvent,
+) -> Result<Option<ChannelOwnerChange>, OnchainEventStorageError> {
+    match &onchain_event.body {
+        Some(on_chain_event::Body::ChannelRegisterEventBody(channel_register_body)) => {
+            build_secondary_indices_for_channel_register(
+                db,
+                txn,
+                onchain_event,
+                channel_register_body,
+            )
+        }
+        _ => Ok(None),
+    }
 }
 
 fn build_secondary_indices_for_id_register(
@@ -539,12 +594,15 @@ fn build_secondary_indices(
                 build_secondary_indices_for_signer(db, txn, onchain_event, signer_event_body)?
             }
             on_chain_event::Body::ChannelRegisterEventBody(channel_register_body) => {
+                // The primary merge path builds the index but ignores the ownership-change
+                // outcome; hint emission happens only on the data-shard replica path
+                // (`fold_channel_register_replica`).
                 build_secondary_indices_for_channel_register(
                     db,
                     txn,
                     onchain_event,
                     channel_register_body,
-                )?
+                )?;
             }
             on_chain_event::Body::SignerMigratedEventBody(_)
             | on_chain_event::Body::StorageRentEventBody(_)
@@ -1176,6 +1234,27 @@ impl OnchainEventStore {
         let empty_txn = RocksDbTransactionBatch::new();
         let txn = txn_batch.unwrap_or(&empty_txn);
         read_channel_owner_by_channel_key(&self.db, txn, channel_key)
+    }
+
+    /// Reads the ChannelKeyByLabel index (label -> channel_key). Test-only: the
+    /// production TRANSFER path resolves the label internally, so there is no
+    /// non-test caller; tests use it to assert the index materialized.
+    #[cfg(test)]
+    pub fn get_channel_key_by_label(
+        &self,
+        label: &[u8],
+    ) -> Result<Option<String>, OnchainEventStorageError> {
+        let empty_txn = RocksDbTransactionBatch::new();
+        match get_from_db_or_txn(
+            &self.db,
+            &empty_txn,
+            &make_channel_register_channel_key_by_label_key(label),
+        )? {
+            Some(bytes) => Ok(Some(
+                String::from_utf8(bytes).map_err(|err| DecodeError::new(err.to_string()))?,
+            )),
+            None => Ok(None),
+        }
     }
 
     pub fn get_active_signer(

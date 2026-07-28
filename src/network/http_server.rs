@@ -1397,6 +1397,7 @@ pub enum HubEventType {
     HUB_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 9,
     HUB_EVENT_TYPE_MERGE_FAILURE = 10,
     HUB_EVENT_TYPE_BLOCK_CONFIRMED = 11,
+    HUB_EVENT_TYPE_CHANNEL_OWNER_CHANGE_HINT = 12,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1463,6 +1464,25 @@ pub struct BlockConfirmedBody {
     pub total_events: u64,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ChannelOwnerChangeCause {
+    CHANNEL_OWNER_CHANGE_CAUSE_NONE = 0,
+    CHANNEL_OWNER_CHANGE_CAUSE_REGISTER = 1,
+    CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER = 2,
+    CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD = 3,
+    CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE = 4,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOwnerChangeHintBody {
+    #[serde(rename = "channelKey")]
+    pub channel_key: String,
+    #[serde(with = "serdehex", rename = "ownerAddress")]
+    pub owner_address: Vec<u8>,
+    pub cause: ChannelOwnerChangeCause,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HubEvent {
     #[serde(rename = "type")]
@@ -1488,6 +1508,11 @@ pub struct HubEvent {
     pub merge_failure_body: Option<MergeFailureBody>,
     #[serde(rename = "blockConfirmedBody", skip_serializing_if = "Option::is_none")]
     pub block_confirmed_body: Option<BlockConfirmedBody>,
+    #[serde(
+        rename = "channelOwnerChangeHintBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_owner_change_hint_body: Option<ChannelOwnerChangeHintBody>,
     #[serde(rename = "blockNumber")]
     pub block_number: u64,
     #[serde(rename = "shardIndex")]
@@ -2746,6 +2771,7 @@ pub fn map_proto_hub_event_to_json_hub_event(
     let mut merge_on_chain_event_body: Option<MergeOnChainEventBody> = None;
     let mut merge_failure_body: Option<MergeFailureBody> = None;
     let mut block_confirmed_body: Option<BlockConfirmedBody> = None;
+    let mut channel_owner_change_hint_body: Option<ChannelOwnerChangeHintBody> = None;
     match &hub_event.body {
         None => {}
         Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -2815,6 +2841,34 @@ pub fn map_proto_hub_event_to_json_hub_event(
                 total_events: body.total_events,
             });
         }
+        Some(hub_event::Body::ChannelOwnerChangeHintBody(body)) => {
+            channel_owner_change_hint_body = Some(ChannelOwnerChangeHintBody {
+                channel_key: body.channel_key.clone(),
+                owner_address: body.owner_address.clone(),
+                // Anchored to the proto enum (not raw ints) so a proto renumber/rename
+                // fails to compile here instead of silently mis-mapping, and adding a
+                // proto variant forces a decision at this arm. Runtime forward-compat is
+                // preserved: an unset cause (None) or an integer a newer producer added
+                // that this binary doesn't know (`Err`) both degrade to NONE.
+                cause: match proto::ChannelOwnerChangeCause::try_from(body.cause) {
+                    Ok(proto::ChannelOwnerChangeCause::Register) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_REGISTER
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::Transfer) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::VerificationAdd) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::VerificationRemove) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::None) | Err(_) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_NONE
+                    }
+                },
+            });
+        }
     }
 
     Ok(HubEvent {
@@ -2833,6 +2887,7 @@ pub fn map_proto_hub_event_to_json_hub_event(
         merge_on_chain_event_body,
         merge_failure_body,
         block_confirmed_body,
+        channel_owner_change_hint_body,
         block_number: hub_event.block_number,
         shard_index: hub_event.shard_index,
     })
@@ -4611,6 +4666,115 @@ mod tests {
         assert_eq!(parsed_body.expiry, 1_900_000_000);
         assert_eq!(parsed_body.owner_address, vec![0xCC; 20]);
         assert_eq!(parsed_body.label, vec![0xDD; 32]);
+    }
+
+    #[test]
+    fn channel_owner_change_hint_round_trips_to_json_hub_event() {
+        let proto_event = proto::HubEvent {
+            r#type: proto::HubEventType::ChannelOwnerChangeHint as i32,
+            id: 42,
+            body: Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(
+                proto::ChannelOwnerChangeHintBody {
+                    channel_key: "pets".to_string(),
+                    owner_address: vec![0xCC; 20],
+                    cause: proto::ChannelOwnerChangeCause::Transfer as i32,
+                },
+            )),
+            block_number: 100,
+            shard_index: 2,
+            timestamp: 1_800_000_000,
+        };
+        let json = map_proto_hub_event_to_json_hub_event(proto_event)
+            .expect("channel owner change hint must map cleanly");
+
+        assert_eq!(
+            json.hub_event_type,
+            "HUB_EVENT_TYPE_CHANNEL_OWNER_CHANGE_HINT"
+        );
+        assert!(json.merge_message_body.is_none());
+        let body = json
+            .channel_owner_change_hint_body
+            .clone()
+            .expect("channel_owner_change_hint_body present");
+        assert_eq!(body.channel_key, "pets");
+        assert_eq!(body.owner_address, vec![0xCC; 20]);
+        assert!(matches!(
+            body.cause,
+            ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER
+        ));
+
+        // Confirm wire shape: camelCase wrapper key, 0x-prefixed hex bytes, enum as its variant
+        // name, and absent sibling bodies omitted via skip_serializing_if.
+        let serialized = serde_json::to_value(&json).expect("serialize HubEvent");
+        assert_eq!(
+            serialized["type"],
+            "HUB_EVENT_TYPE_CHANNEL_OWNER_CHANGE_HINT"
+        );
+        let body_json = &serialized["channelOwnerChangeHintBody"];
+        assert_eq!(body_json["channelKey"], "pets");
+        assert_eq!(body_json["ownerAddress"], format!("0x{}", "cc".repeat(20)));
+        assert_eq!(body_json["cause"], "CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER");
+        assert!(serialized.get("mergeMessageBody").is_none());
+
+        // Deserialize leg: the emitted wire shape parses back into the same body, so the
+        // Deserialize derives (serdehex included) stay symmetric with Serialize.
+        let parsed: HubEvent = serde_json::from_value(serialized).expect("deserialize HubEvent");
+        let parsed_body = parsed
+            .channel_owner_change_hint_body
+            .expect("body survives round trip");
+        assert_eq!(parsed_body.channel_key, "pets");
+        assert_eq!(parsed_body.owner_address, vec![0xCC; 20]);
+        assert!(matches!(
+            parsed_body.cause,
+            ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER
+        ));
+    }
+
+    #[test]
+    fn channel_owner_change_hint_cause_maps_every_variant() {
+        // The proto->JSON cause conversion is a hand-written int->variant table; the round-trip
+        // test above only exercises TRANSFER. Pin every arm (0..=4) plus the unknown-int
+        // fallback: the ownership-hint feature emits REGISTER/VERIFICATION_* hints, so the
+        // arms about to go live are otherwise untested, and a transposition or a wrong fallback
+        // on this public wire contract would ship silently. The unknown case also freezes the
+        // intended forward-compat behavior (a future proto cause degrades to NONE, not a panic).
+        use ChannelOwnerChangeCause::*;
+        let cases = [
+            (0, CHANNEL_OWNER_CHANGE_CAUSE_NONE),
+            (1, CHANNEL_OWNER_CHANGE_CAUSE_REGISTER),
+            (2, CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER),
+            (3, CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD),
+            (4, CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE),
+            (99, CHANNEL_OWNER_CHANGE_CAUSE_NONE),
+        ];
+        for (proto_cause, expected) in cases {
+            let proto_event = proto::HubEvent {
+                r#type: proto::HubEventType::ChannelOwnerChangeHint as i32,
+                id: 1,
+                body: Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(
+                    proto::ChannelOwnerChangeHintBody {
+                        channel_key: "pets".to_string(),
+                        owner_address: vec![0xCC; 20],
+                        cause: proto_cause,
+                    },
+                )),
+                block_number: 1,
+                shard_index: 2,
+                timestamp: 0,
+            };
+            let json = map_proto_hub_event_to_json_hub_event(proto_event)
+                .expect("cause mapping must not fail");
+            let body = json
+                .channel_owner_change_hint_body
+                .expect("hint body present");
+            assert_eq!(
+                std::mem::discriminant(&body.cause),
+                std::mem::discriminant(&expected),
+                "proto cause {} must map to {:?}",
+                proto_cause,
+                expected
+            );
+        }
     }
 
     #[test]

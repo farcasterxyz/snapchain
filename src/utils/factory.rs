@@ -54,8 +54,8 @@ pub mod events_factory {
     use crate::{
         proto::{
             self, BlockEvent, BlockEventData, BlockEventType, ChannelRegisterBody,
-            ChannelRegisterEventType, HeartbeatEventBody, MergeMessageEventBody, StorageUnitType,
-            TierPurchaseBody, TierType,
+            ChannelRegisterEventType, HeartbeatEventBody, MergeMessageEventBody,
+            MergeOnChainEventEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -90,6 +90,36 @@ pub mod events_factory {
             body: Some(message::block_event_data::Body::MergeMessageEventBody(
                 MergeMessageEventBody {
                     message: Some(message),
+                },
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
+    // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V20) is
+    // active; tests construct it directly to exercise the receiver-side admission arm. The
+    // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
+    // network (devnet -> V20 active; mainnet -> pre-V20 inactive), mirroring the KEY_ADD tests.
+    pub fn create_merge_on_chain_event_event(
+        on_chain_event: OnChainEvent,
+        seqnum: u64,
+    ) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::MergeOnChainEvent as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::MergeOnChainEventEventBody(
+                MergeOnChainEventEventBody {
+                    on_chain_event: Some(on_chain_event),
                 },
             )),
         };

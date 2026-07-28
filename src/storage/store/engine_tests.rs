@@ -4489,4 +4489,1179 @@ mod tests {
                 .all(|key| engine.trie_key_exists(trie_ctx(), key))
         }
     }
+
+    // ----------------------------------------------------------------------------------------
+    // MergeOnChainEvent BlockEvent replica fold + ownership hints.
+    //
+    // Shard 0 fans channel-register events to every data shard as a MergeOnChainEvent BlockEvent;
+    // `handle_block_event` runs the trie-free replica fold against the shard's own
+    // OnchainEventStore and emits a ChannelOwnerChangeHint whenever a REGISTER/TRANSFER records a
+    // new owner. These tests drive that arm through the real block-event commit path. The
+    // pre-feature reject test is unchanged: the gate still ships WITH the type.
+    // ----------------------------------------------------------------------------------------
+    mod channel_ownership_events_block_event_tests {
+        use super::*;
+        use crate::storage::store::account::get_channel_keys_by_owner_address;
+        use alloy_primitives::keccak256;
+
+        const CHANNEL_KEY: &str = "pets";
+
+        fn channel_label(channel_key: &str) -> Vec<u8> {
+            keccak256(channel_key.as_bytes()).to_vec()
+        }
+
+        fn channel_event(
+            channel_key: &str,
+            label_source: &str,
+            owner_byte: u8,
+            event_type: proto::ChannelRegisterEventType,
+            expiry: u64,
+            block_number: u32,
+        ) -> OnChainEvent {
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(label_source),
+                vec![owner_byte; 20],
+                expiry,
+                event_type,
+                block_number,
+                0,
+            )
+        }
+
+        fn channel_register_onchain_event() -> OnChainEvent {
+            channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            )
+        }
+
+        // Commits one MergeOnChainEvent BlockEvent (seqnum-chained) through the data-shard path.
+        async fn apply_channel_block_event(
+            engine: &mut ShardEngine,
+            onchain_event: OnChainEvent,
+            seqnum: u64,
+        ) {
+            let block_event =
+                events_factory::create_merge_on_chain_event_event(onchain_event, seqnum);
+            commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        fn owner_change_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.r#type == HubEventType::ChannelOwnerChangeHint as i32)
+                .collect()
+        }
+
+        fn assert_hint(
+            hint: &HubEvent,
+            channel_key: &str,
+            owner_address: &[u8],
+            cause: proto::ChannelOwnerChangeCause,
+        ) {
+            let body = match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            };
+            assert_eq!(body.channel_key, channel_key);
+            assert_eq!(body.owner_address, owner_address);
+            assert_eq!(body.cause, cause as i32);
+            // A subscriber-visible event id, assigned by the shared HubEventIdGenerator.
+            assert!(hint.id > 0, "hint must carry a normal (nonzero) event id");
+        }
+
+        fn owner_channels(engine: &ShardEngine, owner_byte: u8) -> Vec<String> {
+            get_channel_keys_by_owner_address(
+                &engine.get_stores().onchain_event_store.db,
+                &vec![owner_byte; 20],
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .0
+        }
+
+        #[tokio::test]
+        async fn test_active_merge_on_chain_event_block_event_folds_replica_and_hints() {
+            // Devnet runs V20, so the arm folds the fanned-out REGISTER into this shard's own
+            // replica: it materializes all three secondary indexes (ByChannelKey,
+            // ChannelKeyByLabel, ByOwnerAddress), emits exactly one REGISTER hint, and — being a
+            // secondary-index-only fold — never touches the trie.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let root_before = engine.trie_root_hash();
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
+
+            let stores = engine.get_stores();
+            // ByChannelKey.
+            let owner = stores
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.channel_key, CHANNEL_KEY);
+            assert_eq!(owner.owner_address, vec![0xCC; 20]);
+            // ChannelKeyByLabel.
+            assert_eq!(
+                stores
+                    .onchain_event_store
+                    .get_channel_key_by_label(&channel_label(CHANNEL_KEY))
+                    .unwrap(),
+                Some(CHANNEL_KEY.to_string())
+            );
+            // ByOwnerAddress.
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+
+            // Exactly one REGISTER hint carrying the recorded owner.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
+            );
+
+            // Trie-free: the replica lives entirely in RocksDB secondary indexes.
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "replica fold must not touch the trie"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_renew_updates_expiry_and_emits_no_hint() {
+            // RENEW extends expiry without changing ownership — the index is updated but no hint
+            // fires (the cause enum has no RENEW variant by design).
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
+
+            let renew = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Renew,
+                2_000_000_000,
+                101,
+            );
+            apply_channel_block_event(&mut engine, renew, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.expiry, 2_000_000_000, "renew updates expiry");
+            // Only the register's hint — renew adds none.
+            assert_eq!(owner_change_hints(&engine).len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_transfer_moves_owner_and_hints_new_owner() {
+            // TRANSFER rebinds the channel to a new owner (resolved via ChannelKeyByLabel), moves
+            // the ByOwnerAddress index, and emits a TRANSFER hint carrying the NEW owner.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "owner moved to new address"
+            );
+            // ByOwnerAddress moved: old owner empty, new owner holds the channel.
+            assert!(owner_channels(&engine, 0xAA).is_empty());
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 2, "one REGISTER hint, one TRANSFER hint");
+            assert_hint(
+                &hints[1],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_lww_older_event_is_skipped_and_emits_no_hint() {
+            // A later-arriving but chain-older REGISTER loses LWW: no write, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let older = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xDD,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                50, // earlier block → older chain position
+            );
+            apply_channel_block_event(&mut engine, older, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xAA; 20],
+                "older event must not overwrite"
+            );
+            assert_eq!(
+                owner_change_hints(&engine).len(),
+                1,
+                "no hint for the skipped event"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_transfer_with_unknown_label_skips_and_emits_no_hint() {
+            // A transfer whose label resolves to no registered channel is warned and skipped —
+            // no owner index, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let transfer = channel_event(
+                "",
+                "ghost",
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                100,
+            );
+            apply_channel_block_event(&mut engine, transfer, 1).await;
+
+            assert!(engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner("ghost", None)
+                .unwrap()
+                .is_none());
+            assert!(owner_change_hints(&engine).is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_double_application_is_idempotent_and_still_hints() {
+            // On the route_fid(0) shard a channel event is merged first as a system message
+            // (primary + fold, no hint) and THEN re-applied as a block event. The block-event
+            // replica fold re-runs at the same chain position: strict-`<` LWW rewrites
+            // byte-identical index values, and the hint still fires — pinning "REGISTER/TRANSFER
+            // hints on every shard's stream" even where the event was already merged.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_register_onchain_event();
+
+            // System-message path: materializes the index, emits a MergeOnChainEvent (no hint).
+            commit_event(&mut engine, &register).await;
+            let owner_after_system = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "system merge emits no hint"
+            );
+
+            // Block-event path on the SAME shard: no block events exist yet, so seqnum 1.
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let owner_after_block = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner_after_system, owner_after_block,
+                "re-application at equal chain position is byte-identical"
+            );
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+            // The block-event path emits the hint even though the event was already merged.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_route_fid_zero_burst_coalesces_to_latest_hint() {
+            // Consumer-contract pin (hub_event.proto): on the route_fid(0) shard the
+            // system-message path leads the fan-out, so a rapid same-channel burst can be
+            // COALESCED down to just the latest hint on THIS shard — not every event hints
+            // here, only the latest one.
+            //
+            // Sequence: the system-message path merges REGISTER@100 then TRANSFER@101 first,
+            // advancing this shard's owner index to owner 0xBB @ block 101. The fanned-out
+            // block events then arrive in chain order:
+            //   - REGISTER@100 loses the strict-`<` LWW against the stored @101 → no write,
+            //     NO hint (it hinted on every fan-out-only shard, which never saw the
+            //     system-message lead — see test_transfer_moves_owner_and_hints_new_owner,
+            //     where the same REGISTER+TRANSFER via block events alone yields TWO hints).
+            //   - TRANSFER@101 re-applies at the equal chain position → byte-identical write,
+            //     Some(change) → the one TRANSFER hint this shard emits.
+            // The final owner state is identical to a fan-out-only shard; only the hint
+            // stream is coalesced. Deterministic per chain history.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+
+            // System-message path leads: it merges both events (index → 0xBB @ 101) and
+            // emits no hint.
+            commit_event(&mut engine, &register).await;
+            commit_event(&mut engine, &transfer).await;
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "system-message merges emit no hint"
+            );
+
+            // Fanned-out REGISTER@100 arrives after the index already advanced to @101: it
+            // loses LWW and is coalesced away — no write, no hint.
+            apply_channel_block_event(&mut engine, register, 1).await;
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "chain-older REGISTER must not overwrite the newer transfer"
+            );
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "the coalesced (LWW-losing) REGISTER emits no hint on this shard"
+            );
+
+            // Fanned-out TRANSFER@101 re-applies at the equal position and emits the one hint.
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+            let hints = owner_change_hints(&engine);
+            assert_eq!(
+                hints.len(),
+                1,
+                "only the latest event in the burst hints on route_fid(0)"
+            );
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+        }
+
+        #[tokio::test]
+        async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
+            // On Mainnet the block's timestamp (0) resolves to a pre-V20 version, so
+            // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The
+            // caller warns and swallows the error, so the block still commits — but no state is
+            // produced: the merge is short-circuited before any fold or trie write.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+
+            let root_before = engine.trie_root_hash();
+            let block_event = events_factory::create_merge_on_chain_event_event(
+                channel_register_onchain_event(),
+                1,
+            );
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            assert!(block_event_exists(&engine, &block_event));
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "rejected MergeOnChainEvent replay must not touch the trie"
+            );
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap();
+            assert!(
+                owner.is_none(),
+                "pre-feature replay must not fold any owner index"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Verification-merge channel-owner hints.
+    //
+    // When an Ethereum verification merges on the user-message path, the engine scans THIS
+    // shard's own ByOwnerAddress replica (built by the channel-register block-event fold) and emits
+    // one ChannelOwnerChangeHint per channel the verified address owns, cause VERIFICATION_ADD /
+    // VERIFICATION_REMOVE. The hook is STRUCTURALLY unable to fail, alter, or panic the merge:
+    // every error warns and yields fewer hints, and the merge result + trie are untouched.
+    //
+    // Most tests drive the real merge path with the canonical EOA verification fixture (address
+    // 0x91031d…871, valid on devnet where V20 is active). Two edges — the pre-V20 gate and the
+    // Solana-protocol skip — are unreachable through any running network (the V20 fork BOTH
+    // opens the gate AND enables the replica fold, so no live network has a populated replica
+    // with the feature off), so they call the pub(crate) hook directly with an explicit version.
+    // ----------------------------------------------------------------------------------------
+    mod channel_ownership_events_verification_hint_tests {
+        use super::*;
+        use crate::storage::constants::{OnChainEventPostfix, RootPrefix};
+        use alloy_primitives::keccak256;
+
+        // Canonical EOA verification fixture: a valid claim signature for FID3_FOR_TEST over this
+        // address on devnet (reused from `test_commit_verification_messages`). The channels these
+        // tests register are OWNED by exactly this address, so the merged verification's replica
+        // scan finds them.
+        const VERIFIED_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
+        const CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
+        const BLOCK_HASH_HEX: &str =
+            "d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296";
+
+        fn verified_address() -> Vec<u8> {
+            hex::decode(VERIFIED_ADDRESS_HEX).unwrap()
+        }
+
+        // A fresh devnet engine (V20 active) with FID3_FOR_TEST registered so the fixture
+        // verification can merge.
+        async fn new_verifier_engine() -> (ShardEngine, tempfile::TempDir) {
+            let (mut engine, tmpdir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+            test_helper::register_user(
+                FID3_FOR_TEST,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            (engine, tmpdir)
+        }
+
+        fn verification_add(timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_add(
+                FID3_FOR_TEST,
+                0,
+                verified_address(),
+                hex::decode(CLAIM_SIGNATURE_HEX).unwrap(),
+                hex::decode(BLOCK_HASH_HEX).unwrap(),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn verification_remove(timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_remove(
+                FID3_FOR_TEST,
+                verified_address(),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        // The next fan-out block-event seqnum for THIS engine. Block events are silently skipped
+        // unless their seqnum is exactly max+1; querying it keeps the tests robust to any other
+        // block events (they never advance on this single-shard test path today, but we don't
+        // assume that).
+        fn next_seqnum(engine: &ShardEngine) -> u64 {
+            engine
+                .get_stores()
+                .block_event_store
+                .max_seqnum()
+                .unwrap_or(0)
+                + 1
+        }
+
+        async fn apply_channel_event(engine: &mut ShardEngine, event: OnChainEvent) {
+            let seqnum = next_seqnum(engine);
+            let block_event = events_factory::create_merge_on_chain_event_event(event, seqnum);
+            test_helper::commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        // Register `channel_key` to `owner` via the channel-register block-event fold path (populates
+        // the shard's own ByOwnerAddress replica). REGISTER hint fires as a side effect.
+        async fn register_channel(engine: &mut ShardEngine, channel_key: &str, owner: Vec<u8>) {
+            let event = events_factory::create_channel_register_event(
+                channel_key,
+                keccak256(channel_key.as_bytes()).to_vec(),
+                owner,
+                1_900_000_000,
+                proto::ChannelRegisterEventType::Register,
+                (next_seqnum(engine) as u32) + 1000, // block_number: strictly increasing, arbitrary
+                0,
+            );
+            apply_channel_event(engine, event).await;
+        }
+
+        // Transfer the channel labeled by `label_source` to `new_owner`. A transfer carries the
+        // label (not the channel_key) and the new owner.
+        async fn transfer_channel(
+            engine: &mut ShardEngine,
+            label_source: &str,
+            new_owner: Vec<u8>,
+            block_number: u32,
+        ) {
+            let event = events_factory::create_channel_register_event(
+                "",
+                keccak256(label_source.as_bytes()).to_vec(),
+                new_owner,
+                0,
+                proto::ChannelRegisterEventType::Transfer,
+                block_number,
+                0,
+            );
+            apply_channel_event(engine, event).await;
+        }
+
+        fn channel_owner_address(engine: &ShardEngine, channel_key: &str) -> Option<Vec<u8>> {
+            engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(channel_key, None)
+                .unwrap()
+                .map(|owner| owner.owner_address)
+        }
+
+        fn owner_change_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.r#type == HubEventType::ChannelOwnerChangeHint as i32)
+                .collect()
+        }
+
+        // Decode a hint's body. Every event reaching this is already filtered to
+        // `type == ChannelOwnerChangeHint` (by `owner_change_hints`), so the body variant is
+        // guaranteed; a mismatch is a test-harness bug and panics loudly.
+        fn hint_body(hint: &HubEvent) -> &proto::ChannelOwnerChangeHintBody {
+            match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            }
+        }
+
+        // Only VERIFICATION_* hints, in emission (id) order — filters out the REGISTER/TRANSFER
+        // hints that the block-event fold emits while seeding the replica.
+        fn verification_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            owner_change_hints(engine)
+                .into_iter()
+                .filter(|hint| {
+                    let cause = hint_body(hint).cause;
+                    cause == proto::ChannelOwnerChangeCause::VerificationAdd as i32
+                        || cause == proto::ChannelOwnerChangeCause::VerificationRemove as i32
+                })
+                .collect()
+        }
+
+        fn assert_hint(
+            hint: &HubEvent,
+            channel_key: &str,
+            owner_address: &[u8],
+            cause: proto::ChannelOwnerChangeCause,
+        ) {
+            let body = hint_body(hint);
+            assert_eq!(body.channel_key, channel_key);
+            assert_eq!(body.owner_address, owner_address);
+            assert_eq!(body.cause, cause as i32);
+            assert!(hint.id > 0, "hint must carry a normal (nonzero) event id");
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_for_channel_owner_emits_one_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            test_helper::commit_message(&mut engine, &verification_add(ts)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(
+                hints.len(),
+                1,
+                "one VERIFICATION_ADD hint for the owned channel"
+            );
+            assert_hint(
+                &hints[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_for_non_owner_emits_no_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            // A channel exists, but it's owned by a DIFFERENT address — the verified address owns
+            // nothing, so the scan is empty.
+            register_channel(&mut engine, "pets", vec![0xAB; 20]).await;
+
+            let ts = messages_factory::farcaster_time();
+            test_helper::commit_message(&mut engine, &verification_add(ts)).await;
+
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "no hint when the verified address owns no channels"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_emits_hints_in_ascending_channel_key_order() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            // Register three channels owned by the verified address in NON-sorted order; the
+            // replica scan is by ascending key, so hints must come out apple, banana, cherry.
+            register_channel(&mut engine, "banana", verified_address()).await;
+            register_channel(&mut engine, "cherry", verified_address()).await;
+            register_channel(&mut engine, "apple", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            test_helper::commit_message(&mut engine, &verification_add(ts)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 3, "one hint per owned channel");
+            for (hint, channel_key) in hints.iter().zip(["apple", "banana", "cherry"]) {
+                assert_hint(
+                    hint,
+                    channel_key,
+                    &verified_address(),
+                    proto::ChannelOwnerChangeCause::VerificationAdd,
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_verification_remove_emits_hint_with_remove_cause() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            // Add first (so the remove has something to remove and merges), then remove.
+            test_helper::commit_message(&mut engine, &verification_add(ts)).await;
+            test_helper::commit_message(&mut engine, &verification_remove(ts + 1)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 2, "one ADD hint, then one REMOVE hint");
+            assert_hint(
+                &hints[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[1],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationRemove,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_failed_verification_merge_emits_no_hint() {
+            // The hook lives only in the merge loop's `Ok(merge_events)` arm, so a verification
+            // that does not newly merge produces no hint even though the address owns a channel.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            let add = verification_add(ts);
+            test_helper::commit_message(&mut engine, &add).await;
+            assert_eq!(verification_hints(&engine).len(), 1, "first add hints once");
+
+            // Re-submit the identical verification. It does not merge again (duplicate/no-op), so
+            // the Ok-arm hook never runs a second time — the VERIFICATION_ADD hint count stays 1.
+            let state_change = engine.propose_state_change(
+                1,
+                vec![MempoolMessage::UserMessage(add.clone())],
+                None,
+            );
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+            assert_eq!(
+                verification_hints(&engine).len(),
+                1,
+                "a non-merging (duplicate) verification adds no hint"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_verification_merge_survives_corrupt_replica() {
+            // THE structural-safety pin. Corrupt the shard's ByOwnerAddress replica so the scan's
+            // UTF-8 decode fails, then merge a real Ethereum verification for that address. The
+            // merge MUST still succeed and be trie-indexed; the hook warns and emits no hint. The
+            // merge is provably unaffected by replica corruption.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            // Write garbage bytes under a ByOwnerAddress key for the verified address: the
+            // channel_key suffix is invalid UTF-8, so `get_channel_keys_by_owner_address`'s
+            // `String::from_utf8` errors and the whole scan returns Err.
+            let mut corrupt_key = vec![
+                RootPrefix::OnChainEvent as u8,
+                OnChainEventPostfix::ChannelRegisterByOwnerAddress as u8,
+            ];
+            corrupt_key.extend_from_slice(&verified_address());
+            corrupt_key.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 channel_key
+            let mut txn = RocksDbTransactionBatch::new();
+            txn.put(corrupt_key, vec![1u8]);
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            let ts = messages_factory::farcaster_time();
+            let add = verification_add(ts);
+            test_helper::commit_message(&mut engine, &add).await;
+
+            // The verification merged and is trie-indexed — untouched by the replica corruption.
+            assert!(
+                test_helper::message_exists_in_trie(&mut engine, &add),
+                "the verification must merge and be trie-indexed despite replica corruption"
+            );
+            assert_eq!(
+                1,
+                engine
+                    .get_verifications_by_fid(FID3_FOR_TEST)
+                    .unwrap()
+                    .messages
+                    .len(),
+                "the verification is present in the store"
+            );
+            // The corrupt scan errored out, so no hint (or partial) — never a merge failure.
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "corrupt replica yields no hint, not a failed merge"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_hints_do_not_touch_the_trie() {
+            // Trie discipline: emitting AND persisting a verification hint mutates zero trie
+            // state. The hook is invoked directly on a populated replica and the shard root is
+            // captured before and after — it must be byte-identical. Hints flow to the event
+            // store only; the hook never calls `update_trie`, and `for_hub_event` pins
+            // `ChannelOwnerChangeHintBody` to zero trie keys, so a hint contributes nothing to the
+            // root. (A two-engine before/after of the full merge is confounded by the random
+            // transaction_hash the onchain-event factory stamps on register_user's trie-indexed
+            // events, so this isolates the hook itself, deterministically.)
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let root_before = engine.trie_root_hash();
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+            );
+            assert_eq!(hints.len(), 1, "the hook emits the hint");
+            // Persist the hint's writes: only the event store is touched, never the trie.
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "emitting and persisting a hint must not touch the shard root"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_pre_v20_gate_suppresses_hints_on_a_populated_replica() {
+            // The pre-V20 gate on the exact state no running network exhibits: a populated
+            // replica with the feature off. Built on devnet (so the replica exists), then the
+            // hook is called directly with a pre-V20 vs V20 version — the ONLY difference between
+            // "no hints" and "the hint" is the version, proving the gate is the discriminator.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            let mut txn_pre = RocksDbTransactionBatch::new();
+            let pre_v20 = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn_pre,
+                EngineVersion::V19,
+            );
+            assert!(
+                pre_v20.is_empty(),
+                "pre-V20 (feature off) emits no hint even on a populated replica"
+            );
+
+            let mut txn_v20 = RocksDbTransactionBatch::new();
+            let v20 = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn_v20,
+                EngineVersion::V20,
+            );
+            assert_eq!(v20.len(), 1, "the same inputs at V20 emit the hint");
+            assert_hint(
+                &v20[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_solana_verification_emits_no_hint() {
+            // Solana verifications never own channels: the replica holds validated 20-byte EVM
+            // addresses only, so the hook gates on protocol == Ethereum. A Solana verification can
+            // not merge through the normal path in a unit test (no ed25519 fixture), so we pin the
+            // protocol gate directly: the same verified address owns a channel, but flipping the
+            // body's protocol to Solana suppresses the hint that the Ethereum path would emit.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let mut solana_add = verification_add(messages_factory::farcaster_time());
+            if let Some(proto::message_data::Body::VerificationAddAddressBody(body)) =
+                solana_add.data.as_mut().and_then(|data| data.body.as_mut())
+            {
+                body.protocol = proto::Protocol::Solana as i32;
+            }
+
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &solana_add,
+                &mut txn,
+                EngineVersion::V20,
+            );
+            assert!(
+                hints.is_empty(),
+                "a Solana-protocol verification takes no hint even when the address owns a channel"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_malformed_verification_body_skips_without_panic() {
+            // Adversarial-input pin (plan risk 1): the message body is untrusted network input.
+            // A message whose type passes the filter but whose body is missing or the WRONG
+            // variant — plus one with no `data` at all — must hit the warn-and-skip path: no
+            // hint, and crucially no panic (no unwrap on body/message data). The replica is
+            // populated for this address, so a well-formed body WOULD emit; the empties below are
+            // the malformed body's doing, not an empty replica.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            // Sanity: a well-formed add for this owner emits one hint (so "empty" below is meaningful).
+            let mut txn = RocksDbTransactionBatch::new();
+            assert_eq!(
+                engine
+                    .emit_channel_owner_hints_for_verification(
+                        &verification_add(messages_factory::farcaster_time()),
+                        &mut txn,
+                        EngineVersion::V20,
+                    )
+                    .len(),
+                1,
+                "sanity: a well-formed add for this owner emits one hint"
+            );
+
+            // 1. type == VerificationAddEthAddress but body = None.
+            let mut no_body = verification_add(messages_factory::farcaster_time());
+            no_body.data.as_mut().unwrap().body = None;
+
+            // 2. type == VerificationAddEthAddress but body is a DIFFERENT (Remove) variant.
+            let mut wrong_variant = verification_add(messages_factory::farcaster_time());
+            wrong_variant.data.as_mut().unwrap().body = Some(
+                proto::message_data::Body::VerificationRemoveBody(proto::VerificationRemoveBody {
+                    address: verified_address(),
+                    protocol: proto::Protocol::Ethereum as i32,
+                }),
+            );
+
+            // 3. No `data` at all — msg_type() falls back to None, so the hook takes no hint.
+            let mut no_data = verification_add(messages_factory::farcaster_time());
+            no_data.data = None;
+
+            for (label, msg) in [
+                ("body = None", &no_body),
+                ("wrong body variant", &wrong_variant),
+                ("data = None", &no_data),
+            ] {
+                let mut txn = RocksDbTransactionBatch::new();
+                let hints = engine.emit_channel_owner_hints_for_verification(
+                    msg,
+                    &mut txn,
+                    EngineVersion::V20,
+                );
+                assert!(
+                    hints.is_empty(),
+                    "malformed message ({label}) must emit no hint and not panic"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_hint_fan_out_is_capped() {
+            // One verification for an address owning many channels must not emit an
+            // unbounded number of hints — that would draw down the shared 16384/block
+            // event-id budget. Drive the cap at a small value via the `_capped` seam:
+            // 5 owned channels registered in non-sorted order, cap 3 → exactly the 3
+            // LOWEST channel_keys, in ascending order (truncation is order-deterministic,
+            // not insertion-ordered). Production uses the 256 constant.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["e", "b", "d", "a", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                3,
+            );
+
+            assert_eq!(hints.len(), 3, "fan-out truncated to the cap");
+            for (hint, channel_key) in hints.iter().zip(["a", "b", "c"]) {
+                assert_hint(
+                    hint,
+                    channel_key,
+                    &verified_address(),
+                    proto::ChannelOwnerChangeCause::VerificationAdd,
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_production_wrapper_caps_fan_out_at_the_constant() {
+            // The truncation tests above drive the `_capped` seam with a small max, so they
+            // pass regardless of what the PUBLIC wrapper forwards — a regression that made the
+            // wrapper pass `usize::MAX` (removing the very budget bound this feature adds) would
+            // leave them green. This test guards the one production seam: register CAP+1 channels
+            // to a single address, call the public wrapper (no explicit max), and assert it
+            // truncates to exactly `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION`. Uses the constant
+            // (not a literal) so the expectation follows any future change to the cap.
+            let cap = ShardEngine::MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION;
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for i in 0..(cap + 1) {
+                // Zero-padded so ascending byte order is stable and distinct per channel.
+                register_channel(&mut engine, &format!("chan_{:04}", i), verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+            );
+
+            assert_eq!(
+                hints.len(),
+                cap,
+                "public wrapper must truncate fan-out to MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION",
+            );
+        }
+
+        #[tokio::test]
+        async fn test_truncated_hints_do_not_touch_the_trie() {
+            // Truncation must be as trie-inert as normal emission: capping the fan-out
+            // mutates zero trie state, so it can never move the shard root (and thus can
+            // never affect the merge). Mirrors `test_hints_do_not_touch_the_trie`, but on
+            // the truncation path. (That a REAL merge survives ANY hook outcome — error,
+            // empty, or this truncation, which is strictly milder than the scan error
+            // tested there — is pinned by `test_verification_merge_survives_corrupt_replica`.)
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c", "d", "e"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let root_before = engine.trie_root_hash();
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                3,
+            );
+            assert_eq!(hints.len(), 3, "the cap truncated to 3 hints");
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "emitting truncated hints must not touch the shard root"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_cap_above_owned_count_emits_every_hint() {
+            // Regression guard: the cap only truncates when owned channels EXCEED it.
+            // With the cap well above the owned count, every owned channel still gets a
+            // hint — the normal path is unchanged by the cap.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                256,
+            );
+
+            assert_eq!(
+                hints.len(),
+                3,
+                "a cap above the owned count emits one hint per channel"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_end_to_end_ownership_lifecycle() {
+            // Capstone: a channel is registered by one address, transferred to the verified
+            // address, then verified and unverified — exercising all four hint causes across the
+            // block-event and user-message paths, with GetChannelOwner resolving correctly after
+            // each step.
+            //
+            // Order note: the plan sketches register → verify → transfer → remove, but a transfer
+            // that moves a channel AWAY from an address strands it (the address then owns nothing,
+            // so a later remove correctly emits no hint). To exercise a meaningful closing
+            // VERIFICATION_REMOVE, the transfer here moves the channel TO the verified address
+            // before it verifies: register(other) → transfer(→verified) → verify → remove. All
+            // four causes fire once each.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            let other_owner = vec![0xAA; 20];
+
+            // 1. REGISTER "art" to another address.
+            register_channel(&mut engine, "art", other_owner.clone()).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(other_owner.clone()),
+                "after register, owner is the original address"
+            );
+
+            // 2. TRANSFER "art" to the verified address.
+            transfer_channel(&mut engine, "art", verified_address(), 2_000_000_000).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "after transfer, owner is the verified address"
+            );
+
+            // 3. VERIFICATION_ADD for the verified address (now owns "art").
+            let ts = messages_factory::farcaster_time();
+            test_helper::commit_message(&mut engine, &verification_add(ts)).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "verification does not change registry ownership"
+            );
+
+            // 4. VERIFICATION_REMOVE for the verified address (still owns "art").
+            test_helper::commit_message(&mut engine, &verification_remove(ts + 1)).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "removing a verification does not change registry ownership"
+            );
+
+            // The full hint sequence across both paths, in emission order.
+            let hints = owner_change_hints(&engine);
+            let causes: Vec<i32> = hints.iter().map(|hint| hint_body(hint).cause).collect();
+            assert_eq!(
+                causes,
+                vec![
+                    proto::ChannelOwnerChangeCause::Register as i32,
+                    proto::ChannelOwnerChangeCause::Transfer as i32,
+                    proto::ChannelOwnerChangeCause::VerificationAdd as i32,
+                    proto::ChannelOwnerChangeCause::VerificationRemove as i32,
+                ],
+                "all four causes fire once each, in lifecycle order"
+            );
+            // Every hint concerns "art"; the two verification hints carry the verified address.
+            assert_hint(
+                &hints[2],
+                "art",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[3],
+                "art",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationRemove,
+            );
+        }
+    }
 }

@@ -55,6 +55,7 @@ pub enum ProtocolFeature {
     BlockLinks,
     ChannelRegistrations,
     SortedBlockEngineEvents,
+    ChannelOwnershipEvents,
 }
 
 pub struct VersionSchedule {
@@ -278,11 +279,15 @@ impl EngineVersion {
             // *canonical ordering* of shard-0 system messages. If SortedBlockEngineEvents ever
             // lagged ChannelRegistrations, BlockEngine would accept channel-register events but
             // replay them unsorted, reintroducing the same-eth-block owner divergence this fix
-            // closes. Kept in one arm so they share the V20 boundary; the lock-step invariant is
-            // enforced by `test_channel_registrations_and_sorted_events_activate_together`.
-            ProtocolFeature::ChannelRegistrations | ProtocolFeature::SortedBlockEngineEvents => {
-                self >= &EngineVersion::V20
-            }
+            // closes. ChannelOwnershipEvents gates the shard-0 -> data-shard fan-out of those
+            // registrations (and the ownership-change hints derived from them); it shares the same
+            // boundary so no fanned history is ever missing (registrations cannot exist before the
+            // gate opens, and it opens at the same instant), making backfill unnecessary. Kept in
+            // one arm so all three share the V20 boundary; the lock-step invariant is enforced by
+            // `test_channel_registrations_sorted_events_and_ownership_activate_together`.
+            ProtocolFeature::ChannelRegistrations
+            | ProtocolFeature::SortedBlockEngineEvents
+            | ProtocolFeature::ChannelOwnershipEvents => self >= &EngineVersion::V20,
         }
     }
 
@@ -734,18 +739,62 @@ mod version_test {
     }
 
     #[test]
-    fn test_channel_registrations_and_sorted_events_activate_together() {
-        // CONSENSUS INVARIANT: these two features must be enabled at the exact same versions.
+    fn test_channel_ownership_events_feature_gate() {
+        // Gate closed below V20, open at V20+. handle_block_event consults this boundary before
+        // admitting a MergeOnChainEvent BlockEvent, so pin it explicitly.
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V20.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+            true
+        );
+    }
+
+    #[test]
+    fn test_channel_ownership_events_activation_schedule() {
+        // V20 is unscheduled on mainnet/testnet: the feature must stay dormant there even far in
+        // the future, and active on devnet (which always runs the latest version). Asserted via
+        // is_enabled rather than a pinned version so this only breaks when V20 (or a later
+        // version) is scheduled, not when unrelated earlier versions are.
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::ChannelOwnershipEvents)
+        );
+    }
+
+    #[test]
+    fn test_channel_registrations_sorted_events_and_ownership_activate_together() {
+        // CONSENSUS INVARIANT: these three features must be enabled at the exact same versions.
         // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
         // channel-register events but replay them unsorted, reintroducing the same-eth-block
-        // channel-owner divergence this fix closes. This test fails CI if a future change splits
-        // their activation boundaries.
+        // channel-owner divergence this fix closes. ChannelOwnershipEvents gates the fan-out of
+        // those registrations; if it lagged, a registration could be admitted with no shard ever
+        // fanning it out (or, mixed across binaries, diverge on which blocks fan out). This test
+        // fails CI if a future change splits any of their activation boundaries.
         use strum::IntoEnumIterator;
         for version in EngineVersion::iter() {
+            let channel_registrations = version.is_enabled(ProtocolFeature::ChannelRegistrations);
             assert_eq!(
-                version.is_enabled(ProtocolFeature::ChannelRegistrations),
+                channel_registrations,
                 version.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
                 "ChannelRegistrations and SortedBlockEngineEvents must co-activate; they differ at {:?}",
+                version
+            );
+            assert_eq!(
+                channel_registrations,
+                version.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+                "ChannelRegistrations and ChannelOwnershipEvents must co-activate; they differ at {:?}",
                 version
             );
         }

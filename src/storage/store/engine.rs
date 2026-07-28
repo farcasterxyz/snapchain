@@ -1,4 +1,7 @@
-use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use super::account::{
+    fold_channel_register_replica, get_channel_keys_by_owner_address, IntoU8,
+    OnchainEventStorageError, UserDataStore, UsernameProofStore,
+};
 use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
@@ -711,8 +714,381 @@ impl ShardEngine {
                 }
                 Ok(hub_events)
             }
+            proto::block_event_data::Body::MergeOnChainEventEventBody(merge_on_chain_event) => {
+                let on_chain_event = merge_on_chain_event
+                    .on_chain_event
+                    .as_ref()
+                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                // Same gating home as the MergeMessage arm above: any shard-0-fanned BlockEvent
+                // type gates here, not at the call site. The inactive path returns
+                // `InvalidMessageType` (mirroring the MergeMessage arm) so a pre-feature replay
+                // surfaces a `warn!` through the caller's error arm instead of merging into a
+                // store the rest of the code can't reason about. The gate ships WITH the type:
+                // a type that can merge before its gate exists is a permanent replay divergence.
+                let block_ts = block_event.block_timestamp();
+                let version =
+                    EngineVersion::version_for(&FarcasterTime::new(block_ts), self.network);
+                if !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents) {
+                    warn!(
+                        onchain_event_type = on_chain_event.r#type,
+                        seqnum = block_event.seqnum(),
+                        block_timestamp = block_ts,
+                        "Skipping MergeOnChainEvent BlockEvent replay: feature not yet active for block timestamp"
+                    );
+                    return Err(
+                        MessageValidationError::InvalidMessageType(on_chain_event.r#type).into(),
+                    );
+                }
+                // Feature active: fold the fanned-out event into this shard's own replica.
+                // Shard 0 only fans channel-register events today; anything else is warned
+                // and dropped (the arm must not assume that forever).
+                if on_chain_event.r#type() != OnChainEventType::EventTypeChannelRegister {
+                    warn!(
+                        onchain_event_type = on_chain_event.r#type,
+                        seqnum = block_event.seqnum(),
+                        "Skipping MergeOnChainEvent BlockEvent replay: unexpected onchain event type"
+                    );
+                    return Ok(vec![]);
+                }
+                // Replica fold: secondary indexes only against this shard's OnchainEventStore
+                // — no primary-event write, no trie mutation (the hint contributes zero trie
+                // keys, pinned by merkle_trie tests). `Err` propagates to the caller, which
+                // warns and continues — same surface as the MergeMessage arm.
+                //
+                // route_fid(0) is the one data shard that ALSO merges this event via the
+                // system-message path, so it folds the event into this same store twice. The
+                // LWW comparator is strict `<`: re-applying at the SAME chain position rewrites
+                // byte-identical values and still reports the change, so the single-event (and
+                // latest-in-a-burst) case hints here exactly as on every fan-out-only shard.
+                // But the system-message path leads the fan-out, so for a rapid same-channel
+                // burst it can advance this shard's owner index PAST an earlier fanned event;
+                // that earlier event then loses the strict-`<` LWW here, writes nothing, and
+                // emits no hint on THIS shard (it still hinted on every shard that applies the
+                // fan-out alone). Final owner state converges regardless, and the outcome is
+                // deterministic per chain history. This per-shard coalescing is exactly what
+                // the hint consumer contract documents (see hub_event.proto): the latest update
+                // hints everywhere, but no single shard's stream is guaranteed to carry every
+                // hint — consumers subscribe to all shards and treat hints as re-read triggers.
+                let fold_outcome = match fold_channel_register_replica(
+                    &self.stores.onchain_event_store.db,
+                    txn_batch,
+                    on_chain_event,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        // Off-trie replica fold: unlike the trie-backed MergeMessage arm, a
+                        // failure here leaves NO shard-root mismatch, so consensus can't flag
+                        // the resulting ownership-index drift. Count it and log at error! so
+                        // silent divergence is detectable in aggregate rather than buried in
+                        // the caller's generic block-event warn. Still propagates to the
+                        // caller's warn-and-continue path (control flow unchanged); whether a
+                        // fold failure should instead force block-event re-replay is a separate,
+                        // consensus-sensitive decision left out of this change.
+                        self.metrics
+                            .count("channel_owner_replica_fold_failed", 1, vec![]);
+                        error!(
+                            seqnum = block_event.seqnum(),
+                            block_number = on_chain_event.block_number,
+                            log_index = on_chain_event.log_index,
+                            onchain_event_type = on_chain_event.r#type,
+                            "channel-owner replica fold failed; ownership index may be stale on this shard: {}",
+                            err.to_string()
+                        );
+                        return Err(err.into());
+                    }
+                };
+                match fold_outcome {
+                    None => Ok(vec![]),
+                    Some(change) => {
+                        // Emit exactly one hint. `commit_transaction` assigns its event id
+                        // (a normal incrementing seq via HubEventIdGenerator's wildcard arm)
+                        // and persists it, exactly as the store merge paths do for their
+                        // events — so the hint is subscriber-visible on this shard's stream.
+                        let mut hint = HubEvent::new_event(
+                            HubEventType::ChannelOwnerChangeHint,
+                            hub_event::Body::ChannelOwnerChangeHintBody(
+                                proto::ChannelOwnerChangeHintBody {
+                                    channel_key: change.channel_key,
+                                    owner_address: change.owner_address,
+                                    cause: change.cause as i32,
+                                },
+                            ),
+                        );
+                        let id = match self
+                            .stores
+                            .event_handler
+                            .commit_transaction(txn_batch, &mut hint)
+                        {
+                            Ok(id) => id,
+                            Err(err) => {
+                                // The owner index already advanced in this txn_batch, but the
+                                // hint — the re-read trigger — failed to persist. If nothing
+                                // else touches this channel, consumers get no signal to re-read,
+                                // so surface it at error! with a distinct counter. Propagates as
+                                // before (caller warns and continues).
+                                self.metrics
+                                    .count("channel_owner_hint_commit_failed", 1, vec![]);
+                                error!(
+                                    seqnum = block_event.seqnum(),
+                                    block_number = on_chain_event.block_number,
+                                    log_index = on_chain_event.log_index,
+                                    "channel-owner hint persist failed; owner index advanced but no hint emitted on this shard: {}",
+                                    err.to_string()
+                                );
+                                return Err(err.into());
+                            }
+                        };
+                        hint.id = id;
+                        Ok(vec![hint])
+                    }
+                }
+            }
             proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
         }
+    }
+
+    /// Per-verification cap on channel-owner hints. An unbounded fan-out could let a
+    /// single verification exhaust the shared 16384/block HubEvent id budget (see the
+    /// hook's SHARED-BUDGET COUPLING note). One verification's hints must stay a small
+    /// fraction of that budget so a single message can never approach exhaustion; 256
+    /// is ~1.6% of the budget, far above any plausible single-owner channel count, and
+    /// well below the block-safety threshold. An address owning more than this has its
+    /// hint set truncated in ascending key order (deterministic across nodes);
+    /// consumers reconcile the full set via `GetChannelOwner`.
+    pub(crate) const MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION: usize = 256;
+
+    /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
+    /// verification whose verified address owns one or more channels, by scanning
+    /// THIS shard's own ByOwnerAddress replica (the trie-free ownership index built
+    /// by the channel-register block-event fold). Called only from the user-message
+    /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
+    ///
+    /// STRUCTURAL SAFETY CONTRACT (the rule this hook lives or dies by): this
+    /// hook never sees the merge result, `validation_errors`, or the trie, so it
+    /// cannot change what merged or the shard root *directly*. Its effects are: (1) the
+    /// `Vec<HubEvent>` it returns, which the caller `events.extend(...)`s, and (2) the
+    /// trie-free hint events it commits into the caller's `txn_batch` via
+    /// `commit_transaction`. Every error — a missing/malformed body, a replica
+    /// read/decode error, an event-persist error — is swallowed with a `warn!` and
+    /// yields fewer hints, never an `Err`, never a panic on message/body data. Do NOT
+    /// add a `?`, an `Err` early-return, or an unwrap on message/body data here. (The
+    /// one non-message panic path, `commit_transaction`'s poisoned-mutex
+    /// `lock().unwrap()`, is shared with the whole merge loop and would already have
+    /// aborted upstream — this hook adds no new panic surface.)
+    ///
+    /// SHARED-BUDGET COUPLING — bounded by a per-verification cap. Effect (2) advances
+    /// the block-scoped, 14-bit `HubEventIdGenerator` sequence (`SEQUENCE_BITS`, 16384
+    /// events/block) that this hook SHARES with the merge loop and the mandatory
+    /// `BlockConfirmed` commit. An
+    /// unbounded fan-out (one verification → N hints for N owned channels) would let a
+    /// single verification against an address owning ~16k channels exhaust that shared
+    /// budget within the block — failing later merges (`commit_transaction(...)?`) and
+    /// tripping `BlockConfirmed`'s `.unwrap()`. So the fan-out is capped at
+    /// `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION`: one verification can never draw more
+    /// than a small fraction of the block budget, restoring the property that flooding
+    /// requires many independently rate-limited messages. Truncation is contract-legal
+    /// — the amended `hub_event.proto` already tells consumers a shard may not carry
+    /// every hint; they reconcile via `GetChannelOwner`. Hints emit in ascending key
+    /// order, so WHICH channels survive truncation is deterministic across all nodes.
+    /// (The pre-existing `BlockConfirmed` `.unwrap()` fragility is a separate,
+    /// out-of-scope follow-up.)
+    ///
+    /// Hints are deliberately NOT trie-indexed. The sibling `merge_events` flow
+    /// through the `update_trie` loop at the call site; these hints are appended to
+    /// `events` strictly AFTER that loop and never reach `update_trie`.
+    /// `for_hub_event` pins `ChannelOwnerChangeHintBody` to zero trie keys, so a
+    /// hint contributes nothing to the shard root (asserted by the trie-discipline
+    /// test). The address is Ethereum-only: the replica stores validated 20-byte EVM
+    /// addresses, and Solana verifications never own channels, so they take no hint.
+    ///
+    /// `pub(crate)` only so tests can pin the two edges unreachable through any
+    /// running network: the pre-V20 gate and the Solana-protocol skip. The V20 fork
+    /// both opens the gate AND enables the replica fold, so no live network ever has
+    /// a populated replica with the feature off — that state exists only when the
+    /// hook is called directly with an explicit pre-V20 `version`. Production has a
+    /// single caller (the user-message merge loop).
+    pub(crate) fn emit_channel_owner_hints_for_verification(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        version: EngineVersion,
+    ) -> Vec<HubEvent> {
+        self.emit_channel_owner_hints_for_verification_capped(
+            msg,
+            txn_batch,
+            version,
+            Self::MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION,
+        )
+    }
+
+    /// Cap-parameterized body of [`Self::emit_channel_owner_hints_for_verification`].
+    /// `max` is `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION` in the single production
+    /// call (the public wrapper above); it is a parameter, and this is `pub(crate)`,
+    /// ONLY so a test can drive the truncation path at a small `max` without
+    /// registering hundreds of channels. Do not call this from production with any
+    /// other value.
+    pub(crate) fn emit_channel_owner_hints_for_verification_capped(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        version: EngineVersion,
+        max: usize,
+    ) -> Vec<HubEvent> {
+        if !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents) {
+            return vec![];
+        }
+
+        // Extract (verified address, cause) for Ethereum verification add/remove
+        // only. Any missing/malformed body warns and skips; a non-Ethereum protocol
+        // (or any other message type) silently takes no hint.
+        let body = msg.data.as_ref().and_then(|data| data.body.as_ref());
+        let (address, cause) = match msg.msg_type() {
+            MessageType::VerificationAddEthAddress => match body {
+                Some(Body::VerificationAddAddressBody(add)) => {
+                    if add.protocol() != Protocol::Ethereum {
+                        return vec![];
+                    }
+                    (
+                        add.address.clone(),
+                        proto::ChannelOwnerChangeCause::VerificationAdd,
+                    )
+                }
+                _ => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping channel-owner hints: VerificationAdd with missing/malformed body"
+                    );
+                    return vec![];
+                }
+            },
+            MessageType::VerificationRemove => match body {
+                Some(Body::VerificationRemoveBody(remove)) => {
+                    if remove.protocol() != Protocol::Ethereum {
+                        return vec![];
+                    }
+                    (
+                        remove.address.clone(),
+                        proto::ChannelOwnerChangeCause::VerificationRemove,
+                    )
+                }
+                _ => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping channel-owner hints: VerificationRemove with missing/malformed body"
+                    );
+                    return vec![];
+                }
+            },
+            _ => return vec![],
+        };
+
+        // Scan this shard's own ByOwnerAddress replica in ascending key order — the
+        // pinned deterministic hint order — emitting at most `max` hints. The cap
+        // bounds the fan-out so one verification can never approach the shared
+        // 16384/block event-id budget; truncation is contract-legal and, because
+        // emission is ascending-key, deterministic across nodes. Every read/persist
+        // error is swallowed with a `warn!`: the merge has
+        // already committed and stays untouchable.
+        let mut hints = vec![];
+        let mut page_token: Option<Vec<u8>> = None;
+        'scan: loop {
+            let page_options = PageOptions {
+                page_token: page_token.take(),
+                ..PageOptions::default()
+            };
+            let (channel_keys, next_page_token) = match get_channel_keys_by_owner_address(
+                &self.stores.onchain_event_store.db,
+                &address,
+                &page_options,
+            ) {
+                Ok(page) => page,
+                Err(err) => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping remaining channel-owner hints: replica scan failed: {:?}",
+                        err
+                    );
+                    break;
+                }
+            };
+
+            for channel_key in channel_keys {
+                // Cap the fan-out. `hints.len()` counts hints ACTUALLY emitted — a
+                // persist failure doesn't consume an event id, so it doesn't count
+                // toward the budget the cap protects. On reaching the cap, `warn!`
+                // once and stop the scan; the merge is unaffected and consumers
+                // reconcile the untruncated ownership set via `GetChannelOwner`.
+                if hints.len() >= max {
+                    // Signal that a verified address owns more channels than the
+                    // per-verification cap, so the aggregate-budget pressure behind
+                    // this cap is observable before it ever approaches a block-level
+                    // event-id exhaustion (see `block_hub_event_total`).
+                    self.metrics
+                        .count("channel_owner_hints.truncated", 1, vec![]);
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        owner_address = hex::encode(&address),
+                        cap = max,
+                        "Truncating channel-owner hints: verified address owns more channels than the per-verification cap"
+                    );
+                    break 'scan;
+                }
+
+                let mut hint = HubEvent::new_event(
+                    HubEventType::ChannelOwnerChangeHint,
+                    hub_event::Body::ChannelOwnerChangeHintBody(
+                        proto::ChannelOwnerChangeHintBody {
+                            channel_key,
+                            owner_address: address.clone(),
+                            cause: cause as i32,
+                        },
+                    ),
+                );
+                // `commit_transaction` assigns the id (a normal incrementing seq via
+                // HubEventIdGenerator's wildcard arm) and persists the hint so it is
+                // subscriber-visible — the same machinery every store merge path uses.
+                // A persist error skips just this hint; it never propagates.
+                match self
+                    .stores
+                    .event_handler
+                    .commit_transaction(txn_batch, &mut hint)
+                {
+                    Ok(_) => hints.push(hint),
+                    Err(err) => {
+                        warn!(
+                            fid = msg.fid(),
+                            hash = msg.hex_hash(),
+                            "Skipping a channel-owner hint: event persist failed: {:?}",
+                            err
+                        );
+                    }
+                }
+            }
+
+            // A present token means "call again" but does not guarantee more results
+            // (a page that fills exactly on the last entry yields one final empty
+            // page); a `None` token means the sequence was fully enumerated. The
+            // token strictly advances past the last scanned key, so this terminates.
+            match next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        // Fan-out size of this single emission (channels owned by the verified
+        // address, capped at `max`). Emitted as a distribution so p95/max show how
+        // large real emissions get — the leading indicator for aggregate event-id
+        // budget pressure, and a superset of the truncation counter (max nears the
+        // cap before anything truncates). Recorded on every reached-scan emission,
+        // including the common zero-hint case (address owns no channels).
+        self.metrics
+            .time_with_shard("channel_owner_hints.per_emission", hints.len() as u64);
+
+        hints
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -1017,6 +1393,15 @@ impl ShardEngine {
                                 user_messages_count += 1;
                             }
                             events.extend(merge_events.clone());
+                            // Verification-caused channel-owner hints. These ride the
+                            // user-message merge path but are STRUCTURALLY unable to affect
+                            // it: the helper swallows every error and returns only a Vec we
+                            // extend with. Appended AFTER the `update_trie` loop above and
+                            // never routed through it — hints are deliberately not
+                            // trie-indexed (see the helper's contract).
+                            events.extend(self.emit_channel_owner_hints_for_verification(
+                                msg, txn_batch, version,
+                            ));
                             message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
@@ -1799,6 +2184,12 @@ impl ShardEngine {
 
         self.metrics
             .gauge("block_event_seqnum", max_block_event_seqnum);
+        // Per-block HubEvent total (BlockConfirmed already inserted above, so this is
+        // the full count). The block-scoped id sequence caps at 2^SEQUENCE_BITS
+        // (16384); watching this gauge's headroom against that ceiling is the early
+        // warning for aggregate hint fan-out before it trips the id generator.
+        self.metrics
+            .gauge("block_hub_event_total", events.len() as u64);
 
         _ = self.emit_commit_metrics(&shard_chunk, &events);
 
