@@ -851,7 +851,7 @@ impl ShardEngine {
     /// single verification exhaust the shared 16384/block HubEvent id budget (see the
     /// hook's SHARED-BUDGET COUPLING note). One verification's hints must stay a small
     /// fraction of that budget so a single message can never approach exhaustion; 256
-    /// is ~1.5% of the budget, far above any plausible single-owner channel count, and
+    /// is ~1.6% of the budget, far above any plausible single-owner channel count, and
     /// well below the block-safety threshold. An address owning more than this has its
     /// hint set truncated in ascending key order (deterministic across nodes);
     /// consumers reconcile the full set via `GetChannelOwner`.

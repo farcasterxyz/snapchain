@@ -195,7 +195,7 @@ impl TrieKey {
             }
             Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(_)) => {
                 // Ownership-change hints are subscriber-only triggers and are deliberately
-                // trie-free: the derived channel-owner replica will be maintained via
+                // trie-free: the derived channel-owner replica is maintained via
                 // secondary indexes only, never the trie (it is rebuildable from the
                 // block-event sequence). Contributing a trie key here would alter state roots.
             }

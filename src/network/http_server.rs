@@ -2845,12 +2845,27 @@ pub fn map_proto_hub_event_to_json_hub_event(
             channel_owner_change_hint_body = Some(ChannelOwnerChangeHintBody {
                 channel_key: body.channel_key.clone(),
                 owner_address: body.owner_address.clone(),
-                cause: match body.cause {
-                    1 => ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_REGISTER,
-                    2 => ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER,
-                    3 => ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD,
-                    4 => ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE,
-                    _ => ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_NONE,
+                // Anchored to the proto enum (not raw ints) so a proto renumber/rename
+                // fails to compile here instead of silently mis-mapping, and adding a
+                // proto variant forces a decision at this arm. Runtime forward-compat is
+                // preserved: an unset cause (None) or an integer a newer producer added
+                // that this binary doesn't know (`Err`) both degrade to NONE.
+                cause: match proto::ChannelOwnerChangeCause::try_from(body.cause) {
+                    Ok(proto::ChannelOwnerChangeCause::Register) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_REGISTER
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::Transfer) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::VerificationAdd) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::VerificationRemove) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE
+                    }
+                    Ok(proto::ChannelOwnerChangeCause::None) | Err(_) => {
+                        ChannelOwnerChangeCause::CHANNEL_OWNER_CHANGE_CAUSE_NONE
+                    }
                 },
             });
         }
