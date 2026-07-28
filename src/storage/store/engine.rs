@@ -690,6 +690,12 @@ impl ShardEngine {
                     MessageType::KeyAdd | MessageType::KeyRemove => {
                         Some(ProtocolFeature::GaslessSigners)
                     }
+                    // The channel message types belong here, mapped to
+                    // `ProtocolFeature::ChannelMessages`, as soon as anything can merge them.
+                    // They are omitted only because `merge_message` rejects them outright today,
+                    // so this gate would be unreachable. That makes the wildcard fail-OPEN for
+                    // them: wire up merge dispatch without revisiting this arm and a channel
+                    // message replayed via a BlockEvent merges with no version gate at all.
                     _ => None,
                 };
                 if let Some(feature) = feature_gate {
@@ -2844,5 +2850,94 @@ mod prune_arm_tests {
             "gasless-key revocations are never pruned — expected empty event list, got {} events",
             events.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod channel_message_inertness_tests {
+    use super::MessageValidationError;
+    use crate::core::util::FarcasterTime;
+    use crate::core::validations::error::ValidationError;
+    use crate::mempool::routing::{route_message, MessageRouter, ShardRouter};
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::test_helper;
+    use crate::utils::factory::messages_factory;
+    use crate::version::version::EngineVersion;
+
+    /// Channel messages route by fid to a data shard (see
+    /// `channel_messages_continue_to_route_by_fid`), so `ShardEngine` — not `BlockEngine` — is the
+    /// admission gate they actually reach. `ShardEngine::validate_user_message`'s body dispatch
+    /// ends in `_ => {}`, which ACCEPTS unrecognized bodies, so the sole thing rejecting a channel
+    /// message here is the arm in `core::validations::message`. Assert the exact error: if a later
+    /// increment installs real body validation without gating admission on
+    /// `ProtocolFeature::ChannelMessages`, channel messages would pass submit and gossip on mainnet
+    /// while dormant. `merge_message` would still refuse them, so this is not a state divergence —
+    /// but it is exactly the accidental wiring these tests exist to catch.
+    #[tokio::test]
+    async fn channel_messages_are_rejected_by_shard_engine_validation() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let fid = 1234;
+        test_helper::register_user(
+            fid,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(fid, message_type, body, None, None);
+            let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+            let result = engine.validate_user_message(
+                &message,
+                &timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(MessageValidationError::MessageValidationError(
+                        ValidationError::InvalidMessageType
+                    ))
+                ),
+                "{:?} must be rejected by ShardEngine admission, got {:?}",
+                message_type,
+                result
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_messages_have_no_shard_engine_merge_dispatch() {
+        let (engine, _tmpdir) = test_helper::new_engine().await;
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new());
+            assert!(matches!(
+                result,
+                Err(MessageValidationError::InvalidMessageType(value))
+                    if value == message_type as i32
+            ));
+        }
+    }
+
+    #[test]
+    fn channel_messages_continue_to_route_by_fid() {
+        let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
+        let fid = 1234;
+        let num_shards = 2;
+        let expected = router.route_fid(fid, num_shards);
+        // Channel messages must land on a data shard, never shard 0 (the block shard).
+        assert_ne!(expected, 0);
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(fid, message_type, body, None, None);
+            assert_eq!(route_message(&router, &message, num_shards), expected);
+        }
     }
 }

@@ -146,6 +146,13 @@ impl Limits {
             // NEYN-10580 (shard routing) and NEYN-10573/10574 (engine handling) land.
             MessageType::KeyAdd => StoreType::None,
             MessageType::KeyRemove => StoreType::None,
+            // Channel messages have no store and no quota. Giving them one requires a new
+            // StoreType, which the compiler forces through `for_store_type` and
+            // `store_type_to_message_types` — landing the author back here.
+            MessageType::ChannelUpdate
+            | MessageType::ChannelMember
+            | MessageType::ChannelPin
+            | MessageType::ChannelModerate => StoreType::None,
             MessageType::None => StoreType::None,
         }
     }

@@ -360,9 +360,15 @@ impl Replicator {
         let messages = match user_message_type {
             // TODO(NEYN-10568): wire KeyAdd/KeyRemove into replication once shard 0 routing
             // and the signer store land (NEYN-10580, NEYN-10573, NEYN-10574).
+            // Channel messages have no backing store either, and no engine merges them, so they
+            // never enter the trie this lookup is driven by.
             proto::MessageType::FrameAction
             | proto::MessageType::KeyAdd
             | proto::MessageType::KeyRemove
+            | proto::MessageType::ChannelUpdate
+            | proto::MessageType::ChannelMember
+            | proto::MessageType::ChannelPin
+            | proto::MessageType::ChannelModerate
             | proto::MessageType::None => {
                 return Err(ReplicationError::InvalidMessage(format!(
                     "Invalid message type for FID {}: {:?}",

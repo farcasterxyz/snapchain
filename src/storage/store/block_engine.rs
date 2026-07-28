@@ -1329,3 +1329,56 @@ mod error_conversion_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod channel_message_inertness_tests {
+    use super::MessageValidationError;
+    use crate::core::util::FarcasterTime;
+    use crate::core::validations::error::ValidationError;
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::StorageSlot;
+    use crate::storage::store::block_engine_test_helpers;
+    use crate::utils::factory::messages_factory;
+    use crate::version::version::EngineVersion;
+
+    /// Today every channel body dies at `validations::message::validate_message`, which
+    /// `validate_user_message` calls before the custody lookup — so the second arm below is what
+    /// actually fires, and the fid/signer registration is never reached. Both are deliberate.
+    /// The registration keeps this test honest if a later increment installs real body validation:
+    /// execution would then reach BlockEngine's own per-body allowlist and fail there (arm one)
+    /// rather than dying at `MissingFid`, which would be a setup artifact rather than a real pin.
+    /// The disjunction therefore asserts the property that matters — BlockEngine rejects channel
+    /// messages — without pinning which of the two independent layers does it.
+    #[test]
+    fn channel_messages_are_rejected_by_block_engine_validation() {
+        let (mut engine, _tmpdir) = block_engine_test_helpers::setup();
+        let fid = 1234;
+        block_engine_test_helpers::register_user(
+            fid,
+            block_engine_test_helpers::default_signer(),
+            block_engine_test_helpers::default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(fid, message_type, body, None, None);
+            let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+            let result = engine.validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                result,
+                Err(MessageValidationError::InvalidMessageType)
+                    | Err(MessageValidationError::MessageValidationError(
+                        ValidationError::InvalidMessageType
+                    ))
+            ));
+        }
+    }
+}
