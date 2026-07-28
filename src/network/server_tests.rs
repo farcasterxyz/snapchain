@@ -33,7 +33,7 @@ mod tests {
     use crate::storage::store::account::{
         make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
         ChannelPinStore, ChannelUpdateStore, HubEventIdGenerator, HubEventStorageExt,
-        VerificationStoreDef, SEQUENCE_BITS,
+        VerificationStoreDef, CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -433,6 +433,25 @@ mod tests {
         broadcast::Sender<ShardChunk>,
         broadcast::Sender<Block>,
     ) {
+        make_server_with_slot_cap(rpc_auth, admin_rpc_auth, None).await
+    }
+
+    // Like `make_server`, but lets a test shrink the channel member/moderate slot caps so
+    // slot-boundary coverage doesn't have to insert thousands of rows. `None` keeps the
+    // production caps.
+    async fn make_server_with_slot_cap(
+        rpc_auth: Option<String>,
+        admin_rpc_auth: Option<String>,
+        channel_slot_cap_override: Option<u32>,
+    ) -> (
+        HashMap<u32, Stores>,
+        HashMap<u32, Senders>,
+        [ShardEngine; 2],
+        BlockEngine,
+        MyHubService,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+    ) {
         let (msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
         let statsd_client = StatsdClientWrapper::new(
@@ -444,6 +463,7 @@ mod tests {
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             messages_request_tx: Some(msgs_request_tx.clone()),
+            channel_slot_cap_override,
             ..Default::default()
         })
         .await;
@@ -451,6 +471,7 @@ mod tests {
             limits: Some(limits.clone()),
             messages_request_tx: Some(msgs_request_tx.clone()),
             shard_id: 2,
+            channel_slot_cap_override,
             ..Default::default()
         })
         .await;
@@ -492,6 +513,7 @@ mod tests {
         let (block_decision_tx, block_decision_rx) = broadcast::channel(1000);
         let (block_engine, _) = block_engine_test_helpers::setup_with_options(BlockEngineOptions {
             messages_request_tx: Some(msgs_request_tx),
+            channel_slot_cap_override,
             ..BlockEngineOptions::default()
         });
         let block_stores = block_engine.stores();
@@ -1788,6 +1810,14 @@ mod tests {
 
         impl ScenarioDriver {
             async fn new() -> Self {
+                Self::new_with_slot_cap(None).await
+            }
+
+            // Builds a driver whose block engine and both replicas share a shrunken channel
+            // member/moderate slot cap, so slot-boundary tests exercise the real cap-rejection
+            // path without inserting the full production 8k/16k rows. `None` uses the production
+            // caps.
+            async fn new_with_slot_cap(channel_slot_cap_override: Option<u32>) -> Self {
                 let (
                     _stores,
                     _senders,
@@ -1796,7 +1826,7 @@ mod tests {
                     service,
                     _shard_decision_tx,
                     _block_decision_tx,
-                ) = make_server(None, None).await;
+                ) = make_server_with_slot_cap(None, None, channel_slot_cap_override).await;
                 Self {
                     replicas,
                     block_engine,
@@ -1865,12 +1895,12 @@ mod tests {
                     return;
                 }
 
-                // S6 reaches the real 8k/16k caps. Replay the same contiguous, mixed-fid
-                // BlockEvent stream in batched proposals so scale coverage does not manufacture
-                // tens of thousands of one-event blocks. This direct-engine harness sits below
-                // BlockReceiver, so it must emulate BlockReceiver's durable confirmation and
-                // bounded tail re-drive guarantee when HashMap transaction grouping transiently
-                // reorders different fids and strict seqnum replay skips the unconfirmed tail.
+                // S6 fills the channel slot caps in bulk. Replay the same contiguous, mixed-fid
+                // BlockEvent stream in batched proposals so cap coverage does not manufacture one
+                // block per seeded row. This direct-engine harness sits below BlockReceiver, so it
+                // must emulate BlockReceiver's durable confirmation and bounded tail re-drive
+                // guarantee when HashMap transaction grouping transiently reorders different fids
+                // and strict seqnum replay skips the unconfirmed tail.
                 for replica in &mut self.replicas {
                     let shard_id = replica.shard_id();
                     let mut submissions = 0;
@@ -3737,11 +3767,19 @@ mod tests {
         async fn s6_member_and_moderation_caps_converge_with_paginated_by_fid_index() {
             const OWNER_FID: u64 = 7_901;
             const PAGE_FID: u64 = 7_902;
-            const MEMBER_CAP: u32 = 8_192;
-            const MODERATE_CAP: u32 = 16_384;
+            // Pin the production caps so a regression in either constant fails here. The
+            // boundary-rejection logic below (`count >= slot_cap` in `merge_slot`) is cap-value
+            // independent, so we exercise it against a shrunken shared cap instead of inserting
+            // the real 8k/16k rows — that shaves this test from ~80s to under a second in debug.
+            // The override collapses both stores to one value, hence MEMBER_CAP == MODERATE_CAP.
+            assert_eq!(CHANNEL_MEMBER_SLOT_CAP, 8_192);
+            assert_eq!(CHANNEL_MODERATE_SLOT_CAP, 16_384);
+            const SLOT_CAP: u32 = 24;
+            const MEMBER_CAP: u32 = SLOT_CAP;
+            const MODERATE_CAP: u32 = SLOT_CAP;
             const SCENARIO_EXPIRY: u64 = u64::MAX;
 
-            let mut driver = ScenarioDriver::new().await;
+            let mut driver = ScenarioDriver::new_with_slot_cap(Some(SLOT_CAP)).await;
             let owner_address = owner_address(0xF1);
             driver.register_user(OWNER_FID, owner_address.clone(), 1);
             driver.sync_new_block_events().await;

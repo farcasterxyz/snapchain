@@ -327,6 +327,12 @@ pub struct StoreOptions {
 
     // Whether to save hub events to the database
     pub(crate) save_hub_events: bool,
+
+    // Test-only override for the channel slot caps (member/moderate). `None` uses the
+    // production caps (`CHANNEL_MEMBER_SLOT_CAP`/`CHANNEL_MODERATE_SLOT_CAP`); a small value lets
+    // slot-boundary tests exercise the cap without inserting thousands of rows. Uncapped channel
+    // stores (update/pin) ignore this. Never set outside tests.
+    pub(crate) channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for StoreOptions {
@@ -334,6 +340,7 @@ impl Default for StoreOptions {
         StoreOptions {
             conflict_free: false,
             save_hub_events: true,
+            channel_slot_cap_override: None,
         }
     }
 }

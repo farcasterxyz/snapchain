@@ -24,7 +24,7 @@ use crate::proto::{
     ShardHash, ShardHeader, Transaction,
 };
 use crate::proto::{MessagesResponse, OnChainEvent};
-use crate::storage::store::account::MessagesPage;
+use crate::storage::store::account::{MessagesPage, StoreOptions};
 use crate::storage::store::engine::{PostCommitMessage, ShardStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 #[allow(unused_imports)] // Used by cfg(test)
@@ -139,6 +139,8 @@ pub struct EngineOptions {
     pub fname_signer_address: Option<alloy_primitives::Address>,
     pub shard_id: u32,
     pub post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+    // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
+    pub channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for EngineOptions {
@@ -151,6 +153,7 @@ impl Default for EngineOptions {
             fname_signer_address: None,
             shard_id: 1,
             post_commit_tx: None,
+            channel_slot_cap_override: None,
         }
     }
 }
@@ -184,7 +187,7 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
     ));
 
     (
-        ShardEngine::new(
+        ShardEngine::new_with_opts(
             db,
             options.network.unwrap_or(proto::FarcasterNetwork::Devnet), // So all protocol features are enabled by default
             merkle_trie::MerkleTrie::new().unwrap(),
@@ -195,6 +198,10 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
             options.messages_request_tx,
             options.fname_signer_address,
             options.post_commit_tx,
+            StoreOptions {
+                channel_slot_cap_override: options.channel_slot_cap_override,
+                ..Default::default()
+            },
         )
         .await
         .unwrap(),

@@ -686,6 +686,7 @@ impl ReplicatorBootstrap {
         let store_opts = StoreOptions {
             conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
             save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
+            ..Default::default()
         };
 
         // Initialize the shared engine and trie that will be used by all the vts tasks working on this shard

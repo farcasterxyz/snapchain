@@ -101,21 +101,26 @@ pub struct ChannelPage<T> {
 #[derive(Clone)]
 pub struct ChannelUpdateStoreDef {
     prune_size_limit: u32,
+    // Resolved slot cap; `None` for uncapped stores. See `define_channel_store!`.
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelMemberStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelPinStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelModerateStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 fn invalid_body(store_name: &str) -> HubError {
@@ -589,6 +594,10 @@ impl ChannelSlotStoreDef for ChannelUpdateStoreDef {
         update_slot_suffix(message)
     }
 
+    fn slot_cap(&self) -> Option<u32> {
+        self.slot_cap
+    }
+
     /// Without this the slot could accept a body whose modes `get_channel_update` cannot parse,
     /// leaving every read of the channel erroring until something supersedes it.
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -630,7 +639,7 @@ impl ChannelSlotStoreDef for ChannelMemberStoreDef {
     }
 
     fn slot_cap(&self) -> Option<u32> {
-        Some(CHANNEL_MEMBER_SLOT_CAP)
+        self.slot_cap
     }
 
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -690,6 +699,10 @@ impl ChannelSlotStoreDef for ChannelPinStoreDef {
         pin_slot_suffix(message)
     }
 
+    fn slot_cap(&self) -> Option<u32> {
+        self.slot_cap
+    }
+
     fn slot_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         Ok(channel_index_key(
             ChannelIndex::PinSlot,
@@ -720,7 +733,7 @@ impl ChannelSlotStoreDef for ChannelModerateStoreDef {
     }
 
     fn slot_cap(&self) -> Option<u32> {
-        Some(CHANNEL_MODERATE_SLOT_CAP)
+        self.slot_cap
     }
 
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -751,7 +764,11 @@ impl ChannelSlotStoreDef for ChannelModerateStoreDef {
 }
 
 macro_rules! define_channel_store {
-    ($store:ident, $def:ident) => {
+    // `$default_slot_cap` is the store's production slot cap as an `Option<u32>` (`None` for the
+    // uncapped update/pin stores). `StoreOptions::channel_slot_cap_override` is a test-only knob
+    // that replaces that cap with a small value so slot-boundary tests don't insert thousands of
+    // rows; it only affects capped stores, and `None` leaves the production cap in place.
+    ($store:ident, $def:ident, $default_slot_cap:expr) => {
         pub struct $store;
 
         impl $store {
@@ -760,7 +777,12 @@ macro_rules! define_channel_store {
                 store_event_handler: Arc<StoreEventHandler>,
                 prune_size_limit: u32,
             ) -> Store<$def> {
-                Store::new_with_store_def(db, store_event_handler, $def { prune_size_limit })
+                Self::new_with_opts(
+                    db,
+                    store_event_handler,
+                    prune_size_limit,
+                    StoreOptions::default(),
+                )
             }
 
             pub fn new_with_opts(
@@ -769,10 +791,15 @@ macro_rules! define_channel_store {
                 prune_size_limit: u32,
                 store_opts: StoreOptions,
             ) -> Store<$def> {
+                let slot_cap = $default_slot_cap
+                    .map(|cap| store_opts.channel_slot_cap_override.unwrap_or(cap));
                 Store::new_with_store_def_opts(
                     db,
                     store_event_handler,
-                    $def { prune_size_limit },
+                    $def {
+                        prune_size_limit,
+                        slot_cap,
+                    },
                     store_opts,
                 )
             }
@@ -780,10 +807,18 @@ macro_rules! define_channel_store {
     };
 }
 
-define_channel_store!(ChannelUpdateStore, ChannelUpdateStoreDef);
-define_channel_store!(ChannelMemberStore, ChannelMemberStoreDef);
-define_channel_store!(ChannelPinStore, ChannelPinStoreDef);
-define_channel_store!(ChannelModerateStore, ChannelModerateStoreDef);
+define_channel_store!(ChannelUpdateStore, ChannelUpdateStoreDef, None);
+define_channel_store!(
+    ChannelMemberStore,
+    ChannelMemberStoreDef,
+    Some(CHANNEL_MEMBER_SLOT_CAP)
+);
+define_channel_store!(ChannelPinStore, ChannelPinStoreDef, None);
+define_channel_store!(
+    ChannelModerateStore,
+    ChannelModerateStoreDef,
+    Some(CHANNEL_MODERATE_SLOT_CAP)
+);
 
 impl ChannelUpdateStore {
     pub fn merge(

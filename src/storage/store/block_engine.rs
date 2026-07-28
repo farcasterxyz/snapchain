@@ -15,7 +15,7 @@ use crate::storage::store::account::{
     ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef,
     ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8,
     MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, VerificationStore,
+    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, StoreOptions, VerificationStore,
     VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::store::engine_metrics::Metrics;
@@ -346,6 +346,15 @@ pub struct BlockStores {
 
 impl BlockStores {
     pub fn new(db: Arc<RocksDB>, trie: MerkleTrie, network: FarcasterNetwork) -> Self {
+        Self::new_with_opts(db, trie, network, StoreOptions::default())
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        trie: MerkleTrie,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         let store_event_handler = StoreEventHandler::new();
         BlockStores {
             block_store: BlockStore::new(db.clone()),
@@ -357,21 +366,29 @@ impl BlockStores {
                 store_event_handler.clone(),
                 100,
             ),
-            channel_update_store: ChannelUpdateStore::new(
+            channel_update_store: ChannelUpdateStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
             ),
-            channel_member_store: ChannelMemberStore::new(
+            channel_member_store: ChannelMemberStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
             ),
-            channel_pin_store: ChannelPinStore::new(db.clone(), store_event_handler.clone(), 100),
-            channel_moderate_store: ChannelModerateStore::new(
+            channel_pin_store: ChannelPinStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
+            ),
+            channel_moderate_store: ChannelModerateStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts,
             ),
             network,
             db: db.clone(),
@@ -513,16 +530,36 @@ pub(crate) fn block_engine_system_messages_for_replay<'a>(
 
 impl BlockEngine {
     pub fn new(
-        mut trie: MerkleTrie,
+        trie: MerkleTrie,
         statsd_client: StatsdClientWrapper,
         db: Arc<RocksDB>,
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         network: FarcasterNetwork,
     ) -> Self {
+        Self::new_with_opts(
+            trie,
+            statsd_client,
+            db,
+            max_messages_per_block,
+            messages_request_tx,
+            network,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        mut trie: MerkleTrie,
+        statsd_client: StatsdClientWrapper,
+        db: Arc<RocksDB>,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            stores: BlockStores::new(db.clone(), trie, network),
+            stores: BlockStores::new_with_opts(db.clone(), trie, network, store_opts),
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,

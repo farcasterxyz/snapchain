@@ -31,6 +31,7 @@ mod tests {
             StoreOptions {
                 conflict_free: true,
                 save_hub_events: false,
+                ..Default::default()
             },
         );
 
