@@ -2166,9 +2166,13 @@ async fn test_decoupling_shard_0_from_other_shards() {
         max_shard_height = max_shard_height.max(stores.shard_store.max_block_number().unwrap());
     }
 
-    // Make sure that shard 0 proceeds to a height beyond the last shard chunk successfully produced for the purpose of testing that shard 0 works even if other shards are down
+    // Make sure that shard 0 proceeds to a height beyond the last shard chunk successfully produced for the purpose of testing that shard 0 works even if other shards are down.
+    // Bumped timeout — node 0 recovering block production around two corrupted shards is slower under coverage instrumentation than the 15s default.
     network
-        .wait_for_block(max_shard_height as usize + 4)
+        .wait_for_block_with_timeout(
+            max_shard_height as usize + 4,
+            tokio::time::Duration::from_secs(30),
+        )
         .await
         .unwrap();
 
