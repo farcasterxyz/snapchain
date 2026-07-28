@@ -3681,7 +3681,7 @@ mod tests {
             service,
             shard_decision_tx,
             block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = 2u64; // EvenOddRouterForTest routes this FID's data to shard 2.
         let signer = test_helper::default_signer();
         let custody = test_helper::default_custody_address();
