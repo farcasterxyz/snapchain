@@ -4345,6 +4345,96 @@ mod tests {
             );
         }
 
+        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V20
+        // cutover, then the SAME verification arriving again by shard-0 forced replay after
+        // cutover. This is the window case `routing.rs` documents: self-supersede keeps the store,
+        // by-address index, and trie mutually consistent (the replay is a state no-op), while the
+        // event stream is deliberately NOT idempotent -- the replay still emits a fresh
+        // MergeMessage HubEvent with empty `deleted_messages`, which is why a subscriber may see
+        // the verification twice even though state converges.
+        //
+        // `commit_replicator_message_for_test` stands in for the pre-cutover live merge: it seeds
+        // the row the data shard would already hold from the pre-V20 regime, which post-V20 direct
+        // admission now rejects (that rejection is exactly what makes shard 0 the only live path).
+        #[tokio::test]
+        async fn cutover_straddle_live_then_replay_converges_state_but_re_emits_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            // 1. Pre-cutover: the data shard already holds the live-merged verification.
+            engine
+                .commit_replicator_message_for_test(&add)
+                .expect("pre-cutover live merge must succeed");
+            {
+                let stores = engine.get_stores();
+                assert_eq!(
+                    VerificationStore::get_verification_add(
+                        &stores.verification_store,
+                        VERIFICATION_FID,
+                        &verification_address(),
+                        None,
+                    )
+                    .unwrap(),
+                    Some(add.clone()),
+                );
+            }
+            assert_verification_index(&engine, Some(&add));
+            assert!(message_exists_in_trie(&mut engine, &add));
+            let root_after_live_merge = engine.trie_root_hash();
+
+            // 2. Post-cutover: the SAME verification arrives again by shard-0 forced replay.
+            let state_change = replay_verification(&mut engine, &add, 1).await;
+
+            // 3. State converges -- the redundant replay is a no-op on store, index, and trie.
+            {
+                let stores = engine.get_stores();
+                assert_eq!(
+                    VerificationStore::get_verification_add(
+                        &stores.verification_store,
+                        VERIFICATION_FID,
+                        &verification_address(),
+                        None,
+                    )
+                    .unwrap(),
+                    Some(add.clone()),
+                    "replaying an already-held verification must not change the add row",
+                );
+            }
+            assert_verification_index(&engine, Some(&add));
+            assert!(
+                message_exists_in_trie(&mut engine, &add),
+                "self-supersede must leave the trie key intact",
+            );
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![add.clone()],
+            );
+            assert_eq!(
+                engine.trie_root_hash(),
+                root_after_live_merge,
+                "the state root must be identical before and after the redundant replay",
+            );
+
+            // 4. The event stream is NOT idempotent: the replay still emits a fresh MergeMessage
+            //    for the same message (the duplicate a subscriber may observe), and a message must
+            //    never supersede itself, so its own `deleted_messages` stays empty.
+            let merge_body = merge_body_for(&state_change, &add);
+            assert!(
+                merge_body.deleted_messages.is_empty(),
+                "a re-merged message must never appear in its own deleted_messages",
+            );
+        }
+
         // Two BlockEvents for the same (fid, address) in one block. Conflict discovery reads
         // through the shared txn batch, so the second must see the first's uncommitted write and
         // supersede it. BlockEvent order wins over embedded timestamps, hence the older remove.
