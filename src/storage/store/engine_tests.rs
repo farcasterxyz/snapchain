@@ -5509,17 +5509,15 @@ mod tests {
     // ----------------------------------------------------------------------------------------
     // Verification-merge channel-owner hints.
     //
-    // When an Ethereum verification merges on the user-message path, the engine scans THIS
-    // shard's own ByOwnerAddress replica (built by the channel-register block-event fold) and emits
-    // one ChannelOwnerChangeHint per channel the verified address owns, cause VERIFICATION_ADD /
+    // When an Ethereum verification is force-replayed from shard 0, the engine scans THIS shard's
+    // own ByOwnerAddress replica (built by the channel-register block-event fold) and emits one
+    // ChannelOwnerChangeHint per channel the verified address owns, cause VERIFICATION_ADD /
     // VERIFICATION_REMOVE. The hook is STRUCTURALLY unable to fail, alter, or panic the merge:
     // every error warns and yields fewer hints, and the merge result + trie are untouched.
     //
-    // Most tests drive the real merge + trie + hint sequence through a test-only seam that
-    // bypasses admission. That distinction is load-bearing after verification activation: V20
-    // direct submissions are rejected, so the legacy user-message hook is production-unreachable,
-    // but its structural guarantees remain worth pinning independently. Two edges — the pre-V20
-    // gate and the Solana-protocol skip — call the hook directly with an explicit version.
+    // Most tests drive the real BlockEvent replay + forced merge + trie + hint sequence. Two edges
+    // — the pre-V20 gate and the Solana-protocol skip — call the emitter directly with an explicit
+    // version because no running network can construct those states through replay.
     // ----------------------------------------------------------------------------------------
     mod channel_ownership_events_verification_hint_tests {
         use super::*;
@@ -5575,10 +5573,14 @@ mod tests {
             )
         }
 
-        fn commit_verification(engine: &mut ShardEngine, message: &proto::Message) {
-            engine
-                .commit_verification_with_hints_for_test(message)
-                .expect("verification merge and hint hook must succeed");
+        async fn replay_message(engine: &mut ShardEngine, message: &proto::Message) {
+            let block_event =
+                events_factory::create_merge_message_event(message.clone(), next_seqnum(engine));
+            test_helper::commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        async fn commit_verification(engine: &mut ShardEngine, message: &proto::Message) {
+            replay_message(engine, message).await;
             assert!(test_helper::message_exists_in_trie(engine, message));
         }
 
@@ -5696,7 +5698,7 @@ mod tests {
             register_channel(&mut engine, "pets", verified_address()).await;
 
             let ts = messages_factory::farcaster_time();
-            commit_verification(&mut engine, &verification_add(ts));
+            commit_verification(&mut engine, &verification_add(ts)).await;
 
             let hints = verification_hints(&engine);
             assert_eq!(
@@ -5720,11 +5722,34 @@ mod tests {
             register_channel(&mut engine, "pets", vec![0xAB; 20]).await;
 
             let ts = messages_factory::farcaster_time();
-            commit_verification(&mut engine, &verification_add(ts));
+            commit_verification(&mut engine, &verification_add(ts)).await;
 
             assert!(
                 verification_hints(&engine).is_empty(),
                 "no hint when the verified address owns no channels"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_normal_replay_type_emits_no_channel_owner_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+            let hints_before = owner_change_hints(&engine).len();
+
+            let lend = messages_factory::storage_lend::create_storage_lend(
+                FID3_FOR_TEST,
+                FID_FOR_TEST,
+                1,
+                crate::proto::StorageUnitType::UnitType2025,
+                Some(messages_factory::farcaster_time()),
+                None,
+            );
+            replay_message(&mut engine, &lend).await;
+
+            assert_eq!(
+                owner_change_hints(&engine).len(),
+                hints_before,
+                "a successful Normal replay must not emit a channel-owner hint"
             );
         }
 
@@ -5738,7 +5763,7 @@ mod tests {
             register_channel(&mut engine, "apple", verified_address()).await;
 
             let ts = messages_factory::farcaster_time();
-            commit_verification(&mut engine, &verification_add(ts));
+            commit_verification(&mut engine, &verification_add(ts)).await;
 
             let hints = verification_hints(&engine);
             assert_eq!(hints.len(), 3, "one hint per owned channel");
@@ -5759,8 +5784,8 @@ mod tests {
 
             let ts = messages_factory::farcaster_time();
             // Add first (so the remove has something to remove and merges), then remove.
-            commit_verification(&mut engine, &verification_add(ts));
-            commit_verification(&mut engine, &verification_remove(ts + 1));
+            commit_verification(&mut engine, &verification_add(ts)).await;
+            commit_verification(&mut engine, &verification_remove(ts + 1)).await;
 
             let hints = verification_hints(&engine);
             assert_eq!(hints.len(), 2, "one ADD hint, then one REMOVE hint");
@@ -5779,31 +5804,31 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_failed_verification_merge_emits_no_hint() {
-            // The hook lives only in the merge loop's `Ok(merge_events)` arm, so a verification
-            // that does not newly merge produces no hint even though the address owns a channel.
+        async fn test_failed_forced_verification_replay_emits_no_hint() {
+            // The emitter runs only after `merge_replayed_verification` succeeds. A malformed
+            // verification that dispatches to the forced arm but fails the store merge must not
+            // emit a hint even though its address owns a channel.
             let (mut engine, _tmp) = new_verifier_engine().await;
             register_channel(&mut engine, "pets", verified_address()).await;
 
             let ts = messages_factory::farcaster_time();
-            let add = verification_add(ts);
-            commit_verification(&mut engine, &add);
-            assert_eq!(verification_hints(&engine).len(), 1, "first add hints once");
-
-            // Re-submit the identical verification. It does not merge again (duplicate/no-op), so
-            // the Ok-arm hook never runs a second time — the VERIFICATION_ADD hint count stays 1.
-            let state_change = engine.propose_state_change(
-                1,
-                vec![MempoolMessage::UserMessage(add.clone())],
-                None,
+            let mut malformed = verification_add(ts);
+            malformed.data.as_mut().unwrap().body = Some(
+                proto::message_data::Body::VerificationRemoveBody(proto::VerificationRemoveBody {
+                    address: verified_address(),
+                    protocol: proto::Protocol::Ethereum as i32,
+                }),
             );
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+            replay_message(&mut engine, &malformed).await;
 
-            assert_eq!(
-                verification_hints(&engine).len(),
-                1,
-                "a non-merging (duplicate) verification adds no hint"
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "a failed forced replay must not emit a verification hint"
             );
+            assert!(!test_helper::message_exists_in_trie(
+                &mut engine,
+                &malformed
+            ));
         }
 
         #[tokio::test]
@@ -5835,7 +5860,7 @@ mod tests {
 
             let ts = messages_factory::farcaster_time();
             let add = verification_add(ts);
-            commit_verification(&mut engine, &add);
+            commit_verification(&mut engine, &add).await;
 
             // The verification merged and is trie-indexed — untouched by the replica corruption.
             assert!(
@@ -6086,6 +6111,49 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_replayed_verification_hint_fan_out_is_capped_at_256() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            let first_seqnum = next_seqnum(&engine);
+            let block_events = (0u64..257)
+                .map(|index| {
+                    let channel_key = format!("channel-{index:03}");
+                    let event = events_factory::create_channel_register_event(
+                        &channel_key,
+                        keccak256(channel_key.as_bytes()).to_vec(),
+                        verified_address(),
+                        1_900_000_000,
+                        proto::ChannelRegisterEventType::Register,
+                        (index as u32) + 3000,
+                        0,
+                    );
+                    events_factory::create_merge_on_chain_event_event(event, first_seqnum + index)
+                })
+                .collect::<Vec<_>>();
+            test_helper::commit_block_events(&mut engine, block_events.iter().collect()).await;
+
+            commit_verification(
+                &mut engine,
+                &verification_add(messages_factory::farcaster_time()),
+            )
+            .await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 256, "replay uses the production hint cap");
+            assert_hint(
+                &hints[0],
+                "channel-000",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[255],
+                "channel-255",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
         async fn test_truncated_hints_do_not_touch_the_trie() {
             // Truncation must be as trie-inert as normal emission: capping the fan-out
             // mutates zero trie state, so it can never move the shard root (and thus can
@@ -6153,8 +6221,8 @@ mod tests {
         async fn test_end_to_end_ownership_lifecycle() {
             // Capstone: a channel is registered by one address, transferred to the verified
             // address, then verified and unverified — exercising all four hint causes across the
-            // block-event and user-message paths, with GetChannelOwner resolving correctly after
-            // each step.
+            // onchain-fold and forced-verification replay legs, with GetChannelOwner resolving
+            // correctly after each step.
             //
             // Order note: the plan sketches register → verify → transfer → remove, but a transfer
             // that moves a channel AWAY from an address strands it (the address then owns nothing,
@@ -6183,7 +6251,7 @@ mod tests {
 
             // 3. VERIFICATION_ADD for the verified address (now owns "art").
             let ts = messages_factory::farcaster_time();
-            commit_verification(&mut engine, &verification_add(ts));
+            commit_verification(&mut engine, &verification_add(ts)).await;
             assert_eq!(
                 channel_owner_address(&engine, "art"),
                 Some(verified_address()),
@@ -6191,14 +6259,14 @@ mod tests {
             );
 
             // 4. VERIFICATION_REMOVE for the verified address (still owns "art").
-            commit_verification(&mut engine, &verification_remove(ts + 1));
+            commit_verification(&mut engine, &verification_remove(ts + 1)).await;
             assert_eq!(
                 channel_owner_address(&engine, "art"),
                 Some(verified_address()),
                 "removing a verification does not change registry ownership"
             );
 
-            // The full hint sequence across both paths, in emission order.
+            // The full hint sequence across both replay legs, in emission order.
             let hints = owner_change_hints(&engine);
             let causes: Vec<i32> = hints.iter().map(|hint| hint_body(hint).cause).collect();
             assert_eq!(

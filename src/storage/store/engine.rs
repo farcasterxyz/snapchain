@@ -690,32 +690,6 @@ impl ShardEngine {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn commit_verification_with_hints_for_test(
-        &mut self,
-        message: &proto::Message,
-    ) -> Result<(), EngineError> {
-        // The V20 direct-admission arm intentionally makes this legacy user-message hook
-        // unreachable in production. Keep its structural tests precise by exercising the same
-        // successful merge -> trie -> hint sequence while bypassing admission only.
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let merge_events = self.merge_message(message, &mut txn_batch)?;
-        for event in &merge_events {
-            self.update_trie(&merkle_trie::Context::new(), event, &mut txn_batch)?;
-        }
-        let _hints = self.emit_channel_owner_hints_for_verification(
-            message,
-            &mut txn_batch,
-            EngineVersion::V20,
-        );
-        self.db
-            .commit(txn_batch)
-            .map_err(HubError::from)
-            .map_err(EngineError::StoreError)?;
-        self.stores.trie.reload(&self.db)?;
-        Ok(())
-    }
-
     /// The verification message types successfully merged by a block-event replay, which must
     /// feed the same post-loop prune pass as live merges so a fid's combined pre-V20 + replayed
     /// rows converge to its storage cap.
@@ -740,6 +714,7 @@ impl ShardEngine {
         trie_ctx: &merkle_trie::Context,
         block_event: &proto::BlockEvent,
         txn_batch: &mut RocksDbTransactionBatch,
+        data_shard_block_version: EngineVersion,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let body = block_event
             .data
@@ -805,12 +780,25 @@ impl ShardEngine {
                         );
                     }
                 }
-                let hub_events = match merge_strategy {
+                let mut hub_events = match merge_strategy {
                     ReplayMerge::Forced => self.merge_replayed_verification(message, txn_batch)?,
                     ReplayMerge::Normal => self.merge_message(message, txn_batch)?,
                 };
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
+                }
+                if merge_strategy == ReplayMerge::Forced {
+                    // Verification-caused hints belong to the forced replay leg: after V20,
+                    // shard-0-routed verifications reach a data shard only here. Append them only
+                    // after merge + trie success and never route them through `update_trie`.
+                    // `data_shard_block_version` is the block clock already threaded through
+                    // `replay_snapchain_txn`, matching the former live-merge call site and the
+                    // emitter's internal ChannelOwnershipEvents gate.
+                    hub_events.extend(self.emit_channel_owner_hints_for_verification(
+                        message,
+                        txn_batch,
+                        data_shard_block_version,
+                    ));
                 }
                 Ok(hub_events)
             }
@@ -960,8 +948,8 @@ impl ShardEngine {
     /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
     /// verification whose verified address owns one or more channels, by scanning
     /// THIS shard's own ByOwnerAddress replica (the trie-free ownership index built
-    /// by the channel-register block-event fold). Called only from the user-message
-    /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
+    /// by the channel-register block-event fold). Called only after a successful forced
+    /// verification replay and its trie update.
     ///
     /// STRUCTURAL SAFETY CONTRACT (the rule this hook lives or dies by): this
     /// hook never sees the merge result, `validation_errors`, or the trie, so it
@@ -973,12 +961,12 @@ impl ShardEngine {
     /// yields fewer hints, never an `Err`, never a panic on message/body data. Do NOT
     /// add a `?`, an `Err` early-return, or an unwrap on message/body data here. (The
     /// one non-message panic path, `commit_transaction`'s poisoned-mutex
-    /// `lock().unwrap()`, is shared with the whole merge loop and would already have
+    /// `lock().unwrap()`, is shared with the whole merge/replay machinery and would already have
     /// aborted upstream — this hook adds no new panic surface.)
     ///
     /// SHARED-BUDGET COUPLING — bounded by a per-verification cap. Effect (2) advances
     /// the block-scoped, 14-bit `HubEventIdGenerator` sequence (`SEQUENCE_BITS`, 16384
-    /// events/block) that this hook SHARES with the merge loop and the mandatory
+    /// events/block) that this hook SHARES with the replay loop and the mandatory
     /// `BlockConfirmed` commit. An
     /// unbounded fan-out (one verification → N hints for N owned channels) would let a
     /// single verification against an address owning ~16k channels exhaust that shared
@@ -1005,8 +993,8 @@ impl ShardEngine {
     /// running network: the pre-V20 gate and the Solana-protocol skip. The V20 fork
     /// both opens the gate AND enables the replica fold, so no live network ever has
     /// a populated replica with the feature off — that state exists only when the
-    /// hook is called directly with an explicit pre-V20 `version`. Production has a
-    /// single caller (the user-message merge loop).
+    /// hook is called directly with an explicit pre-V20 `version`. Its single production caller
+    /// is the successful forced-verification replay leg.
     pub(crate) fn emit_channel_owner_hints_for_verification(
         &self,
         msg: &proto::Message,
@@ -1393,7 +1381,7 @@ impl ShardEngine {
                         // (`prune_messages` already no-ops LendStorage and keys, so enrolling
                         // those would be inert rather than harmful). A new shard-0 type that
                         // gains a prune arm must opt in here too.
-                        match self.handle_block_event(trie_ctx, block_event, txn_batch) {
+                        match self.handle_block_event(trie_ctx, block_event, txn_batch, version) {
                             Ok(hub_events) => {
                                 message_types_to_prune
                                     .extend(Self::replayed_verification_prune_type(block_event));
@@ -1500,15 +1488,6 @@ impl ShardEngine {
                                 user_messages_count += 1;
                             }
                             events.extend(merge_events.clone());
-                            // Verification-caused channel-owner hints. These ride the
-                            // user-message merge path but are STRUCTURALLY unable to affect
-                            // it: the helper swallows every error and returns only a Vec we
-                            // extend with. Appended AFTER the `update_trie` loop above and
-                            // never routed through it — hints are deliberately not
-                            // trie-indexed (see the helper's contract).
-                            events.extend(self.emit_channel_owner_hints_for_verification(
-                                msg, txn_batch, version,
-                            ));
                             message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
@@ -2955,6 +2934,7 @@ mod verification_replay_gate_tests {
             trie_ctx(),
             &block_event,
             &mut RocksDbTransactionBatch::new(),
+            crate::version::version::EngineVersion::V19,
         );
 
         assert!(matches!(
