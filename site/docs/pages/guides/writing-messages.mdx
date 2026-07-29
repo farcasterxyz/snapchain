@@ -291,6 +291,71 @@ must be the key being revoked.
 
 You do not have to revoke a key you have simply stopped using — its sliding TTL expires it.
 
+### The old onchain flow
+
+Before gasless signers, a key was registered by calling `add()` on the onchain key gateway. That
+still works — existing onchain signers keep functioning and are never expired or scoped — but it
+costs gas, takes an OP Mainnet block to confirm, and needs a funded wallet. Prefer `KEY_ADD` for
+anything new.
+
+<details>
+<summary>Deprecated: registering a signer onchain (costs gas)</summary>
+
+This is the flow this guide used previously. It requires the `KEY_GATEWAY_ADDRESS` and
+`keyGatewayABI` imports and the `KeyContract` constant, all of which step 1 above drops.
+
+Note that `getSignedKeyRequestMetadata()` here signs the **onchain**
+`Farcaster SignedKeyRequestValidator` domain, which is the correct domain for this flow and the
+wrong one for `KEY_ADD` — see the warning above.
+
+```typescript
+const KeyContract = {
+  abi: keyGatewayABI,
+  address: KEY_GATEWAY_ADDRESS,
+  chain: CHAIN,
+};
+
+const getOrRegisterSigner = async (fid: number) => {
+  if (SIGNER_PRIVATE_KEY !== zeroAddress) {
+    // If a private key is provided, we assume the signer is already in the key registry
+    const privateKeyBytes = fromHex(SIGNER_PRIVATE_KEY, "bytes");
+    const publicKeyBytes = ed25519.getPublicKey(privateKeyBytes);
+    return privateKeyBytes;
+  }
+
+  const privateKey = ed25519.utils.randomPrivateKey();
+  const publicKey = toHex(ed25519.getPublicKey(privateKey));
+
+  // To add a key, we need to sign the metadata with the fid of the app we're adding the key on behalf of
+  // We'll use our own fid and custody address for simplicity. This can also be a separate App specific fid.
+  const localAccount = toAccount(account);
+  const eip712signer = new ViemLocalEip712Signer(localAccount);
+  const metadata = await eip712signer.getSignedKeyRequestMetadata({
+    requestFid: BigInt(fid),
+    key: fromHex(publicKey, "bytes"),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 60 * 60), // 1 hour from now
+  });
+
+  const metadataHex = toHex(metadata.unwrapOr(new Uint8Array()));
+
+  const { request: signerAddRequest } = await simulateContract(walletClient, {
+    ...KeyContract,
+    functionName: "add",
+    args: [1, publicKey, 1, metadataHex], // keyType, publicKey, metadataType, metadata
+  });
+
+  const signerAddTxHash = await writeContract(walletClient, signerAddRequest);
+  await waitForTransactionReceipt(walletClient, { hash: signerAddTxHash });
+  await new Promise((resolve) => setTimeout(resolve, 30000));
+  return privateKey;
+};
+
+
+const signer = await getOrRegisterSigner(fid);
+```
+
+</details>
+
 ## 4. Register an fname
 
 Now that the onchain actions are complete, let's register an fname using the farcaster offchain fname registry.
