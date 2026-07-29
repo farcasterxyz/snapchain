@@ -1,16 +1,23 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
+    use crate::core::validations::error::ValidationError;
     use crate::proto::{
         block_event_data, Block, BlockEvent, BlockEventType, ChannelRegisterEventType,
-        FarcasterNetwork, OnChainEvent, StorageUnitType,
+        FarcasterNetwork, HubEvent, Message, MessageType, OnChainEvent, StorageUnitType, StoreType,
     };
-    use crate::storage::store::block_engine::BlockStateChange;
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::{
+        make_ts_hash, HubEventStorageExt, IntoU8, StorageSlot, VerificationStore,
+    };
+    use crate::storage::store::block_engine::{BlockStateChange, MessageValidationError};
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
+    use crate::storage::store::stores::Limits;
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory, signers};
+    use crate::version::version::EngineVersion;
     use alloy_primitives::keccak256;
 
     fn channel_label(channel_key: &str) -> Vec<u8> {
@@ -47,6 +54,154 @@ mod tests {
         transfer.transaction_hash = vec![0x22; 32];
 
         (transfer, register)
+    }
+
+    // The claim signature below is bound to a (fid, address, network, block hash, protocol)
+    // tuple, so the fid is load-bearing: changing it fails with `InvalidClaimSignature` rather
+    // than anything that names a fid. Same fixture the data-shard verification tests use.
+    //
+    // The `network` in that tuple is the *message's* own field, which `messages_factory`
+    // hardcodes to Mainnet -- not the engine's. `validate_message` reads the claim's network from
+    // `message_data.network` and only requires the two to agree when the engine is Mainnet, which
+    // is why this one fixture validates against both the devnet `setup()` engine and the mainnet
+    // engine used by the pre-activation test.
+    const VERIFICATION_FID: u64 = 2;
+    const VERIFICATION_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
+    const VERIFICATION_CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
+    const VERIFICATION_BLOCK_HASH_HEX: &str =
+        "d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296";
+
+    fn verification_address() -> Vec<u8> {
+        hex::decode(VERIFICATION_ADDRESS_HEX).unwrap()
+    }
+
+    fn verification_add(
+        timestamp: u32,
+        private_key: Option<&ed25519_dalek::SigningKey>,
+    ) -> Message {
+        messages_factory::verifications::create_verification_add(
+            VERIFICATION_FID,
+            0,
+            verification_address(),
+            hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap(),
+            hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+            Some(timestamp),
+            private_key,
+        )
+    }
+
+    fn verification_remove(address: Vec<u8>, timestamp: u32) -> Message {
+        messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            address,
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn quota_test_address(index: u16) -> Vec<u8> {
+        let mut address = vec![0xA5; 20];
+        address[..2].copy_from_slice(&index.to_be_bytes());
+        address
+    }
+
+    fn verification_contract_add(address: Vec<u8>, timestamp: u32) -> Message {
+        messages_factory::verifications::create_verification_add(
+            VERIFICATION_FID,
+            1,
+            address,
+            vec![],
+            vec![0xB6; 32],
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn verification_replica_counts(
+        engine: &crate::storage::store::block_engine::BlockEngine,
+    ) -> (u64, u64) {
+        let stores = engine.stores();
+        let txn_batch = RocksDbTransactionBatch::new();
+        let mut live_adds = 0;
+        let mut tombstones = 0;
+        for msg_type in Limits::store_type_to_message_types(StoreType::Verifications) {
+            let count = stores
+                .trie
+                .get_count(
+                    &stores.db,
+                    &txn_batch,
+                    &TrieKey::for_message_type(VERIFICATION_FID, msg_type.into_u8()),
+                )
+                .unwrap();
+            match msg_type {
+                MessageType::VerificationAddEthAddress => live_adds += count,
+                MessageType::VerificationRemove => tombstones += count,
+                other => panic!("unexpected verification store message type: {other:?}"),
+            }
+        }
+        (live_adds, tombstones)
+    }
+
+    fn assert_verification_index(
+        engine: &crate::storage::store::block_engine::BlockEngine,
+        expected: Option<&Message>,
+    ) {
+        let stores = engine.stores();
+        let entries = VerificationStore::get_verifications_by_address(
+            &stores.verification_store,
+            &verification_address(),
+        )
+        .unwrap();
+        match expected {
+            Some(message) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, VERIFICATION_FID);
+                assert_eq!(
+                    entries[0].1,
+                    make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash).unwrap()
+                );
+            }
+            None => assert!(entries.is_empty()),
+        }
+    }
+
+    fn verification_block_event_messages(block: &Block) -> Vec<&Message> {
+        block
+            .events
+            .iter()
+            .filter_map(|event| {
+                let block_event_data::Body::MergeMessageEventBody(body) =
+                    event.data.as_ref()?.body.as_ref()?
+                else {
+                    return None;
+                };
+                let message = body.message.as_ref()?;
+                matches!(
+                    message.msg_type(),
+                    crate::proto::MessageType::VerificationAddEthAddress
+                        | crate::proto::MessageType::VerificationRemove
+                )
+                .then_some(message)
+            })
+            .collect()
+    }
+
+    /// Use only when no verification merged. Verification types are allowlisted for fan-out, so
+    /// absence here proves the block produced no verification MergeMessage HubEvent; it is not an
+    /// assertion that the message types are excluded. Heartbeats may legitimately share the block.
+    fn assert_no_verification_block_events(block: &Block) {
+        assert!(
+            verification_block_event_messages(block).is_empty(),
+            "block without a verification merge emitted a verification BlockEvent"
+        );
+    }
+
+    fn assert_one_verification_block_event(block: &Block, expected: &Message) {
+        assert_eq!(
+            verification_block_event_messages(block),
+            vec![expected],
+            "a verification merge must emit exactly one BlockEvent carrying the original message"
+        );
     }
 
     #[tokio::test]
@@ -107,6 +262,839 @@ mod tests {
 
         validate_and_commit_state_change(&mut block_engine, &state_change);
         assert_eq!(block_engine.get_confirmed_height(), height);
+    }
+
+    #[test]
+    fn test_shard_zero_verification_validation_gate_and_signatures() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let block_timestamp = FarcasterTime::new(timestamp as u64);
+        let storage_slot = StorageSlot::new(0, 0, 1, u32::MAX);
+
+        let valid = verification_add(timestamp, None);
+        assert!(block_engine
+            .validate_user_message(
+                &valid,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &valid,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
+        // The arm admits `VerificationRemoveBody` as well as adds, so gate both -- a gate that
+        // covered only adds would leave removes admissible pre-activation.
+        let remove = messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            verification_address(),
+            Some(timestamp),
+            None,
+        );
+        assert!(block_engine
+            .validate_user_message(
+                &remove,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &remove,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
+        let mut bad_claim_signature = hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap();
+        bad_claim_signature[0] ^= 0xff;
+        let invalid_signature = messages_factory::verifications::create_verification_add(
+            VERIFICATION_FID,
+            0,
+            verification_address(),
+            bad_claim_signature,
+            hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+            Some(timestamp),
+            None,
+        );
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &invalid_signature,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::MessageValidationError(
+                ValidationError::InvalidClaimSignature
+            ))
+        ));
+
+        let inactive_signer = signers::generate_signer();
+        let invalid_signer = verification_add(timestamp, Some(&inactive_signer));
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &invalid_signer,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::MissingSigner)
+        ));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_quota_boundary() {
+        let timestamp = messages_factory::farcaster_time();
+
+        // No storage is an unconditional spam gate for adds, even before any replica rows exist.
+        let (mut no_storage_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut no_storage_engine,
+        );
+        assert!(matches!(
+            no_storage_engine.validate_user_message(
+                &verification_add(timestamp, None),
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new(timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+
+        // One 2025 unit permits five live verification adds. Put six in one transaction so the
+        // sixth pins the in-transaction live-add count maintained between successful merges.
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        let addresses = (1u16..=6).map(quota_test_address).collect::<Vec<_>>();
+        let initial_adds = addresses
+            .iter()
+            .map(|address| verification_contract_add(address.clone(), timestamp))
+            .collect::<Vec<_>>();
+        let mut initial_results = initial_adds
+            .iter()
+            .take(5)
+            .map(|message| (message, Validity::Valid))
+            .collect::<Vec<_>>();
+        initial_results.push((&initial_adds[5], Validity::Invalid));
+        commit_messages(&mut engine, initial_results);
+
+        // A remove for an existing address is never quota-blocked: it supersedes the old row and
+        // lowers the live count, allowing an at-cap user to shed live state.
+        let superseding_remove = verification_remove(addresses[0].clone(), timestamp + 1);
+        commit_message(&mut engine, &superseding_remove, Validity::Valid);
+
+        // Superseding adds are live-count-neutral too. Build a second at-cap replica, then replace
+        // one address with a newer add.
+        let (mut replacement_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut replacement_engine,
+        );
+        let at_cap_adds = (11u16..=15)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut replacement_engine,
+            at_cap_adds
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        let replacement_add = verification_contract_add(quota_test_address(11), timestamp + 1);
+        commit_message(&mut replacement_engine, &replacement_add, Validity::Valid);
+    }
+
+    #[test]
+    fn test_shard_zero_verification_remove_then_add_cycles_cannot_launder_the_add_cap() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // A type-blind supersede carve-out would let `remove addr; add addr` cycles mint unbounded
+        // permanent rows on one storage unit: the add lands on a tombstone, skipping the live-add
+        // cap, and refunds the tombstone slot for the next cycle. The live-add cap must bind on an
+        // add over a tombstone exactly as it does on a net-new add.
+        let mut live_index = 100u16;
+        for _ in 0..5 {
+            let address = quota_test_address(live_index);
+            commit_message(
+                &mut engine,
+                &verification_remove(address.clone(), timestamp),
+                Validity::Valid,
+            );
+            commit_message(
+                &mut engine,
+                &verification_contract_add(address, timestamp + 1),
+                Validity::Valid,
+            );
+            live_index += 1;
+        }
+        assert_eq!(verification_replica_counts(&engine), (5, 0));
+
+        // The sixth cycle mints its tombstone but cannot convert it: live adds are at cap.
+        let address = quota_test_address(live_index);
+        commit_message(
+            &mut engine,
+            &verification_remove(address.clone(), timestamp),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &verification_contract_add(address, timestamp + 1),
+            Validity::Invalid,
+        );
+        assert_eq!(verification_replica_counts(&engine), (5, 1));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_add_then_remove_cycles_cannot_mint_unbounded_rows() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // Shard-0 rows are permanent, so the bound has to hold against sequences that return the
+        // COUNTERS to their starting point while leaving a row behind. `add addr_i; remove addr_i`
+        // is that sequence: the remove is row-neutral and ungated, and it resets `live_adds` to 0,
+        // so the live-add cap alone never engages and rows would grow forever.
+        //
+        // Drive the replica to the row cap with live_adds well BELOW max_messages, so only the
+        // total-row gate can reject the next mint.
+        let removes = (2000u16..2000 + 256)
+            .map(|index| verification_remove(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            removes
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        let adds = (3000u16..3005)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            adds.iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        assert_eq!(verification_replica_counts(&engine), (5, 256));
+
+        // Shed all five live adds. Row-neutral and always admitted, but each mints a permanent
+        // tombstone, pushing tombstones past their own cap and rows to the row cap.
+        for index in 3000u16..3005 {
+            commit_message(
+                &mut engine,
+                &verification_remove(quota_test_address(index), timestamp + 1),
+                Validity::Valid,
+            );
+        }
+        assert_eq!(verification_replica_counts(&engine), (0, 261));
+
+        // live_adds is 0, so the live-add cap would happily admit this. The row cap must not.
+        let over_row_cap = verification_contract_add(quota_test_address(4000), timestamp + 2);
+        commit_message(&mut engine, &over_row_cap, Validity::Invalid);
+        assert_eq!(verification_replica_counts(&engine), (0, 261));
+
+        // Row-neutral traffic still works at the row cap: re-adding a tombstoned address.
+        let resurrect = verification_contract_add(quota_test_address(3000), timestamp + 3);
+        commit_message(&mut engine, &resurrect, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 260));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_add_then_remove_cycles_are_row_bounded() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // The attack the row cap exists to stop, in its literal form: each cycle takes a FRESH
+        // address, adds it (admitted -- `live_adds` is 0 at the top of every cycle, so the
+        // live-add cap never engages), then removes it (row-neutral, so the tombstone cap is
+        // never consulted either). Every cycle leaves one permanent row behind for two gasless
+        // messages. Only a bound on TOTAL ROWS terminates this.
+        const ROW_CAP: u16 = 261; // max_messages(5) + tombstone_cap(256)
+        for index in 0..ROW_CAP {
+            let address = quota_test_address(2000 + index);
+            commit_message(
+                &mut engine,
+                &verification_contract_add(address.clone(), timestamp),
+                Validity::Valid,
+            );
+            commit_message(
+                &mut engine,
+                &verification_remove(address, timestamp + 1),
+                Validity::Valid,
+            );
+        }
+        assert_eq!(verification_replica_counts(&engine), (0, ROW_CAP as u64));
+
+        // The next cycle cannot start: rows are at cap even though `live_adds` is 0.
+        commit_message(
+            &mut engine,
+            &verification_contract_add(quota_test_address(2999), timestamp),
+            Validity::Invalid,
+        );
+        assert_eq!(verification_replica_counts(&engine), (0, ROW_CAP as u64));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_tombstones_do_not_lock_out_live_adds() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // B2 regression: five net-new tombstones used to consume the entire add quota and make
+        // this fid terminal despite having no live verifications.
+        let removes = (20u16..25)
+            .map(|index| verification_remove(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            removes
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        assert_eq!(verification_replica_counts(&engine), (0, 5));
+
+        let add = verification_contract_add(quota_test_address(25), timestamp + 1);
+        commit_message(&mut engine, &add, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 5));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_shed_state_allows_new_add() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        let adds = (30u16..35)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            adds.iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        assert_eq!(verification_replica_counts(&engine), (5, 0));
+
+        let remove = verification_remove(quota_test_address(30), timestamp + 1);
+        commit_message(&mut engine, &remove, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (4, 1));
+
+        let add = verification_contract_add(quota_test_address(35), timestamp + 2);
+        commit_message(&mut engine, &add, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (5, 1));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_net_new_remove_admitted_at_add_cap() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        let adds = (40u16..45)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            adds.iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+
+        // This address can predate the shard-0 replica; its tombstone uses the independent bound.
+        let remove = verification_remove(quota_test_address(45), timestamp + 1);
+        commit_message(&mut engine, &remove, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (5, 1));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_tombstone_cap_boundary() {
+        const TOMBSTONE_CAP: u16 = 256;
+
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        let removes = (1000u16..1000 + TOMBSTONE_CAP)
+            .map(|index| verification_remove(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            removes
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        assert_eq!(verification_replica_counts(&engine), (0, 256));
+
+        let over_cap = verification_remove(quota_test_address(1000 + TOMBSTONE_CAP), timestamp + 1);
+        commit_message(&mut engine, &over_cap, Validity::Invalid);
+
+        let superseding = verification_remove(quota_test_address(1000), timestamp + 1);
+        commit_message(&mut engine, &superseding, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (0, 256));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_add_remove_add_keeps_counters_and_row_count_stable() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        let address = quota_test_address(50);
+
+        let add = verification_contract_add(address.clone(), timestamp);
+        commit_message(&mut engine, &add, Validity::Valid);
+        let counts = verification_replica_counts(&engine);
+        assert_eq!(counts, (1, 0));
+        assert_eq!(counts.0 + counts.1, 1);
+
+        let remove = verification_remove(address.clone(), timestamp + 1);
+        commit_message(&mut engine, &remove, Validity::Valid);
+        let counts = verification_replica_counts(&engine);
+        assert_eq!(counts, (0, 1));
+        assert_eq!(counts.0 + counts.1, 1);
+
+        let replacement_add = verification_contract_add(address, timestamp + 2);
+        commit_message(&mut engine, &replacement_add, Validity::Valid);
+        let counts = verification_replica_counts(&engine);
+        assert_eq!(counts, (1, 0));
+        assert_eq!(counts.0 + counts.1, 1);
+    }
+
+    // The `max_messages == 0 && is_add` gate is invisible to the boundary test above: with no
+    // storage, a NON-superseding add is already rejected because `live_adds >= max_messages`.
+    // The gate only carries independent meaning for a SUPERSEDING add, which short-circuits the
+    // live-add count check — i.e. a fid whose storage lapsed replacing a verification it already
+    // has. Without this case, deleting the gate leaves the whole suite green.
+    #[test]
+    fn test_shard_zero_superseding_add_rejected_without_storage() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // Seed a record for the address so a later add supersedes rather than grows.
+        let existing_add = verification_add(timestamp, None);
+        commit_message(&mut engine, &existing_add, Validity::Valid);
+
+        // A superseding add for that same address, judged against an empty storage slot, must
+        // still be refused: shard 0's verification write path is otherwise gasless.
+        let superseding_add = verification_add(timestamp + 1, None);
+        assert!(matches!(
+            engine.validate_user_message(
+                &superseding_add,
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new((timestamp + 1) as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+
+        // The mirror case is admitted by design, so an at-cap fid can always shed state.
+        let superseding_remove = verification_remove(verification_address(), timestamp + 2);
+        assert!(engine
+            .validate_user_message(
+                &superseding_remove,
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new((timestamp + 2) as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+
+        // A storage-free fid may supersede a replica-known row but may not mint a permanent
+        // tombstone for an address shard 0 has never seen.
+        let net_new_remove = verification_remove(quota_test_address(60), timestamp + 2);
+        assert!(matches!(
+            engine.validate_user_message(
+                &net_new_remove,
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new((timestamp + 2) as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_quota_includes_borrowed_storage() {
+        const LENDER_FID: u64 = 100;
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            LENDER_FID,
+            default_signer(),
+            default_custody_address(),
+            2,
+            &mut engine,
+        );
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            0,
+            &mut engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let lend = messages_factory::storage_lend::create_storage_lend(
+            LENDER_FID,
+            VERIFICATION_FID,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &lend, Validity::Valid);
+
+        // The borrower owns no storage units. Admission succeeds only if shard 0 computes the
+        // verification limit from the net slot (purchased - lent + borrowed), as data shards do.
+        let add = verification_add(timestamp + 1, None);
+        commit_message(&mut engine, &add, Validity::Valid);
+    }
+
+    #[test]
+    fn test_shard_zero_verification_rejects_pre_activation_embedded_timestamp() {
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        // Be precise about what this pins, because it is weaker than the name suggests. No
+        // network can currently straddle the activation boundary: V20 is unscheduled on mainnet
+        // and testnet (so *every* timestamp there resolves pre-V20), and devnet activates V20 at
+        // timestamp 0 (so no pre-activation timestamp exists at all). This test therefore proves
+        // the floor is present and rejects -- deleting the floor turns it red -- but it cannot
+        // yet prove the floor *discriminates* pre- from post-activation timestamps. Add that
+        // boundary test when V20 is scheduled; until then the discrimination is untestable.
+        //
+        // Pinned to the Farcaster epoch rather than `now` so the test keeps meaning the same
+        // thing afterwards: once V20 is scheduled, `now` would resolve to V20, the floor would
+        // rightly stop rejecting, and a `now`-based test would go red during the very rollout it
+        // exists to protect. Only the future bound in `validate_timestamp` constrains this value,
+        // so an epoch timestamp reaches the floor instead of dying earlier on an unrelated error.
+        let pre_activation_timestamp = 0;
+        let message = verification_add(pre_activation_timestamp, None);
+
+        let error = block_engine
+            .validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_activation_timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            MessageValidationError::VerificationTimestampBeforeActivation
+        ));
+        assert_eq!(
+            error.to_string(),
+            "verification timestamp predates shard-zero activation"
+        );
+    }
+
+    /// A message's `r#type` and its body are independent on the wire, and nothing in
+    /// `validate_message` requires them to agree. `route_message` and the merge arm dispatch on
+    /// `r#type`, while the validation arm matches on the body -- so a KEY_ADD-typed message
+    /// carrying a verification body routes to shard 0 and reaches the verification validation arm.
+    /// Admitting it would let `submit_message` accept and gossip a message shard 0 can never merge
+    /// (`merge_key_add` rejects the body), burning mempool and block space, and would be a devnet
+    /// behavior change out of an increment that must be inert. Such a message must stay rejected
+    /// exactly as it was before verification arms existed.
+    #[test]
+    fn test_shard_zero_verification_body_with_mismatched_type_is_rejected() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+
+        for spoofed_type in [
+            crate::proto::MessageType::KeyAdd,
+            crate::proto::MessageType::KeyRemove,
+            crate::proto::MessageType::LendStorage,
+        ] {
+            let body = crate::proto::VerificationAddAddressBody {
+                address: verification_address(),
+                claim_signature: hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap(),
+                block_hash: hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+                verification_type: 0,
+                chain_id: 0,
+                protocol: 0,
+            };
+            let spoofed = messages_factory::create_message_with_data(
+                VERIFICATION_FID,
+                spoofed_type,
+                crate::proto::message_data::Body::VerificationAddAddressBody(body),
+                Some(timestamp),
+                None,
+            );
+
+            assert!(
+                matches!(
+                    block_engine.validate_user_message(
+                        &spoofed,
+                        &StorageSlot::new(0, 0, 1, u32::MAX),
+                        &FarcasterTime::new(timestamp as u64),
+                        EngineVersion::V20,
+                        &mut RocksDbTransactionBatch::new(),
+                    ),
+                    Err(MessageValidationError::InvalidMessageType)
+                ),
+                "{spoofed_type:?}-typed message with a verification body must be rejected"
+            );
+        }
+    }
+
+    /// End-to-end inertness on a network where the feature is dormant. The unit tests above drive
+    /// `validate_user_message` directly; this one drives a whole block through propose/commit, so
+    /// it pins all three gates together -- the validation arm, the replay gate, and the merge
+    /// arm's own guard -- plus the things a consensus reader actually cares about: no trie key,
+    /// no stored verification, no fan-out.
+    #[test]
+    fn test_shard_zero_verification_inert_in_pre_activation_block() {
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+
+        let add = verification_add(messages_factory::farcaster_time(), None);
+        let block = commit_message(&mut block_engine, &add, Validity::Invalid);
+
+        assert_no_verification_block_events(&block);
+        assert_verification_index(&block_engine, None);
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+                None,
+            )
+            .unwrap(),
+            None,
+            "a dormant-feature block must not merge a verification into the replica"
+        );
+    }
+
+    #[test]
+    fn test_shard_zero_verification_merge_lww_index_trie_event_and_fanout() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+
+        let add = verification_add(timestamp, None);
+        let add_block = commit_message(&mut block_engine, &add, Validity::Valid);
+        assert_one_verification_block_event(&add_block, &add);
+        assert_verification_index(&block_engine, Some(&add));
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+                None,
+            )
+            .unwrap(),
+            Some(add.clone())
+        );
+        let add_event_id =
+            crate::storage::store::account::HubEventIdGenerator::make_event_id_for_block_number(
+                add_block
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .as_ref()
+                    .unwrap()
+                    .block_number,
+            ) + 1;
+        let add_event = HubEvent::get_event(block_engine.stores().db, add_event_id).unwrap();
+        match add_event.body {
+            Some(crate::proto::hub_event::Body::MergeMessageBody(body)) => {
+                assert_eq!(body.message, Some(add.clone()));
+            }
+            other => panic!("expected merge-message hub event, got {other:?}"),
+        }
+
+        // `commit_message` already asserts the committed message's own trie presence, so each
+        // assertion here names the *other* message -- the LWW eviction is the claim.
+        let replacement = verification_add(timestamp + 1, None);
+        let replacement_block = commit_message(&mut block_engine, &replacement, Validity::Valid);
+        assert_one_verification_block_event(&replacement_block, &replacement);
+        assert_verification_index(&block_engine, Some(&replacement));
+        assert!(!message_exists_in_trie(&mut block_engine, &add));
+
+        let remove = messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            verification_address(),
+            Some(timestamp + 2),
+            None,
+        );
+        let remove_block = commit_message(&mut block_engine, &remove, Validity::Valid);
+        assert_one_verification_block_event(&remove_block, &remove);
+        assert_verification_index(&block_engine, None);
+        assert!(!message_exists_in_trie(&mut block_engine, &replacement));
+        assert_eq!(
+            VerificationStore::get_verification_remove(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+            )
+            .unwrap(),
+            Some(remove.clone())
+        );
+
+        // The stale add is rejected by the CRDT in `merge`, not by `validate_user_message` -- so
+        // the rejection is only visible if the merge error is surfaced rather than swallowed.
+        // `simulate_message` is what submitMessage consults once routing reaches shard 0; it
+        // must not report success for a message that was never stored.
+        assert!(
+            block_engine.simulate_message(&add).is_err(),
+            "stale add's merge error must reach simulate_message, not be swallowed"
+        );
+
+        let old_add_block = commit_message(&mut block_engine, &add, Validity::Invalid);
+        assert_no_verification_block_events(&old_add_block);
+        assert_verification_index(&block_engine, None);
+        assert!(message_exists_in_trie(&mut block_engine, &remove));
+        let merge_failure_id =
+            crate::storage::store::account::HubEventIdGenerator::make_event_id_for_block_number(
+                old_add_block
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .block_number,
+            ) + 1;
+        let merge_failure =
+            HubEvent::get_event(block_engine.stores().db, merge_failure_id).unwrap();
+        assert!(matches!(
+            merge_failure.body,
+            Some(crate::proto::hub_event::Body::MergeFailure(body))
+                if body.message.as_ref() == Some(&add)
+                    && body.code == "bad_request.conflict"
+                    && !body.reason.is_empty()
+        ));
     }
 
     #[tokio::test]

@@ -655,7 +655,18 @@ mod tests {
             Some(&fid_signer),
         );
 
-        commit_message(&mut source_engine, &address_verification_add).await;
+        // Post-V20 verifications reach data shards as shard-0 BlockEvents. Seed the source
+        // through that public replay path so replication coverage keeps a verification row
+        // without relying on the now-rejected direct-submission path.
+        let verification_block_event = factory::events_factory::create_merge_message_event(
+            address_verification_add.clone(),
+            1,
+        );
+        test_helper::commit_block_events(&mut source_engine, vec![&verification_block_event]).await;
+        assert!(test_helper::message_exists_in_trie(
+            &mut source_engine,
+            &address_verification_add,
+        ));
 
         timestamp += 1;
 

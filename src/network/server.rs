@@ -633,7 +633,9 @@ impl MyHubService {
             return Err(HubError::invalid_parameter("fid cannot be 0"));
         }
 
-        let dst_shard = routing::route_message(&self.message_router, &message, self.num_shards);
+        let version = EngineVersion::current(self.network);
+        let dst_shard =
+            routing::route_message(&self.message_router, &message, self.num_shards, version);
 
         match self
             .simulate_message_for_shard_typed(&message, dst_shard)
@@ -1380,7 +1382,8 @@ impl HubService for MyHubService {
         // 1. Group messages by their destination shard
         let mut messages_by_shard: HashMap<u32, Vec<proto::Message>> = HashMap::new();
         for msg in messages {
-            let shard_id = routing::route_message(&self.message_router, &msg, self.num_shards);
+            let shard_id =
+                routing::route_message(&self.message_router, &msg, self.num_shards, version);
             messages_by_shard.entry(shard_id).or_default().push(msg);
         }
 

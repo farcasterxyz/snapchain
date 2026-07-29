@@ -303,6 +303,15 @@ impl VerificationStore {
         fid: u64,
         address: &[u8],
     ) -> Result<Option<Message>, HubError> {
+        Self::get_verification_remove_with_txn(store, fid, address, None)
+    }
+
+    pub fn get_verification_remove_with_txn(
+        store: &Store<VerificationStoreDef>,
+        fid: u64,
+        address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<Message>, HubError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -316,7 +325,7 @@ impl VerificationStore {
             ..Default::default()
         };
 
-        store.get_remove(&partial_message)
+        store.get_remove(&partial_message, maybe_txn)
     }
 
     /// Returns the `(fid, ts_hash)` of every verification currently indexed for

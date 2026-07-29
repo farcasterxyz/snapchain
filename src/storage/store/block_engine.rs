@@ -1,20 +1,23 @@
 use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
     HeartbeatEventBody, HubEvent, MergeMessageBody, MessageType, OnChainEvent, ShardChunkWitness,
-    Transaction,
+    StoreType, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
+    BlockEventStore, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
+    VerificationStore, VerificationStoreDef,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
+use crate::storage::store::stores::{Limits, StoreLimits};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
@@ -67,6 +70,9 @@ pub enum MessageValidationError {
     #[error("invalid message type")]
     InvalidMessageType,
 
+    #[error("verification timestamp predates shard-zero activation")]
+    VerificationTimestampBeforeActivation,
+
     #[error("insufficient storage")]
     InsufficientStorage,
 
@@ -75,6 +81,58 @@ pub enum MessageValidationError {
 
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
+}
+
+// WHY SHARD-0 VERIFICATION TOMBSTONES ARE PERMANENT, AND THEREFORE WHY THEY NEED A CAP.
+//
+// Unlike the data shard's pruned store, shard 0 never reclaims a tombstone. Do not "clean this
+// up" by aging, pruning, or reclaiming them: dropping a tombstone empties the address's logical
+// key, which lets anyone re-gossip the owner's old post-V20-signed add. Shard 0 merges it (LWW
+// against nothing), fans it out, and force-override replay re-imposes it on the data shard
+// unconditionally — resurrecting a verification its owner deliberately removed. Pre-V20 pruning
+// had the same hole bounded by plain LWW; force-override amplifies it. Permanent-but-bounded is
+// the design, and the bound is what keeps "permanent" affordable.
+//
+// Legacy verification limits ran into the hundreds, so this floor lets a fid shed a large
+// pre-V20 verification set. Larger storage allocations scale the bound through `max_messages`.
+// The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
+// shard-0 rows.
+const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
+
+/// How many permanent tombstone rows a fid may mint, given its live-add allowance.
+fn verification_tombstone_cap(max_messages: u32) -> u32 {
+    if max_messages == 0 {
+        0
+    } else {
+        max_messages.max(VERIFICATION_TOMBSTONE_CAP_FLOOR)
+    }
+}
+
+/// The hard bound on a fid's TOTAL permanent shard-0 verification rows (adds + tombstones).
+/// Because rows are never reclaimed, this is a lifetime bound on distinct addresses, not a
+/// concurrent one: a fid that reaches it can still replace rows it already has, but can never
+/// admit a new address again.
+fn verification_row_cap(max_messages: u32) -> u32 {
+    max_messages.saturating_add(verification_tombstone_cap(max_messages))
+}
+
+#[derive(Clone, Copy, Default)]
+struct VerificationMessageCounts {
+    live_adds: u32,
+    tombstones: u32,
+}
+
+impl VerificationMessageCounts {
+    /// The counter a message of `msg_type` belongs to, or `None` if it is not a verification type.
+    /// The single place that maps type -> counter: callers supply their own error for `None`, so
+    /// this mapping cannot drift between the trie read and the in-transaction delta.
+    fn counter_mut(&mut self, msg_type: MessageType) -> Option<&mut u32> {
+        match msg_type {
+            MessageType::VerificationAddEthAddress => Some(&mut self.live_adds),
+            MessageType::VerificationRemove => Some(&mut self.tombstones),
+            _ => None,
+        }
+    }
 }
 
 // `merge_key_add` / `merge_key_remove` in `account::gasless_key_merge` return the
@@ -104,6 +162,7 @@ pub struct BlockStores {
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub verification_store: Store<VerificationStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
@@ -118,6 +177,11 @@ impl BlockStores {
             block_event_store: BlockEventStore { db: db.clone() },
             onchain_event_store: OnchainEventStore::new(db.clone(), store_event_handler.clone()),
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
+            verification_store: VerificationStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
             network,
             db: db.clone(),
             trie,
@@ -271,6 +335,13 @@ impl BlockEngine {
         }
     }
 
+    /// Single-message convenience wrapper. TEST-ONLY BY CONSTRUCTION: it derives the verification
+    /// quota counters by reading the trie, which is correct only at the START of a transaction.
+    /// Block-engine trie updates are staged after the user-message loop, so a mid-loop caller
+    /// would silently read a pre-transaction count and admit past the cap. Production must go
+    /// through `replay_snapchain_txn`, which threads the transaction-local count instead. Keeping
+    /// this `cfg(test)` stops a future caller from reaching for the shorter name.
+    #[cfg(test)]
     pub fn validate_user_message(
         &self,
         message: &proto::Message,
@@ -278,6 +349,93 @@ impl BlockEngine {
         timestamp: &FarcasterTime,
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        let verification_counts = self.verification_message_counts(message.fid(), txn_batch)?;
+        self.validate_user_message_with_verification_counts(
+            message,
+            storage_slot,
+            timestamp,
+            version,
+            txn_batch,
+            verification_counts,
+        )
+    }
+
+    /// Counts the fid's live adds and tombstones separately from the trie. The message types come
+    /// from the same store-type mapping used by data-shard accounting, while keeping the shard-0
+    /// quota semantics explicit per type.
+    fn verification_message_counts(
+        &self,
+        fid: u64,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<VerificationMessageCounts, HubError> {
+        let mut counts = VerificationMessageCounts::default();
+        for msg_type in Limits::store_type_to_message_types(StoreType::Verifications) {
+            let count = self
+                .stores
+                .trie
+                .get_count(
+                    &self.stores.db,
+                    txn_batch,
+                    &TrieKey::for_message_type(fid, msg_type.into_u8()),
+                )
+                .map_err(|err| {
+                    HubError::internal_db_error(&format!(
+                        "unable to count shard-0 verifications: {err}"
+                    ))
+                })?;
+            let count = u32::try_from(count)
+                .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))?;
+            let target = counts.counter_mut(msg_type).ok_or_else(|| {
+                HubError::internal_db_error(
+                    "verification store mapping contains a non-verification type",
+                )
+            })?;
+            *target = target
+                .checked_add(count)
+                .ok_or_else(|| HubError::internal_db_error("verification count overflow"))?;
+        }
+        Ok(counts)
+    }
+
+    /// The type of the fid's existing primary record for `address`, if any. Callers must branch on
+    /// the TYPE, not merely on presence: which counter an incoming message grows depends on what it
+    /// replaces (see the transition match in `validate_user_message_with_verification_counts`).
+    fn verification_logical_key_type(
+        &self,
+        fid: u64,
+        address: &[u8],
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<Option<MessageType>, MessageValidationError> {
+        let add_exists = VerificationStore::get_verification_add(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .is_some();
+        if add_exists {
+            return Ok(Some(MessageType::VerificationAddEthAddress));
+        }
+        Ok(VerificationStore::get_verification_remove_with_txn(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .map(|_| MessageType::VerificationRemove))
+    }
+
+    fn validate_user_message_with_verification_counts(
+        &self,
+        message: &proto::Message,
+        storage_slot: &StorageSlot,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &mut RocksDbTransactionBatch,
+        verification_counts: VerificationMessageCounts,
     ) -> Result<(), MessageValidationError> {
         // Ensure message data is present
         let message_data = message
@@ -388,6 +546,118 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_)
                 if version.is_enabled(ProtocolFeature::GaslessSigners) => {}
+            body @ (crate::proto::message_data::Body::VerificationAddAddressBody(_)
+            | crate::proto::message_data::Body::VerificationRemoveBody(_))
+                if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                // A message's `r#type` and its body are independent on the wire; routing and the
+                // merge path dispatch on `r#type` while this match dispatches on the body. Without
+                // an agreement check, a KEY_ADD-typed message carrying a verification body routes
+                // to shard 0 and would be admitted here — accepted and gossiped by submit_message
+                // even though merge (dispatching on `r#type`) can never merge it. Require
+                // agreement so such a message stays rejected exactly as before these arms existed.
+                let (expected_type, is_add, address) = match body {
+                    crate::proto::message_data::Body::VerificationAddAddressBody(body) => (
+                        MessageType::VerificationAddEthAddress,
+                        true,
+                        body.address.as_slice(),
+                    ),
+                    crate::proto::message_data::Body::VerificationRemoveBody(body) => (
+                        MessageType::VerificationRemove,
+                        false,
+                        body.address.as_slice(),
+                    ),
+                    // Unreachable: the arm's pattern binds only the two bodies above.
+                    _ => return Err(MessageValidationError::InvalidMessageType),
+                };
+                if msg_type != expected_type {
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
+                let embedded_version = EngineVersion::version_for(
+                    &FarcasterTime::new(message_data.timestamp as u64),
+                    self.network,
+                );
+                if !embedded_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                    // Reject a verification minted before this feature existed, even inside a
+                    // block that has it. Such a message already lives on the fid shard, and this
+                    // replica starts empty at activation, so it holds no history to judge the
+                    // message against.
+                    //
+                    // The hazard is for machinery that does not exist yet, which is why this
+                    // rejects rather than merges: if a later change fans shard-0 verification
+                    // merges out to fid shards, an add admitted here could carry an older
+                    // `ts_hash` than a remove the fid shard has already applied. Should that
+                    // replay overwrite local state instead of re-running the CRDT compare in
+                    // `Store::merge_add`, it would resurrect the add and undo the remove.
+                    // Refusing old-regime messages here means such a replay can never encounter
+                    // one. Dropping this check is a one-line revert if that fan-out lands with
+                    // conflict-free replay semantics instead.
+                    return Err(MessageValidationError::VerificationTimestampBeforeActivation);
+                }
+
+                // Production always constructs `Stores`/`BlockStores` with `StoreLimits::default()`,
+                // so the live-add limit matches the data shard's limit exactly. If store limits
+                // ever become configurable, this must read the same injected value the data-shard
+                // prune uses or the two sides will enforce different caps on the same message.
+                let max_messages =
+                    StoreLimits::default().max_messages(storage_slot, StoreType::Verifications);
+                // With no active storage, adds are never admitted, including replacements. This
+                // is the spam gate for shard 0's otherwise gasless verification write path.
+                if max_messages == 0 && is_add {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+                // Admission is decided per TRANSITION, against the quantity each one actually
+                // grows. Two rules a reader may be tempted to collapse back into one, both of
+                // which are unsound — each was a live hole caught in review:
+                //
+                //   1. A type-blind "any existing row supersedes, so admit" carve-out lets an add
+                //      land on a tombstone, skipping the live-add cap while refunding a tombstone
+                //      slot. `remove addr; add addr` then cycles forever.
+                //   2. Gating only the counter a transition grows is still not enough, because
+                //      rows are PERMANENT while the counters are not. `add addr_i; remove addr_i`
+                //      returns `live_adds` to 0 every cycle and leaves a tombstone behind, so any
+                //      rule written purely over current counter state never engages.
+                //
+                // Rows appear ONLY in the two `None` arms, and both check `total_rows`. That makes
+                // the bound locally provable here: no fid can ever exceed
+                // `max_messages + tombstone_cap` permanent replica rows, for any message sequence.
+                let tombstone_cap = verification_tombstone_cap(max_messages);
+                let row_cap = verification_row_cap(max_messages);
+                let total_rows = verification_counts
+                    .live_adds
+                    .saturating_add(verification_counts.tombstones);
+                let existing =
+                    self.verification_logical_key_type(message_data.fid, address, txn_batch)?;
+                match (is_add, existing) {
+                    // Replacing an add with an add: net-zero on both counters, always admitted.
+                    (true, Some(MessageType::VerificationAddEthAddress)) => {}
+                    // Re-adding a tombstoned address. Row-neutral, but it grows `live_adds`.
+                    (true, Some(_)) => {
+                        if verification_counts.live_adds >= max_messages {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                    // Mints a new add row.
+                    (true, None) => {
+                        if verification_counts.live_adds >= max_messages || total_rows >= row_cap {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                    // A remove over any existing row turns an add row into a tombstone row, or
+                    // replaces a tombstone with a newer one. Row-neutral either way, and
+                    // deliberately admitted even past `tombstone_cap`: a fid at cap, or one whose
+                    // storage lapsed, must always be able to shed live state.
+                    (false, Some(_)) => {}
+                    // Mints a new tombstone row. This is the pre-V20-address remove case: the
+                    // replica has never seen the address, so the row is new.
+                    (false, None) => {
+                        if verification_counts.tombstones >= tombstone_cap || total_rows >= row_cap
+                        {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                }
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
 
@@ -415,6 +685,7 @@ impl BlockEngine {
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        block_version: EngineVersion,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let msg_type = message.msg_type();
         let gasless_enabled = if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
@@ -464,8 +735,99 @@ impl BlockEngine {
                     txn_batch,
                 )?])
             }
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                if block_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                // Two different version notions meet here, deliberately. The arm's gate uses the
+                // *block* version, because whether shard 0 may host verifications at all is a
+                // property of the block being replayed. The `MergeContext` carries the message's
+                // *embedded* version, because merge semantics are a property of the message.
+                //
+                // Be precise about what that context does today: nothing. `Store::merge` forwards
+                // `ctx` only to `merge_compact_state`, and `VerificationStoreDef` has no compact
+                // state, so verification adds/removes never read it. It is derived this way so it
+                // agrees by construction with how `ShardEngine::merge_message` builds the context
+                // for this same store, *if* `VerificationStoreDef` ever gates a merge decision on
+                // version (as `LinkStoreDef` already does). Do not read this as a live
+                // constraint, and do not "simplify" it to the block version — that would
+                // silently diverge from the fid shard the moment it starts mattering.
+                //
+                // Only the context half mirrors `ShardEngine`: it has no block-version notion at
+                // all, because a data shard needs no feature gate to host its own verifications.
+                // Do not go looking there for the gate above.
+                let ts = message
+                    .data
+                    .as_ref()
+                    .ok_or(MessageValidationError::NoMessageData)?
+                    .timestamp;
+                // Named apart from `block_version` on purpose: both are `EngineVersion`, so only
+                // the names keep the gate and the merge context from being swapped by a refactor.
+                let embedded_version =
+                    EngineVersion::version_for(&FarcasterTime::new(ts as u64), self.network);
+                let ctx = MergeContext {
+                    version: embedded_version,
+                };
+                Ok(vec![self
+                    .stores
+                    .verification_store
+                    .merge(message, txn_batch, &ctx)?])
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
+    }
+
+    /// Applies one successful merge to the transaction-local verification counters. Block-engine
+    /// trie updates are staged only after the user-message loop, so re-reading the trie mid-loop
+    /// would miss earlier merges. Applying every deleted message before the merged message makes
+    /// the event itself enforce all add/remove replacement transitions.
+    fn apply_verification_count_delta(
+        mut counts: VerificationMessageCounts,
+        merge_message_body: &MergeMessageBody,
+    ) -> Result<VerificationMessageCounts, BlockEngineError> {
+        for deleted in &merge_message_body.deleted_messages {
+            let target = counts.counter_mut(deleted.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge deleted a non-verification row",
+                ))
+            })?;
+            *target = target.checked_sub(1).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count underflow",
+                ))
+            })?;
+        }
+
+        if let Some(message) = &merge_message_body.message {
+            let target = counts.counter_mut(message.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge added a non-verification row",
+                ))
+            })?;
+            *target = target.checked_add(1).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count overflow",
+                ))
+            })?;
+        }
+
+        Ok(counts)
+    }
+
+    /// Mirrors `HubEventExt::from_validation_error`, which cannot be reused directly because it is
+    /// typed on `engine::MessageValidationError` rather than this module's error enum.
+    fn merge_failure_event(message: &proto::Message, err: &MessageValidationError) -> HubEvent {
+        let merge_error = match err {
+            MessageValidationError::HubError(hub_error) => hub_error.clone(),
+            _ => HubError::validation_failure(&err.to_string()),
+        };
+        HubEvent::new_event(
+            proto::HubEventType::MergeFailure,
+            proto::hub_event::Body::MergeFailure(proto::MergeFailureBody {
+                message: Some(message.clone()),
+                code: merge_error.code,
+                reason: merge_error.message,
+            }),
+        )
     }
 
     fn on_merge_message(
@@ -545,23 +907,75 @@ impl BlockEngine {
         let mut storage_slot = self
             .storage_slot_for_transaction(snapchain_txn, version, true, false)
             .unwrap();
+        // Lending validation must exclude borrowed units, but verification quota must include
+        // them exactly as data-shard StoreLimits does. Keep two views and apply any successful
+        // lend in this transaction to both so later verification admission sees the same net
+        // slot on proposal, validation, and commit replay.
+        //
+        // Both are derived up front rather than lazily at the first verification, because the
+        // slot must be snapshotted before any in-transaction lend mutates it via
+        // `on_merge_message`. Shard 0 carries every key rotation and lend, so the prescan keeps
+        // verification-free transactions off the extra storage-rent scan and trie reads.
+        let has_verification = version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
+            && snapchain_txn.user_messages.iter().any(|message| {
+                matches!(
+                    message.msg_type(),
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                )
+            });
+        let mut verification_storage_slot = if has_verification {
+            // Deliberately not `.unwrap()` like the slot above: that call passes
+            // count_borrowed_storage=false and never reads the lend store, while this one does.
+            // `get_storage_slot_for_fid` collapses a RocksDB error into `None`, so unwrapping
+            // would turn a transient local read failure into a panic on the propose/validate/
+            // commit paths. Surface it as an error instead, matching the data shard, whose
+            // equivalent read maps to `EngineError::UsageCountError` rather than aborting.
+            self.storage_slot_for_transaction(snapchain_txn, version, true, true)
+                .ok_or_else(|| {
+                    BlockEngineError::HubError(HubError::internal_db_error(
+                        "unable to read storage slot for shard-0 verification quota",
+                    ))
+                })?
+        } else {
+            storage_slot.clone()
+        };
+        let mut verification_counts = if has_verification {
+            self.verification_message_counts(snapchain_txn.fid, txn_batch)
+                .map_err(BlockEngineError::HubError)?
+        } else {
+            VerificationMessageCounts::default()
+        };
 
         for message in &snapchain_txn.user_messages {
-            match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
-            {
+            let validation_storage_slot = match message.msg_type() {
+                MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                    &verification_storage_slot
+                }
+                _ => &storage_slot,
+            };
+            match self.validate_user_message_with_verification_counts(
+                message,
+                validation_storage_slot,
+                timestamp,
+                version,
+                txn_batch,
+                verification_counts,
+            ) {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 for event in &events {
-                                    match event.body.as_ref().unwrap() {
-                                        proto::hub_event::Body::MergeMessageBody(
-                                            merge_message_body,
-                                        ) => self.on_merge_message(
-                                            &mut storage_slot,
-                                            &merge_message_body,
-                                        )?,
-                                        _ => {}
+                                    if let Some(proto::hub_event::Body::MergeMessageBody(body)) =
+                                        event.body.as_ref()
+                                    {
+                                        // Both views must see the same lend, or verification
+                                        // admission and lend validation drift apart.
+                                        self.on_merge_message(&mut storage_slot, body)?;
+                                        self.on_merge_message(
+                                            &mut verification_storage_slot,
+                                            body,
+                                        )?;
                                     }
                                 }
                                 hub_events.extend(events);
@@ -573,8 +987,79 @@ impl BlockEngine {
                         // storage units. Emitted MergeMessageBody propagates to shards via
                         // BlockEvent so their local DBs can replay the same merge.
                         if version.is_enabled(ProtocolFeature::GaslessSigners) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 hub_events.extend(events);
+                            }
+                        }
+                    }
+                    // THE live path for verifications once V20 is enabled: routing sends them
+                    // here, admission has already applied the timestamp floor and the replica
+                    // quota, and successful merges fan out as BlockEvents for force-override
+                    // replay onto the fid's data shard. Below V20 this arm is unreachable —
+                    // `validate_user_message` rejects verification bodies outright, so the merge
+                    // is never attempted and nothing here can perturb pre-V20 streams.
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                        if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                            match self.merge_message(message, txn_batch, version) {
+                                Ok(events) => {
+                                    for event in &events {
+                                        if let Some(proto::hub_event::Body::MergeMessageBody(
+                                            body,
+                                        )) = event.body.as_ref()
+                                        {
+                                            verification_counts =
+                                                Self::apply_verification_count_delta(
+                                                    verification_counts,
+                                                    body,
+                                                )?;
+                                        }
+                                    }
+                                    hub_events.extend(events)
+                                }
+                                Err(err) => {
+                                    // Surfaced rather than swallowed, unlike the arms above, and
+                                    // the asymmetry is deliberate. For those types the routine
+                                    // rejections are caught in `validate_user_message`, so a merge
+                                    // error is near-unreachable. A verification's rejections --
+                                    // duplicate, add superseded by a newer remove, stale add after
+                                    // a remove -- are all detected *here*, because the validation
+                                    // arm above checks only signatures and the version floor. Drop
+                                    // them and `simulate_message`, which reports success when
+                                    // `validation_errors` is empty, would tell a submitter their
+                                    // verification was accepted while it was never stored.
+                                    //
+                                    // Consensus is unaffected either way: both consensus callers
+                                    // of `replay_snapchain_txn` discard `validation_errors`, and
+                                    // neither the trie nor block events are touched when no merge
+                                    // event is produced. Only `simulate_message` reads this.
+                                    warn!(
+                                        fid = message.fid(),
+                                        hash = message.hex_hash(),
+                                        "Error merging shard-0 verification: {:?}",
+                                        err
+                                    );
+                                    let mut merge_failure =
+                                        Self::merge_failure_event(message, &err);
+                                    // Event-id assignment is a pure function of block content, so
+                                    // a failure here is identical on every node — the event drops
+                                    // from the stream network-wide rather than diverging.
+                                    // MergeFailure is trie-inert and never becomes a BlockEvent,
+                                    // so neither the state root nor events_hash is affected.
+                                    if let Err(event_err) = self
+                                        .stores
+                                        .event_handler
+                                        .commit_transaction(txn_batch, &mut merge_failure)
+                                    {
+                                        error!(
+                                            fid = message.fid(),
+                                            hash = message.hex_hash(),
+                                            "Failed to persist shard-0 verification merge failure event: {:?}",
+                                            event_err
+                                        );
+                                    }
+                                    hub_events.push(merge_failure);
+                                    validation_errors.push(err);
+                                }
                             }
                         }
                     }
@@ -646,14 +1131,14 @@ impl BlockEngine {
                         match msg_type {
                             MessageType::LendStorage
                             | MessageType::KeyAdd
-                            | MessageType::KeyRemove => {
+                            | MessageType::KeyRemove
+                            | MessageType::VerificationAddEthAddress
+                            | MessageType::VerificationRemove => {
                                 // All shard-0-hosted user messages propagate the same way:
                                 // wrap the original message in a MergeMessageEvent so shards
                                 // 1..N can replay the merge into their local DBs via
-                                // ShardEngine::handle_block_event. For KEY_ADD / KEY_REMOVE
-                                // this is what makes gasless-key records visible on every
-                                // shard for scope enforcement, TTL checks, and last_used_at
-                                // bumps (NEYN-10575, NEYN-10576).
+                                // ShardEngine::handle_block_event. Upstream merge gates decide
+                                // whether a feature's messages can reach this allowlist.
                                 max_block_event_seqnum += 1;
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,
@@ -1183,6 +1668,34 @@ impl BlockEngine {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod verification_cap_tests {
+    use super::{verification_row_cap, verification_tombstone_cap};
+
+    // Pinned as pure functions because the interesting input -- an allowance ABOVE the 256 floor,
+    // which takes ~52 storage units -- is impractical to reach through the commit path.
+    #[test]
+    fn tombstone_cap_floors_at_the_constant_and_then_scales() {
+        // No storage: storage-free fids must not mint permanent rows at all.
+        assert_eq!(verification_tombstone_cap(0), 0);
+        assert_eq!(verification_row_cap(0), 0);
+
+        // Below the floor (one 2025 unit is 5), the floor dominates so a whale shedding a large
+        // pre-V20 set is not blocked by its own small live allowance.
+        assert_eq!(verification_tombstone_cap(5), 256);
+        assert_eq!(verification_row_cap(5), 261);
+
+        // Above the floor, the allowance scales instead -- this is the `.max(max_messages)` term.
+        assert_eq!(verification_tombstone_cap(300), 300);
+        assert_eq!(verification_row_cap(300), 600);
+    }
+
+    #[test]
+    fn row_cap_saturates_rather_than_overflowing() {
+        assert_eq!(verification_row_cap(u32::MAX), u32::MAX);
     }
 }
 
