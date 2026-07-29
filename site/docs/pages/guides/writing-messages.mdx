@@ -65,6 +65,7 @@ import {
   FarcasterNetwork,
   MessageType,
 } from '@farcaster/hub-web';
+import { Metadata } from '@grpc/grpc-js';
 import { zeroAddress } from 'viem';
 import { optimism } from 'viem/chains';
 import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
@@ -84,6 +85,14 @@ const HUB_USERNAME = ''; // Username for auth, leave blank if not using TLS
 const HUB_PASS = ''; // Password for auth, leave blank if not using TLS
 const USE_SSL = false; // set to true if talking to a node that uses SSL (3rd party hosted nodes or nodes that require auth)
 const FC_NETWORK = FarcasterNetwork.MAINNET; // Network of the node
+
+// Call metadata for every hubClient call below. Carries basic auth when the node requires it;
+// stays empty otherwise. Named `rpcMetadata` to keep it distinct from `KeyAddBody.metadata`,
+// which is a different thing entirely (see step 3).
+const rpcMetadata = new Metadata();
+if (HUB_USERNAME && HUB_PASS) {
+  rpcMetadata.set('authorization', `Basic ${Buffer.from(`${HUB_USERNAME}:${HUB_PASS}`).toString('base64')}`);
+}
 
 const CHAIN = optimism;
 
@@ -214,7 +223,7 @@ const getOrRegisterSigner = async (fid: number) => {
   const key = (await signer.getSignerKey())._unsafeUnwrap();
 
   // Nonces are strictly increasing per fid. Read the current value and add one.
-  const signers = await hubClient.getSignersByFid({ fid, requesterFids: [] }, metadata);
+  const signers = await hubClient.getSignersByFid({ fid, requesterFids: [] }, rpcMetadata);
   if (signers.isErr()) {
     throw new Error(`Error reading signers: ${signers.error}`);
   }
@@ -243,7 +252,7 @@ const getOrRegisterSigner = async (fid: number) => {
     throw new Error(`Error creating KEY_ADD: ${message.error}`);
   }
 
-  const result = await hubClient.submitMessage(message.value, metadata);
+  const result = await hubClient.submitMessage(message.value, rpcMetadata);
   if (result.isErr()) {
     throw new Error(`Error submitting KEY_ADD to node: ${result.error}`);
   }
@@ -252,7 +261,7 @@ const getOrRegisterSigner = async (fid: number) => {
 };
 
 
-const signer = await getOrRegisterSigner(fid);
+const signerPrivateKey = await getOrRegisterSigner(fid);
 ```
 
 `makeKeyAddBody`, `makeKeyAdd`, `NobleEd25519Signer`, `ViemLocalEip712Signer` and
@@ -351,7 +360,7 @@ const getOrRegisterSigner = async (fid: number) => {
 };
 
 
-const signer = await getOrRegisterSigner(fid);
+const signerPrivateKey = await getOrRegisterSigner(fid);
 ```
 
 </details>
@@ -421,7 +430,7 @@ const submitMessage = async (resultPromise: HubAsyncResult<Message>) => {
   if (result.isErr()) {
     throw new Error(`Error creating message: ${result.error}`);
   }
-  const messageSubmitResult = await hubClient.submitMessage(result.value, metadata);
+  const messageSubmitResult = await hubClient.submitMessage(result.value, rpcMetadata);
   if (messageSubmitResult.isErr()) {
     throw new Error(`Error submitting message to node: ${messageSubmitResult.error}`);
   }
