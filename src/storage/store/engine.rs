@@ -1919,10 +1919,21 @@ impl ShardEngine {
         // for post-activation messages whose embedded timestamps disagree with shard-0 consensus
         // order due to bounded backdating. Pre-activation rows always lose to floored shard-0
         // messages under either rule.
+        //
+        // The context is derived from the message's own embedded timestamp, exactly as
+        // `merge_message` does, so a replayed verification resolves the same version here as it
+        // would on the shard that admitted it. Verifications carry no follow index today; the
+        // context is threaded so that stays true by construction rather than by omission.
+        let ctx = MergeContext {
+            version: EngineVersion::version_for(
+                &FarcasterTime::new(message.data.as_ref().map_or(0, |data| data.timestamp) as u64),
+                self.network,
+            ),
+        };
         Ok(vec![self
             .stores
             .verification_store
-            .merge_force_override(message, txn_batch)
+            .merge_force_override(message, txn_batch, &ctx)
             .map_err(MessageValidationError::StoreError)?])
     }
 

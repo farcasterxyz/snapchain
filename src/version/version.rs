@@ -28,6 +28,7 @@ pub enum EngineVersion {
     V18 = 18,
     V19 = 19,
     V20 = 20,
+    V21 = 21,
 }
 
 pub enum ProtocolFeature {
@@ -58,6 +59,7 @@ pub enum ProtocolFeature {
     ChannelOwnershipEvents,
     ChannelMessages,
     VerificationsOnShardZero,
+    ChannelFollows,
 }
 
 pub struct VersionSchedule {
@@ -219,7 +221,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V20,
+    version: EngineVersion::V21,
 }]
 .as_slice();
 
@@ -345,6 +347,36 @@ impl EngineVersion {
             | ProtocolFeature::ChannelOwnershipEvents
             | ProtocolFeature::ChannelMessages
             | ProtocolFeature::VerificationsOnShardZero => self >= &EngineVersion::V20,
+            // Deliberately its own arm rather than appended to the V20 block above.
+            // Channel follows are not consensus-coupled to the shard-0 channel set: a
+            // follow is an ordinary ReactionAdd on the author's own shard, and the
+            // feature gates only whether the derived follow index is written. Folding
+            // it into the V20 arm would also quietly widen what
+            // `test_channel_features_activate_together` claims to pin — that test names
+            // its five features explicitly, so a sixth sharing the arm would be
+            // uncovered.
+            //
+            // This gate is read from `MergeContext.version`, i.e. the version for the
+            // *message's own embedded timestamp*, and never from a block or snapshot
+            // clock. That is the only clock both write paths share: live merge and
+            // bootstrap replay both reach `ShardEngine::merge_message`, but bootstrap
+            // has only a snapshot timestamp, so gating on that would make a
+            // post-activation snapshot index pre-activation reactions that a node
+            // living through the boundary would have skipped. On the message clock the
+            // index is a pure function of the merged reaction set: same reactions, same
+            // index, however they arrived.
+            //
+            // The teardown side is deliberately ungated — see `FollowIndexGate` in
+            // `store.rs`. Prune and revoke reach `delete_add_transaction` with no
+            // version in hand, so removal is driven by row presence instead.
+            //
+            // SEQUENCING: a mainnet `active_at` for V21 may not be scheduled while
+            // `channel_registrar_for_network(Mainnet)` is still `None` — the registrar
+            // contract is not deployed. Flipping that constant from `None` to `Some`
+            // after activation would itself be an unversioned change to derived state,
+            // so the constant and the schedule entry land together.
+            // `channel_follows_requires_a_registrar_wherever_it_is_scheduled` pins this.
+            ProtocolFeature::ChannelFollows => self >= &EngineVersion::V21,
         }
     }
 
@@ -366,7 +398,9 @@ impl EngineVersion {
             EngineVersion::V15 => 10,
             EngineVersion::V16 => 11,
             EngineVersion::V17 => 12,
-            EngineVersion::V18 | EngineVersion::V19 | EngineVersion::V20 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V18 | EngineVersion::V19 | EngineVersion::V20 | EngineVersion::V21 => {
+                LATEST_PROTOCOL_VERSION
+            }
         }
     }
 
@@ -868,6 +902,37 @@ mod version_test {
     }
 
     #[test]
+    fn test_channel_follows_feature_gate() {
+        assert!(!EngineVersion::V20.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::V21.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelFollows));
+    }
+
+    #[test]
+    fn test_channel_follows_activation_schedule() {
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::ChannelFollows));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::ChannelFollows)
+        );
+    }
+
+    #[test]
+    fn channel_follows_does_not_share_the_v20_channel_boundary() {
+        // The follow index is derived from ordinary reactions on the author's own
+        // shard, with no dependency on the shard-0 channel set, so it must NOT be
+        // folded into the V20 arm. Appending it there would also silently widen what
+        // `test_channel_features_activate_together` appears to cover without that test
+        // actually asserting anything about it.
+        assert!(EngineVersion::V20.is_enabled(ProtocolFeature::ChannelMessages));
+        assert!(!EngineVersion::V20.is_enabled(ProtocolFeature::ChannelFollows));
+    }
+
+    #[test]
     fn test_channel_features_activate_together() {
         // CONSENSUS INVARIANT: the four channel features must be enabled at the exact same
         // versions. VerificationsOnShardZero is pinned alongside them for a weaker reason, spelled
@@ -975,7 +1040,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V20);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V21);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

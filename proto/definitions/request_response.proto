@@ -332,6 +332,84 @@ message ChannelMembershipsResponse {
   optional bytes next_page_token = 2;
 }
 
+// Channel follows.
+//
+// A follow is not its own message type: it is an ordinary ReactionAdd of type
+// REACTION_TYPE_LIKE whose target_url is the CAIP-19 asset id of the channel's
+// ERC-721 token in the Farcaster channel registrar, e.g.
+//
+//   eip155:11155111/erc721:0x7Dd80C661dED9bFC8D4440224A0b39b345a91BE4/18648842650…
+//
+// where the tokenId is the 32-byte channel_id as a decimal uint256. The contract
+// is the registry's ERC-721 (the one `ownerOf` is called against), not the
+// registrar controller that emits the registration events. Exactly one
+// spelling is recognized — lowercase namespaces, no leading zeros, an EIP-55
+// checksummed contract address. A reaction to any other spelling, or to a token
+// in a different contract, is a perfectly valid reaction that simply is not a
+// follow. Unfollowing is the matching ReactionRemove.
+//
+// Because a follow IS a reaction, it consumes the author's reaction storage
+// budget and is subject to the same pruning. A follow disappearing without an
+// unfollow is expected behavior, not a bug: an fid at its reaction limit evicts
+// its oldest reactions, follows included.
+
+// `followed_at` is the Farcaster timestamp of the reaction that expressed the
+// follow. A re-follow refreshes it.
+message ChannelFollower {
+  uint64 fid = 1;
+  uint32 followed_at = 2;
+}
+
+message ChannelFollowersRequest {
+  bytes channel_id = 1;
+  // NOTE: page_size is PER SHARD, unlike the single-shard channel reads. A page
+  // may hold up to page_size * num_shards entries.
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelFollowersResponse {
+  repeated ChannelFollower followers = 1;
+  optional bytes next_page_token = 2;
+}
+
+message ChannelFollowerCountRequest {
+  bytes channel_id = 1;
+}
+
+message ChannelFollowerCountResponse {
+  uint64 count = 1;
+}
+
+message ChannelFollow {
+  bytes channel_id = 1;
+  uint32 followed_at = 2;
+}
+
+message ChannelFollowsRequest {
+  uint64 fid = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelFollowsResponse {
+  repeated ChannelFollow follows = 1;
+  optional bytes next_page_token = 2;
+}
+
+message IsFollowingChannelRequest {
+  uint64 fid = 1;
+  bytes channel_id = 2;
+}
+
+// `followed_at` is present exactly when `following` is true.
+message IsFollowingChannelResponse {
+  bool following = 1;
+  optional uint32 followed_at = 2;
+}
+
 message TierDetails {
   TierType tier_type = 1;
   uint64 expires_at = 2;

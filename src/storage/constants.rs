@@ -63,6 +63,13 @@ pub enum RootPrefix {
 
     /* Shard-0 channel slot indexes and per-channel counters. */
     Channel = 24,
+
+    /* Channel-follow index derived from reactions, on the author's own data shard.
+     * Deliberately NOT a sub-index of `Channel` above: that prefix holds shard-0
+     * channel authority and its data-shard replicas, is scanned wholesale as a test
+     * fixture, and is the natural target of any future "reset the channel replica"
+     * range delete — none of which should touch rows derived from local reactions. */
+    ChannelFollow = 25,
 }
 
 /** Copied from the JS code */

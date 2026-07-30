@@ -19,22 +19,26 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, ChannelInfo, ChannelMember, ChannelMemberRequest, ChannelMemberResponse,
-    ChannelMembersRequest, ChannelMembersResponse, ChannelMembership,
-    ChannelMembershipsByFidRequest, ChannelMembershipsResponse, ChannelMetadataResponse,
-    ChannelModeration, ChannelModerationsRequest, ChannelModerationsResponse, ChannelOwnerRequest,
-    ChannelOwnerResponse, ChannelPin, ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest,
-    ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest, EventsRequest, EventsResponse,
-    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
-    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
-    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
-    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
-    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
-    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
-    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
-    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
-    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
-    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    CastsByParentRequest, ChannelFollow, ChannelFollower, ChannelFollowerCountRequest,
+    ChannelFollowerCountResponse, ChannelFollowersRequest, ChannelFollowersResponse,
+    ChannelFollowsRequest, ChannelFollowsResponse, ChannelInfo, ChannelMember,
+    ChannelMemberRequest, ChannelMemberResponse, ChannelMembersRequest, ChannelMembersResponse,
+    ChannelMembership, ChannelMembershipsByFidRequest, ChannelMembershipsResponse,
+    ChannelMetadataResponse, ChannelModeration, ChannelModerationsRequest,
+    ChannelModerationsResponse, ChannelOwnerRequest, ChannelOwnerResponse, ChannelPin,
+    ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest, ChannelsByFidRequest,
+    ChannelsResponse, DbStats, EventRequest, EventsRequest, EventsResponse, FidAddressTypeRequest,
+    FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest, FidsResponse,
+    GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse,
+    GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
+    IsFollowingChannelRequest, IsFollowingChannelResponse, LinkRequest, LinksByFidRequest,
+    LinksByTargetRequest, MeshTopology, MeshView, Message, MessageType, MessagesResponse,
+    OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
+    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
+    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
+    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
+    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
@@ -198,6 +202,112 @@ fn require_nonzero_page_size(page_size: Option<u32>) -> Result<(), Status> {
         ));
     }
     Ok(())
+}
+
+/// Validates the width of a caller-supplied channel id and returns it as a
+/// fixed-width array.
+///
+/// Split out of `require_registered_channel` so the follow reads can share the
+/// width check without the registration check. Follows are answered from data
+/// shards and deliberately do not require a registered channel — see the contract
+/// on `GetChannelFollowers` in rpc.proto.
+fn require_channel_id_width(channel_id: &[u8]) -> Result<[u8; CHANNEL_ID_LENGTH], Status> {
+    channel_id
+        .try_into()
+        .map_err(|_| Status::invalid_argument("channel_id must be 32 bytes"))
+}
+
+/// Where one shard's scan should pick up.
+///
+/// Three states rather than an `Option`, because `Exhausted` and `Fresh` are not
+/// the same instruction: handing an exhausted shard "start from the beginning"
+/// restarts it, re-emitting its rows on every subsequent page and never
+/// terminating.
+///
+/// This distinction is spelled out ON THE WIRE — the enum is what gets
+/// serialized — rather than reconstructed by a decoder from `Option::None`. With
+/// `Option<Vec<u8>>` on the wire, serde's missing-field-means-`None` rule made a
+/// truncated token like `{"shard_id":1}` decode as `Exhausted`, so a proxy that
+/// strips null fields would turn every shard "complete" and the read would answer
+/// `followers: []` with no next token — "this channel has no followers", as a
+/// success.
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
+enum ShardScan {
+    Fresh,
+    Resume(Vec<u8>),
+    Exhausted,
+}
+
+/// One shard's position in a fan-out enumeration.
+///
+/// Carries the shard id rather than relying on position, so a cursor cannot be
+/// silently applied to the wrong shard if the hosted set changes between pages —
+/// the failure `get_casts_by_parent` has, zipping tokens against `HashMap` order.
+///
+/// `deny_unknown_fields` because this is pagination state, not a forward-
+/// compatible API: silently ignoring a field a newer node meant something by is
+/// how a cursor quietly pages the wrong range.
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ShardCursor {
+    shard_id: u32,
+    scan: ShardScan,
+}
+
+/// Decodes a fan-out `page_token` into one scan position per hosted shard.
+///
+/// A present token must name exactly the node's shard set, each shard once: a
+/// mismatch means it was minted against a different topology, and applying it
+/// would page the wrong shards.
+fn decode_shard_cursors(
+    page_token: Option<Vec<u8>>,
+    shards: &[(u32, &Stores)],
+) -> Result<HashMap<u32, ShardScan>, Status> {
+    let Some(bytes) = page_token.filter(|token| !token.is_empty()) else {
+        return Ok(shards
+            .iter()
+            .map(|(id, _)| (*id, ShardScan::Fresh))
+            .collect());
+    };
+    let cursors: Vec<ShardCursor> = serde_json::from_slice(&bytes)
+        .map_err(|err| Status::invalid_argument(format!("invalid page token: {err}")))?;
+
+    // Built with an explicit loop rather than `collect()`: a `HashMap` silently
+    // keeps the last of a duplicated key, and a length check afterwards only
+    // notices when the collapse drops below the shard count. A token listing one
+    // shard twice plus every other shard once would otherwise pass, with one
+    // cursor discarded.
+    let mut scans: HashMap<u32, ShardScan> = HashMap::with_capacity(cursors.len());
+    for cursor in cursors {
+        let shard_id = cursor.shard_id;
+        if scans.insert(shard_id, cursor.scan).is_some() {
+            return Err(Status::invalid_argument(format!(
+                "page token names shard {shard_id} more than once"
+            )));
+        }
+    }
+    if scans.len() != shards.len() || shards.iter().any(|(id, _)| !scans.contains_key(id)) {
+        return Err(Status::invalid_argument(
+            "page token does not match this node's shards",
+        ));
+    }
+    Ok(scans)
+}
+
+/// Re-encodes the per-shard cursors, or `None` once every shard is exhausted.
+///
+/// Returning `None` at the end is what lets a client terminate; a token that is
+/// always `Some` makes the loop unbounded.
+fn encode_shard_cursors(cursors: Vec<ShardCursor>) -> Result<Option<Vec<u8>>, Status> {
+    if cursors
+        .iter()
+        .all(|cursor| cursor.scan == ShardScan::Exhausted)
+    {
+        return Ok(None);
+    }
+    serde_json::to_vec(&cursors)
+        .map(Some)
+        .map_err(|err| Status::internal(format!("failed to serialize next_page_token: {err}")))
 }
 
 /// Translate a HubError raised by the channel stores into a gRPC `Status`.
@@ -932,6 +1042,35 @@ impl MyHubService {
         };
     }
 
+    /// Every data shard, ascending by shard id, or an error if this node does not
+    /// host all of them.
+    ///
+    /// Fan-out reads must not answer from a subset. An empty follower list from a
+    /// node hosting one shard of four is indistinguishable from a channel nobody
+    /// follows, so an incomplete node has to refuse rather than under-report.
+    ///
+    /// Sorted, and carrying the shard id, because `shard_stores` is a `HashMap`:
+    /// `get_casts_by_parent` zips per-shard page tokens against its unspecified
+    /// iteration order, which means a token slot is not stably bound to any shard.
+    /// Do not reproduce that here.
+    fn all_shard_stores(&self) -> Result<Vec<(u32, &Stores)>, Status> {
+        // Data shards are 1..=num_shards; `route_fid` returns `(hash % n) + 1`.
+        (1..=self.num_shards)
+            .map(|shard_id| {
+                self.shard_stores
+                    .get(&shard_id)
+                    .map(|stores| (shard_id, stores))
+                    .ok_or_else(|| {
+                        Status::failed_precondition(format!(
+                            "node hosts {} of {} shards; cross-shard channel follow reads are unavailable here",
+                            self.shard_stores.len(),
+                            self.num_shards
+                        ))
+                    })
+            })
+            .collect()
+    }
+
     fn get_stores_for_shard(&self, shard_id: u32) -> Result<&Stores, Status> {
         match self.shard_stores.get(&shard_id) {
             Some(store) => Ok(store),
@@ -958,9 +1097,7 @@ impl MyHubService {
         &self,
         channel_id: &[u8],
     ) -> Result<[u8; CHANNEL_ID_LENGTH], Status> {
-        let channel_id: [u8; CHANNEL_ID_LENGTH] = channel_id
-            .try_into()
-            .map_err(|_| Status::invalid_argument("channel_id must be 32 bytes"))?;
+        let channel_id = require_channel_id_width(channel_id)?;
         let channel_key = self
             .block_stores
             .onchain_event_store
@@ -3155,6 +3292,134 @@ impl HubService for MyHubService {
                 })
                 .collect(),
             next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn get_channel_followers(
+        &self,
+        request: Request<ChannelFollowersRequest>,
+    ) -> Result<Response<ChannelFollowersResponse>, Status> {
+        let req = request.into_inner();
+        // Width only: follows live on data shards and carry no registration check.
+        let channel_id = require_channel_id_width(&req.channel_id)?;
+        require_nonzero_page_size(req.page_size)?;
+
+        let shards = self.all_shard_stores()?;
+        let mut cursors = decode_shard_cursors(req.page_token, &shards)?;
+
+        let mut followers = Vec::new();
+        let mut next_cursors = Vec::with_capacity(shards.len());
+        for (shard_id, stores) in &shards {
+            let token = match cursors.remove(shard_id) {
+                Some(ShardScan::Fresh) => None,
+                Some(ShardScan::Resume(token)) => Some(token),
+                // Already read to the end on an earlier page. Skipping it is the
+                // whole point of the three-state cursor: re-scanning with `None`
+                // would re-emit its rows forever.
+                Some(ShardScan::Exhausted) => {
+                    next_cursors.push(ShardCursor {
+                        shard_id: *shard_id,
+                        scan: ShardScan::Exhausted,
+                    });
+                    continue;
+                }
+                // `decode_shard_cursors` guarantees every hosted shard is present,
+                // so this is unreachable. Refuse rather than defaulting to a fresh
+                // scan: if that guarantee is ever loosened, defaulting would
+                // silently restart a shard and page forever.
+                None => {
+                    return Err(Status::internal(format!(
+                        "no cursor for shard {shard_id} after validation"
+                    )))
+                }
+            };
+            let page = ReactionStore::followers_by_channel(
+                &stores.reaction_store,
+                &channel_id,
+                &channel_page_options(req.page_size, token, req.reverse),
+            )
+            .map_err(channel_store_error_to_status)?;
+            followers.extend(page.entries.into_iter().map(|entry| ChannelFollower {
+                fid: entry.fid,
+                followed_at: entry.followed_at,
+            }));
+            next_cursors.push(ShardCursor {
+                shard_id: *shard_id,
+                scan: match page.next_page_token {
+                    Some(token) => ShardScan::Resume(token),
+                    None => ShardScan::Exhausted,
+                },
+            });
+        }
+
+        Ok(Response::new(ChannelFollowersResponse {
+            followers,
+            next_page_token: encode_shard_cursors(next_cursors)?,
+        }))
+    }
+
+    async fn get_channel_follower_count(
+        &self,
+        request: Request<ChannelFollowerCountRequest>,
+    ) -> Result<Response<ChannelFollowerCountResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = require_channel_id_width(&req.channel_id)?;
+
+        // Summed as u64: each shard's counter is a u32, and their total need not be.
+        let mut count: u64 = 0;
+        for (_shard_id, stores) in self.all_shard_stores()? {
+            count += ReactionStore::follower_count(&stores.reaction_store, &channel_id)
+                .map_err(channel_store_error_to_status)?;
+        }
+        Ok(Response::new(ChannelFollowerCountResponse { count }))
+    }
+
+    async fn get_channel_follows(
+        &self,
+        request: Request<ChannelFollowsRequest>,
+    ) -> Result<Response<ChannelFollowsResponse>, Status> {
+        let req = request.into_inner();
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        require_nonzero_page_size(req.page_size)?;
+        // Keyed by fid, so this is a single-shard read with none of the fan-out
+        // caveats.
+        let stores = self.get_stores_for(req.fid)?;
+        let page = ReactionStore::follows_by_fid(
+            &stores.reaction_store,
+            req.fid,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(channel_store_error_to_status)?;
+        Ok(Response::new(ChannelFollowsResponse {
+            follows: page
+                .entries
+                .into_iter()
+                .map(|entry| ChannelFollow {
+                    channel_id: entry.channel_id.to_vec(),
+                    followed_at: entry.followed_at,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn is_following_channel(
+        &self,
+        request: Request<IsFollowingChannelRequest>,
+    ) -> Result<Response<IsFollowingChannelResponse>, Status> {
+        let req = request.into_inner();
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        let channel_id = require_channel_id_width(&req.channel_id)?;
+        let stores = self.get_stores_for(req.fid)?;
+        let followed_at = ReactionStore::is_following(&stores.reaction_store, req.fid, &channel_id)
+            .map_err(channel_store_error_to_status)?;
+        Ok(Response::new(IsFollowingChannelResponse {
+            following: followed_at.is_some(),
+            followed_at,
         }))
     }
 

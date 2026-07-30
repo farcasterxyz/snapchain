@@ -1614,6 +1614,156 @@ pub struct ChannelPinResponse {
     pub pin: Option<ChannelPin>,
 }
 
+// Channel follows. A follow is an ordinary ReactionAdd(LIKE) targeting the
+// channel's CAIP-19 asset id; these endpoints read the index derived from it.
+// See the contract on GetChannelFollowers in rpc.proto — notably that
+// `pageSize` is per shard on `channelFollowers` (the only paginated fan-out
+// read), and that a node not hosting every shard refuses rather than answering
+// partially.
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowersRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelFollowersRequest {
+    fn to_proto(self) -> proto::ChannelFollowersRequest {
+        proto::ChannelFollowersRequest {
+            channel_id: self.channel_id,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollower {
+    pub fid: u64,
+    #[serde(rename = "followedAt")]
+    pub followed_at: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowersResponse {
+    pub followers: Vec<ChannelFollower>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowerCountRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+}
+
+impl ChannelFollowerCountRequest {
+    fn to_proto(self) -> proto::ChannelFollowerCountRequest {
+        proto::ChannelFollowerCountRequest {
+            channel_id: self.channel_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowerCountResponse {
+    pub count: u64,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowsRequest {
+    pub fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelFollowsRequest {
+    fn to_proto(self) -> proto::ChannelFollowsRequest {
+        proto::ChannelFollowsRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollow {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(rename = "followedAt")]
+    pub followed_at: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelFollowsResponse {
+    pub follows: Vec<ChannelFollow>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IsFollowingChannelRequest {
+    pub fid: u64,
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+}
+
+impl IsFollowingChannelRequest {
+    fn to_proto(self) -> proto::IsFollowingChannelRequest {
+        proto::IsFollowingChannelRequest {
+            fid: self.fid,
+            channel_id: self.channel_id,
+        }
+    }
+}
+
+/// `followedAt` is present exactly when `following` is true.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IsFollowingChannelResponse {
+    pub following: bool,
+    #[serde(rename = "followedAt", skip_serializing_if = "Option::is_none")]
+    pub followed_at: Option<u32>,
+}
+
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelModerationsRequest {
@@ -3706,6 +3856,22 @@ pub trait HubHttpService {
         &self,
         req: ChannelMembershipsByFidRequest,
     ) -> Result<ChannelMembershipsResponse, ErrorResponse>;
+    async fn get_channel_followers(
+        &self,
+        req: ChannelFollowersRequest,
+    ) -> Result<ChannelFollowersResponse, ErrorResponse>;
+    async fn get_channel_follower_count(
+        &self,
+        req: ChannelFollowerCountRequest,
+    ) -> Result<ChannelFollowerCountResponse, ErrorResponse>;
+    async fn get_channel_follows(
+        &self,
+        req: ChannelFollowsRequest,
+    ) -> Result<ChannelFollowsResponse, ErrorResponse>;
+    async fn is_following_channel(
+        &self,
+        req: IsFollowingChannelRequest,
+    ) -> Result<IsFollowingChannelResponse, ErrorResponse>;
     async fn get_fid_address_type(
         &self,
         req: FidAddressTypeRequest,
@@ -4699,6 +4865,91 @@ where
         })
     }
 
+    /// GET /v1/channelFollowers
+    async fn get_channel_followers(
+        &self,
+        req: ChannelFollowersRequest,
+    ) -> Result<ChannelFollowersResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_followers(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel followers"))?
+            .into_inner();
+        Ok(ChannelFollowersResponse {
+            followers: response
+                .followers
+                .into_iter()
+                .map(|follower| ChannelFollower {
+                    fid: follower.fid,
+                    followed_at: follower.followed_at,
+                })
+                .collect(),
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        })
+    }
+
+    /// GET /v1/channelFollowerCount
+    async fn get_channel_follower_count(
+        &self,
+        req: ChannelFollowerCountRequest,
+    ) -> Result<ChannelFollowerCountResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_follower_count(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel follower count"))?
+            .into_inner();
+        Ok(ChannelFollowerCountResponse {
+            count: response.count,
+        })
+    }
+
+    /// GET /v1/channelFollows
+    async fn get_channel_follows(
+        &self,
+        req: ChannelFollowsRequest,
+    ) -> Result<ChannelFollowsResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_follows(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel follows"))?
+            .into_inner();
+        Ok(ChannelFollowsResponse {
+            follows: response
+                .follows
+                .into_iter()
+                .map(|follow| ChannelFollow {
+                    channel_id: follow.channel_id,
+                    followed_at: follow.followed_at,
+                })
+                .collect(),
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        })
+    }
+
+    /// GET /v1/isFollowingChannel
+    async fn is_following_channel(
+        &self,
+        req: IsFollowingChannelRequest,
+    ) -> Result<IsFollowingChannelResponse, ErrorResponse> {
+        let response = self
+            .service
+            .is_following_channel(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to check channel follow"))?
+            .into_inner();
+        Ok(IsFollowingChannelResponse {
+            following: response.following,
+            followed_at: response.followed_at,
+        })
+    }
+
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
         let service = &self.service;
 
@@ -5065,6 +5316,38 @@ where
                     },
                 )
                 .await,
+            (&Method::GET, "/v1/channelFollowers") => {
+                self.handle_request::<ChannelFollowersRequest, ChannelFollowersResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_channel_followers(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelFollowerCount") => {
+                self.handle_request::<ChannelFollowerCountRequest, ChannelFollowerCountResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_channel_follower_count(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelFollows") => {
+                self.handle_request::<ChannelFollowsRequest, ChannelFollowsResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_follows(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/isFollowingChannel") => {
+                self.handle_request::<IsFollowingChannelRequest, IsFollowingChannelResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.is_following_channel(req).await }),
+                )
+                .await
+            }
             (&Method::GET, "/v1/onChainIdRegistryEventByAddress") => {
                 self.handle_request::<IdRegistryEventByAddressRequest, OnChainEvent, _>(
                     req,

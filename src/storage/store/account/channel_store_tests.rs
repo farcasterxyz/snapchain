@@ -1823,7 +1823,12 @@ mod tests {
         assert_eq!(
             stores
                 .update
-                .merge_add(&ts_hash, &message, &mut txn)
+                .merge_add(
+                    &ts_hash,
+                    &message,
+                    &mut txn,
+                    crate::storage::store::account::FollowIndexGate::no_follow_carrier(),
+                )
                 .unwrap_err()
                 .message,
             expected

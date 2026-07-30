@@ -2,6 +2,7 @@ use super::account::{
     EventsPage, HubEventStorageExt, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore,
     UserDataStoreDef, VerificationStore, VerificationStoreDef,
 };
+use crate::core::channel_uri::channel_registrar_for_network;
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::network::http_server::TierType;
@@ -294,6 +295,10 @@ impl Stores {
             event_handler.clone(),
             100,
             store_opts.clone(),
+            // From the network, never from `store_opts` or connector config: this
+            // decides the contents of a replicated derived index, so every node on
+            // a network has to resolve it identically.
+            channel_registrar_for_network(network),
         );
         let link_store =
             LinkStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
