@@ -33,7 +33,7 @@ mod tests {
     use crate::storage::store::account::{
         make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
         ChannelPinStore, ChannelUpdateStore, DerivedIndexGate, HubEventIdGenerator,
-        HubEventStorageExt, VerificationStoreDef, CHANNEL_MEMBER_SLOT_CAP,
+        HubEventStorageExt, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MEMBER_SLOT_CAP,
         CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
@@ -1596,6 +1596,246 @@ mod tests {
                 .map(|member| member.fid)
                 .collect::<Vec<_>>(),
             vec![602]
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_read_rpcs_reject_malformed_requests_before_reading() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "read-validation";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x51),
+            now_unix_seconds() + 3600,
+        );
+
+        // A fid outside a non-zero u32 cannot key a member slot. Without the explicit
+        // guard, `make_member_by_fid_key`'s own `try_from` failure would surface as
+        // `internal` — a server fault for what is caller input.
+        for fid in [0u64, u32::MAX as u64 + 1, u64::MAX] {
+            assert_eq!(
+                service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: channel_id.clone(),
+                        fid,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument,
+                "get_channel_member must reject fid {fid}"
+            );
+            assert_eq!(
+                service
+                    .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                        fid,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument,
+                "get_channel_memberships_by_fid must reject fid {fid}"
+            );
+        }
+
+        // An i32 outside ChannelMemberState is caller input, not a store fault.
+        assert_eq!(
+            service
+                .get_channel_members(Request::new(ChannelMembersRequest {
+                    channel_id: channel_id.clone(),
+                    state_filter: Some(99),
+                    page_size: None,
+                    page_token: None,
+                    reverse: None,
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // `require_registered_channel` is shared by five handlers but was only ever
+        // reached through get_channel_pin. Both of its branches, on all five.
+        let malformed = vec![0x11; CHANNEL_ID_LENGTH - 1];
+        let unregistered = vec![0x99; CHANNEL_ID_LENGTH];
+        for (bad_channel_id, expected) in [
+            (malformed, tonic::Code::InvalidArgument),
+            (unregistered, tonic::Code::NotFound),
+        ] {
+            assert_eq!(
+                service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: bad_channel_id.clone(),
+                        fid: 101,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id: bad_channel_id.clone(),
+                        state_filter: None,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_pin(Request::new(ChannelRequest {
+                        channel_id: bad_channel_id.clone(),
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                        channel_id: bad_channel_id.clone(),
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_metadata(Request::new(ChannelRequest {
+                        channel_id: bad_channel_id.clone(),
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+        }
+
+        // GetChannelMembershipsByFid is fid-keyed and takes no channel_id, so it has
+        // no registration check at all and must NOT report NOT_FOUND for a fid with
+        // no memberships — the rpc.proto contract calls this out explicitly.
+        let empty = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 424_242,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(empty.memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_member_state_none_filter_returns_every_state() {
+        // CHANNEL_MEMBER_STATE_NONE is the proto3 zero value, so it is exactly what a
+        // client sends by leaving `state_filter` set to its default. It must mean "no
+        // filter", identical to omitting the field — `channel_member_state_from_proto`
+        // maps it to None and `get_channel_members` then `and_then`s it away. Making
+        // that mapping total would silently give every such client empty pages.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "none-filter";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x52),
+            now_unix_seconds() + 3600,
+        );
+
+        for (index, (fid, action)) in [
+            (201u64, proto::ChannelMemberAction::AddMember),
+            (202, proto::ChannelMemberAction::AddModerator),
+            (203, proto::ChannelMemberAction::Ban),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            merge_channel_message(
+                &block_engine,
+                &messages_factory::create_message_with_data(
+                    500,
+                    proto::MessageType::ChannelMember,
+                    proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                        channel_id: channel_id.clone(),
+                        fid,
+                        action: action as i32,
+                    }),
+                    Some(index as u32 + 30),
+                    None,
+                ),
+            );
+        }
+
+        let fids_for = |filter: Option<i32>| {
+            let service = &service;
+            let channel_id = channel_id.clone();
+            async move {
+                let mut fids = service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id,
+                        state_filter: filter,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .members
+                    .into_iter()
+                    .map(|member| member.fid)
+                    .collect::<Vec<_>>();
+                fids.sort();
+                fids
+            }
+        };
+
+        let unfiltered = fids_for(None).await;
+        assert_eq!(unfiltered, vec![201, 202, 203]);
+        assert_eq!(
+            fids_for(Some(proto::ChannelMemberState::None as i32)).await,
+            unfiltered,
+            "an explicit NONE filter must behave exactly like an absent one"
+        );
+        // A real filter still narrows, so "NONE means everything" is not just the
+        // filter being ignored altogether.
+        assert_eq!(
+            fids_for(Some(proto::ChannelMemberState::Banned as i32)).await,
+            vec![203]
         );
     }
 
