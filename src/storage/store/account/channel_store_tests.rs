@@ -11,7 +11,7 @@ mod tests {
         ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
         ChannelModerateStoreDef, ChannelModerationState, ChannelPinStore, ChannelPinStoreDef,
         ChannelUpdateStore, ChannelUpdateStoreDef, DerivedIndexGate, Store, StoreEventHandler,
-        CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP,
+        StoreOptions, CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP,
     };
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
     use crate::utils::factory::messages_factory;
@@ -443,6 +443,79 @@ mod tests {
         .unwrap();
         assert!(memberships_boundary.entries.is_empty());
         assert_eq!(memberships_boundary.next_page_token, None);
+    }
+
+    #[test]
+    fn production_slot_caps_are_the_ones_wired_into_the_stores() {
+        // The cap BEHAVIOR is exercised at a shrunken cap via
+        // `StoreOptions::channel_slot_cap_override`, because filling 8k/16k rows took
+        // ~80s. That trade is sound — the `count >= cap` check is cap-value
+        // independent — but it leaves nothing proving the production constants are
+        // what `define_channel_store!` actually wires in. Asserting the constants
+        // alone would not: the override expression is the only path under test.
+        let stores = test_stores();
+        assert_eq!(
+            ChannelMemberStore::slot_cap(&stores.member),
+            Some(CHANNEL_MEMBER_SLOT_CAP)
+        );
+        assert_eq!(
+            ChannelModerateStore::slot_cap(&stores.moderate),
+            Some(CHANNEL_MODERATE_SLOT_CAP)
+        );
+        // Update and pin are single-slot per channel and must stay uncapped, with or
+        // without an override in play — `$default_slot_cap.map(..)` is what keeps an
+        // override from inventing a cap where production has none.
+        assert_eq!(ChannelUpdateStore::slot_cap(&stores.update), None);
+        assert_eq!(ChannelPinStore::slot_cap(&stores.pin), None);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(RocksDB::new(
+            temp_dir.path().join("override.db").to_str().unwrap(),
+        ));
+        db.open().unwrap();
+        let event_handler = StoreEventHandler::new();
+        let opts = StoreOptions {
+            channel_slot_cap_override: Some(24),
+            ..Default::default()
+        };
+        assert_eq!(
+            ChannelMemberStore::slot_cap(&ChannelMemberStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            Some(24)
+        );
+        assert_eq!(
+            ChannelModerateStore::slot_cap(&ChannelModerateStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            Some(24)
+        );
+        assert_eq!(
+            ChannelUpdateStore::slot_cap(&ChannelUpdateStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            None,
+            "an override must not introduce a cap on an uncapped store"
+        );
+        assert_eq!(
+            ChannelPinStore::slot_cap(&ChannelPinStore::new_with_opts(
+                db,
+                event_handler,
+                100,
+                opts,
+            )),
+            None,
+            "an override must not introduce a cap on an uncapped store"
+        );
     }
 
     #[test]

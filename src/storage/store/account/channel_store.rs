@@ -886,6 +886,15 @@ macro_rules! define_channel_store {
                     store_opts,
                 )
             }
+
+            /// The slot cap this store was actually constructed with.
+            ///
+            /// Boundary behavior is exercised through the test-only override, which
+            /// means nothing else proves the PRODUCTION constant is the one wired in
+            /// here. This lets a test assert that separately from exercising it.
+            pub fn slot_cap(store: &Store<$def>) -> Option<u32> {
+                ChannelSlotStoreDef::slot_cap(&store.store_def())
+            }
         }
     };
 }
