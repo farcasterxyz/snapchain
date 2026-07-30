@@ -1922,6 +1922,9 @@ mod tests {
         assert_eq!(memberships.memberships.len(), 1);
         assert_eq!(memberships.memberships[0].channel_id, channel_id);
 
+        // `page_size: 0` is caller error, not an empty enumeration. Serving it as an
+        // empty page with no token would assert "this channel has no members, paging
+        // complete" to a client that only meant to leave the field unset.
         let members_zero = service
             .get_channel_members(Request::new(ChannelMembersRequest {
                 channel_id: channel_id.clone(),
@@ -1931,10 +1934,8 @@ mod tests {
                 reverse: None,
             }))
             .await
-            .unwrap()
-            .into_inner();
-        assert!(members_zero.members.is_empty());
-        assert_eq!(members_zero.next_page_token, None);
+            .unwrap_err();
+        assert_eq!(members_zero.code(), tonic::Code::InvalidArgument);
 
         let moderations_zero = service
             .get_channel_moderations(Request::new(ChannelModerationsRequest {
@@ -1944,10 +1945,8 @@ mod tests {
                 reverse: None,
             }))
             .await
-            .unwrap()
-            .into_inner();
-        assert!(moderations_zero.moderations.is_empty());
-        assert_eq!(moderations_zero.next_page_token, None);
+            .unwrap_err();
+        assert_eq!(moderations_zero.code(), tonic::Code::InvalidArgument);
 
         let memberships_zero = service
             .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
@@ -1957,10 +1956,23 @@ mod tests {
                 reverse: None,
             }))
             .await
+            .unwrap_err();
+        assert_eq!(memberships_zero.code(), tonic::Code::InvalidArgument);
+
+        // Omitting page_size still enumerates normally — the distinction the
+        // rejection above exists to preserve.
+        let members_default = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
             .unwrap()
             .into_inner();
-        assert!(memberships_zero.memberships.is_empty());
-        assert_eq!(memberships_zero.next_page_token, None);
+        assert!(!members_default.members.is_empty());
     }
 
     mod channel_scenario_tests {

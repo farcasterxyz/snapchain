@@ -185,6 +185,21 @@ fn channel_page_options(
     }
 }
 
+/// Rejects `page_size: 0` on the paginated channel reads.
+///
+/// Zero is the natural default an unset integer takes in generated clients, and
+/// serving it as an empty page with no `next_page_token` would assert "this
+/// channel has no members, enumeration complete" — indistinguishable from the
+/// truth. Callers wanting the server default must omit the field.
+fn require_nonzero_page_size(page_size: Option<u32>) -> Result<(), Status> {
+    if page_size == Some(0) {
+        return Err(Status::invalid_argument(
+            "page_size must be greater than zero; omit it for the server default",
+        ));
+    }
+    Ok(())
+}
+
 /// Translate a HubError raised by the channel stores into a gRPC `Status`.
 /// `bad_request.*` codes are caller-supplied input — a page token that does not
 /// belong to the requested index, an out-of-range fid — so they surface as
@@ -2971,12 +2986,7 @@ impl HubService for MyHubService {
     ) -> Result<Response<ChannelMembersResponse>, Status> {
         let req = request.into_inner();
         self.require_registered_channel(&req.channel_id)?;
-        if req.page_size == Some(0) {
-            return Ok(Response::new(ChannelMembersResponse {
-                members: Vec::new(),
-                next_page_token: None,
-            }));
-        }
+        require_nonzero_page_size(req.page_size)?;
         let state_filter = req
             .state_filter
             .map(|value| {
@@ -3037,12 +3047,7 @@ impl HubService for MyHubService {
     ) -> Result<Response<ChannelModerationsResponse>, Status> {
         let req = request.into_inner();
         self.require_registered_channel(&req.channel_id)?;
-        if req.page_size == Some(0) {
-            return Ok(Response::new(ChannelModerationsResponse {
-                moderations: Vec::new(),
-                next_page_token: None,
-            }));
-        }
+        require_nonzero_page_size(req.page_size)?;
         let page = ChannelModerateStore::moderations_by_channel(
             &self.block_stores.channel_moderate_store,
             &req.channel_id,
@@ -3105,12 +3110,7 @@ impl HubService for MyHubService {
         if req.fid == 0 || u32::try_from(req.fid).is_err() {
             return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
         }
-        if req.page_size == Some(0) {
-            return Ok(Response::new(ChannelMembershipsResponse {
-                memberships: Vec::new(),
-                next_page_token: None,
-            }));
-        }
+        require_nonzero_page_size(req.page_size)?;
         let page = ChannelMemberStore::memberships_by_fid(
             &self.block_stores.channel_member_store,
             req.fid,

@@ -128,7 +128,8 @@ service HubService {
   // above, a token is scoped to the index that minted it — passing one channel's
   // token to another channel (or another fid's to GetChannelMembershipsByFid)
   // is INVALID_ARGUMENT rather than a silent cross-channel read. `page_size` is
-  // clamped to the server maximum without signalling; omit it for the default.
+  // clamped to the server maximum without signalling, and `page_size: 0` is
+  // INVALID_ARGUMENT rather than an empty terminal page — omit it for the default.
   rpc GetChannelMember(ChannelMemberRequest) returns (ChannelMemberResponse);
   rpc GetChannelMembers(ChannelMembersRequest) returns (ChannelMembersResponse);
   rpc GetChannelPin(ChannelRequest) returns (ChannelPinResponse);
