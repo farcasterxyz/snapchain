@@ -72,18 +72,29 @@ service HubService {
 
   rpc GetOnChainEvents(OnChainEventRequest) returns (OnChainEventResponse);
   // Resolves the current channel registry owner address to an fid using the
-  // same node-local consistency class as GetOnChainEvents: resolution covers
-  // only the verification shards this node hosts, and shard-0 ownership state
-  // and verification shards progress independently, so transient skew is
-  // possible. This read is not consensus.
+  // shard-0 verification replica. The owner is the winning verifier of the
+  // address in that replica (greatest ts_hash, ties to the lower fid);
+  // verifications that exist only in pre-activation data-shard history do not
+  // participate. This read is not consensus.
   //
-  // Because the owner is the last-write-wins verifier of the address across ALL
-  // shards, a node that does not host every data shard can return an fid that is
-  // stale (an older verifier whose home shard it hosts, when the true latest
-  // verifier lives on a shard it does not host) or 0/"parked" (when no hosted
-  // shard holds any verifier). Only a node hosting all data shards is guaranteed
-  // to return the globally-correct owner. Callers that need an authoritative
-  // answer must query a full node.
+  // An fid of 0 means the owner's verification has not landed on shard 0 yet.
+  // It is a normal, expected state — not an error and not a lookup failure. The
+  // registration exists and the owner address is known; nothing binds that
+  // address to an fid on shard 0 yet, so there is no one to authorize.
+  //
+  // Two situations produce it: the address was never verified, or it was
+  // verified only before activation, which the shard-0 admission timestamp
+  // floor deliberately excludes. The node cannot tell them apart — both are the
+  // same absent replica row — and does not need to, because the remedy is the
+  // same either way. Surface fid 0 as "not yet", never as "abandoned".
+  //
+  // RE-VERIFICATION IS REQUIRED. There is no backfill of pre-activation
+  // verification history into the shard-0 replica, so an owner who verified
+  // their address before activation MUST submit a fresh verification of the
+  // same address afterwards for their channel to become manageable. Until they
+  // do, every permissioned write on the channel is rejected exactly as if it
+  // were unclaimed. Clients should present fid 0 as an actionable "verify your
+  // address to manage this channel" state rather than an error.
   //
   // Expiry is returned as-is and may be in the past. The registry contract
   // emits no onchain event when a lapsed registration's grace period ends, so
@@ -96,10 +107,8 @@ service HubService {
   // Lists channels for a raw 20-byte EVM owner address, including lapsed
   // registrations (expiry in the past) until a later registration supersedes
   // them — see GetChannelOwner's expiry note; callers interpret `expiry`
-  // themselves. Uses the same node-local consistency class as GetChannelOwner:
-  // resolution covers only the verification shards this node hosts, and
-  // shard-0 ownership state and verification shards progress independently,
-  // so transient skew is possible.
+  // themselves. Owner resolution uses the shard-0 verification replica, as in
+  // GetChannelOwner.
   // This read is not consensus. `page_token` is opaque bytes; callers page until
   // `next_page_token` is unset, which marks the end of enumeration. A page that
   // lands exactly on the last entry may return a token that yields one final
@@ -107,11 +116,9 @@ service HubService {
   rpc GetChannelsByAddress(ChannelsByAddressRequest) returns (ChannelsResponse);
   // Lists channels that currently resolve to `fid`, including lapsed
   // registrations (see GetChannelOwner's expiry note). The node must host the
-  // fid's home shard, following existing fid-routed read behavior.
-  // Address resolution uses the same node-local consistency class as
-  // GetChannelOwner: resolution covers only the verification shards this node
-  // hosts, and shard-0 ownership state and verification shards progress
-  // independently, so transient skew is possible. This read is not consensus.
+  // fid's home shard to enumerate its verified addresses, following existing
+  // fid-routed read behavior. The final owner-winner filter uses the shard-0
+  // verification replica, as in GetChannelOwner. This read is not consensus.
   //
   // This is a joined read over the fid's verified EVM addresses and the channel
   // owner-address index. The verified addresses are enumerated in ascending
@@ -121,6 +128,31 @@ service HubService {
   // (a boundary-aligned page may return one final empty page). There is no
   // `reverse` (addresses iterate ascending only).
   rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
+  // Channel-message reads use shard-0 stores. All channel_id values are the raw
+  // 32-byte registry labels; any other width is INVALID_ARGUMENT, not NOT_FOUND.
+  //
+  // The five channel_id-keyed reads below require a registered channel and
+  // return NOT_FOUND otherwise; a registered channel with no matching state
+  // returns an empty/default response or page. GetChannelMembershipsByFid is
+  // the exception: it is keyed by fid alone, performs no registration check,
+  // and therefore never returns NOT_FOUND — it can list memberships for
+  // channels the caller cannot look up individually. It and GetChannelMember
+  // reject an fid that is zero or exceeds u32 with INVALID_ARGUMENT.
+  //
+  // Paging on the three list reads follows GetChannelsByAddress: `page_token`
+  // is opaque bytes, page until `next_page_token` is unset, and a
+  // boundary-aligned page may yield one final empty page. Unlike the reads
+  // above, a token is scoped to the index that minted it — passing one channel's
+  // token to another channel (or another fid's to GetChannelMembershipsByFid)
+  // is INVALID_ARGUMENT rather than a silent cross-channel read. `page_size` is
+  // clamped to the server maximum without signalling, and `page_size: 0` is
+  // INVALID_ARGUMENT rather than an empty terminal page — omit it for the default.
+  rpc GetChannelMember(ChannelMemberRequest) returns (ChannelMemberResponse);
+  rpc GetChannelMembers(ChannelMembersRequest) returns (ChannelMembersResponse);
+  rpc GetChannelPin(ChannelRequest) returns (ChannelPinResponse);
+  rpc GetChannelModerations(ChannelModerationsRequest) returns (ChannelModerationsResponse);
+  rpc GetChannelMetadata(ChannelRequest) returns (ChannelMetadataResponse);
+  rpc GetChannelMembershipsByFid(ChannelMembershipsByFidRequest) returns (ChannelMembershipsResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);

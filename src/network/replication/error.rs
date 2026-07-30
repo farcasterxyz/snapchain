@@ -1,6 +1,6 @@
 use std::{fmt::Display, sync::PoisonError};
 
-use crate::{core::error::HubError, storage::trie::errors::TrieError};
+use crate::{core::error::HubError, proto, storage::trie::errors::TrieError};
 
 #[derive(Debug)]
 pub enum ReplicationError {
@@ -9,6 +9,12 @@ pub enum ReplicationError {
     InternalError(String),           // message
     InvalidMessage(String),          // message
     TimestampTooOld(u32, u64, u64),  // shard, height, timestamp
+    /// A channel message type was requested from a snapshot taken before
+    /// `ChannelMessages` activated. Distinct from `InvalidMessage` so callers and
+    /// tests can tell "this type is gated off for this snapshot" from "this type is
+    /// not replicable at all" — sharing one variant made the activation gate
+    /// indistinguishable from the permanently-unsupported arm.
+    ChannelMessagesInactive(u32, u64, proto::MessageType), // shard, height, type
 }
 
 impl From<TrieError> for ReplicationError {
@@ -51,6 +57,12 @@ impl From<ReplicationError> for tonic::Status {
                     shard, height, timestamp
                 ))
             }
+            ReplicationError::ChannelMessagesInactive(shard, height, message_type) => {
+                tonic::Status::failed_precondition(format!(
+                    "Channel message type is inactive for snapshot {} on shard {}: {:?}",
+                    height, shard, message_type
+                ))
+            }
         }
     }
 }
@@ -75,6 +87,13 @@ impl Display for ReplicationError {
                     f,
                     "Timestamp too old for shard {}, height {}, timestamp {}",
                     shard, height, timestamp
+                )
+            }
+            ReplicationError::ChannelMessagesInactive(shard, height, message_type) => {
+                write!(
+                    f,
+                    "Channel message type is inactive for snapshot {} on shard {}: {:?}",
+                    height, shard, message_type
                 )
             }
         }

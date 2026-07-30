@@ -6,12 +6,12 @@ mod tests {
         MembershipMode, Message, MessageType,
     };
     use crate::storage::constants::RootPrefix;
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
         ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
         ChannelModerateStoreDef, ChannelModerationState, ChannelPinStore, ChannelPinStoreDef,
-        ChannelUpdateStore, ChannelUpdateStoreDef, Store, StoreEventHandler,
-        CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP,
+        ChannelUpdateStore, ChannelUpdateStoreDef, DerivedIndexGate, Store, StoreEventHandler,
+        StoreOptions, CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP,
     };
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
     use crate::utils::factory::messages_factory;
@@ -185,6 +185,811 @@ mod tests {
     }
 
     #[test]
+    fn member_by_fid_index_is_gated_and_shared_with_channel_reads() {
+        let stores = test_stores();
+        let target_fid = 77;
+        let pre_gate_channel = channel_id(0x10);
+        let active_channel = channel_id(0x20);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge(
+            &stores.member,
+            &member_message(
+                1,
+                pre_gate_channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddMember,
+                1,
+            ),
+            &mut txn,
+            DerivedIndexGate::Skip,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+
+        let pre_gate_index =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &pre_gate_channel).unwrap();
+        assert!(stores.db.get(&pre_gate_index).unwrap().is_none());
+        assert!(ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            target_fid,
+            &PageOptions::default(),
+        )
+        .unwrap()
+        .entries
+        .is_empty());
+
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge(
+            &stores.member,
+            &member_message(
+                2,
+                active_channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddModerator,
+                2,
+            ),
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+
+        let active_index =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &active_channel).unwrap();
+        assert_eq!(stores.db.get(&active_index).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries,
+            vec![crate::storage::store::account::ChannelMembershipEntry {
+                channel_id: active_channel.clone(),
+                state: ChannelMemberState::Moderator,
+            }]
+        );
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &active_channel,
+                Some(ChannelMemberState::Moderator),
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries[0]
+                .last_action_ts,
+            2
+        );
+    }
+
+    #[test]
+    fn channel_read_pagination_round_trips_tokens_and_terminates_after_boundary_page() {
+        let stores = test_stores();
+        let members_channel = channel_id(0x30);
+        let memberships_channels = [channel_id(0x40), channel_id(0x41)];
+        let memberships_fid = 30;
+        let moderated_hashes = [cast_hash(1), cast_hash(2)];
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (timestamp, fid) in [(1, 10), (2, 20)] {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    members_channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, channel) in memberships_channels.iter().enumerate() {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    memberships_fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 3,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in moderated_hashes.iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    members_channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 5,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        let members_first = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(members_first.entries.len(), 1);
+        assert_eq!(members_first.entries[0].fid, 10);
+        assert!(members_first.next_page_token.is_some());
+        let members_second = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: members_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(members_second.entries.len(), 1);
+        assert_eq!(members_second.entries[0].fid, 20);
+        assert!(members_second.next_page_token.is_some());
+        let members_boundary = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: members_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(members_boundary.entries.is_empty());
+        assert_eq!(members_boundary.next_page_token, None);
+
+        let moderations_first = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moderations_first.entries.len(), 1);
+        assert_eq!(moderations_first.entries[0].cast_hash, moderated_hashes[0]);
+        assert!(moderations_first.next_page_token.is_some());
+        let moderations_second = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: moderations_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moderations_second.entries.len(), 1);
+        assert_eq!(moderations_second.entries[0].cast_hash, moderated_hashes[1]);
+        assert!(moderations_second.next_page_token.is_some());
+        let moderations_boundary = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: moderations_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(moderations_boundary.entries.is_empty());
+        assert_eq!(moderations_boundary.next_page_token, None);
+
+        let memberships_first = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(memberships_first.entries.len(), 1);
+        assert_eq!(
+            memberships_first.entries[0].channel_id,
+            memberships_channels[0]
+        );
+        assert!(memberships_first.next_page_token.is_some());
+        let memberships_second = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: memberships_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(memberships_second.entries.len(), 1);
+        assert_eq!(
+            memberships_second.entries[0].channel_id,
+            memberships_channels[1]
+        );
+        assert!(memberships_second.next_page_token.is_some());
+        let memberships_boundary = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: memberships_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(memberships_boundary.entries.is_empty());
+        assert_eq!(memberships_boundary.next_page_token, None);
+    }
+
+    #[test]
+    fn production_slot_caps_are_the_ones_wired_into_the_stores() {
+        // The cap BEHAVIOR is exercised at a shrunken cap via
+        // `StoreOptions::channel_slot_cap_override`, because filling 8k/16k rows took
+        // ~80s. That trade is sound — the `count >= cap` check is cap-value
+        // independent — but it leaves nothing proving the production constants are
+        // what `define_channel_store!` actually wires in. Asserting the constants
+        // alone would not: the override expression is the only path under test.
+        let stores = test_stores();
+        assert_eq!(
+            ChannelMemberStore::slot_cap(&stores.member),
+            Some(CHANNEL_MEMBER_SLOT_CAP)
+        );
+        assert_eq!(
+            ChannelModerateStore::slot_cap(&stores.moderate),
+            Some(CHANNEL_MODERATE_SLOT_CAP)
+        );
+        // Update and pin are single-slot per channel and must stay uncapped, with or
+        // without an override in play — `$default_slot_cap.map(..)` is what keeps an
+        // override from inventing a cap where production has none.
+        assert_eq!(ChannelUpdateStore::slot_cap(&stores.update), None);
+        assert_eq!(ChannelPinStore::slot_cap(&stores.pin), None);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(RocksDB::new(
+            temp_dir.path().join("override.db").to_str().unwrap(),
+        ));
+        db.open().unwrap();
+        let event_handler = StoreEventHandler::new();
+        let opts = StoreOptions {
+            channel_slot_cap_override: Some(24),
+            ..Default::default()
+        };
+        assert_eq!(
+            ChannelMemberStore::slot_cap(&ChannelMemberStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            Some(24)
+        );
+        assert_eq!(
+            ChannelModerateStore::slot_cap(&ChannelModerateStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            Some(24)
+        );
+        assert_eq!(
+            ChannelUpdateStore::slot_cap(&ChannelUpdateStore::new_with_opts(
+                db.clone(),
+                event_handler.clone(),
+                100,
+                opts.clone(),
+            )),
+            None,
+            "an override must not introduce a cap on an uncapped store"
+        );
+        assert_eq!(
+            ChannelPinStore::slot_cap(&ChannelPinStore::new_with_opts(
+                db,
+                event_handler,
+                100,
+                opts,
+            )),
+            None,
+            "an override must not introduce a cap on an uncapped store"
+        );
+    }
+
+    #[test]
+    fn channel_read_paths_fail_loud_on_corrupt_index_state() {
+        // These enumerators deliberately hard-error on malformed state instead of
+        // skipping the row, so a corrupt replica is visible rather than quietly
+        // under-reporting. Nothing exercised those branches, which means a
+        // regression back to `continue` / `None` would be invisible — the reads
+        // would simply return fewer rows and look healthy.
+        let stores = test_stores();
+        let channel = channel_id(0x80);
+        let target_fid = 55;
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge(
+            &stores.member,
+            &member_message(
+                1,
+                channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddMember,
+                1,
+            ),
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+        // Baseline: the healthy reads work, so the failures below are caused by the
+        // injected corruption and not by an empty store.
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
+        );
+
+        // A by-fid index entry whose member slot does not exist. This is the anomaly
+        // the index can actually develop, since it is maintained separately from the
+        // slot and lives outside the trie.
+        let orphan_channel = channel_id(0x81);
+        let dangling =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &orphan_channel).unwrap();
+        stores.db.put(&dangling, &[]).unwrap();
+        let error = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            target_fid,
+            &PageOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_internal_state");
+        assert!(
+            error.message.contains("missing slot"),
+            "unexpected message: {}",
+            error.message
+        );
+        stores.db.del(&dangling).unwrap();
+
+        // Wrong-width keys inside each prefix. Truncating a real key by one byte keeps
+        // it inside the scan range while breaking the length invariant the callback
+        // relies on to slice out the fid / channel_id.
+        let mut short_by_fid =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &channel).unwrap();
+        short_by_fid.pop();
+        stores.db.put(&short_by_fid, &[]).unwrap();
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_by_fid).unwrap();
+
+        let mut short_slot = ChannelMemberStore::slot_key(&channel, target_fid).unwrap();
+        short_slot.pop();
+        stores.db.put(&short_slot, &[]).unwrap();
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_slot).unwrap();
+
+        let mut short_moderate = ChannelModerateStore::slot_key(&channel, &cast_hash(1));
+        short_moderate.pop();
+        stores.db.put(&short_moderate, &[]).unwrap();
+        assert_eq!(
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &channel,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_moderate).unwrap();
+
+        // With the corruption removed the reads recover, so the errors above are not
+        // a permanently wedged store.
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn channel_reads_page_in_reverse_with_the_same_token_contract() {
+        // `reverse` is plumbed from the request through `channel_page_options` into
+        // every one of these reads, and the two directions use ASYMMETRIC bounds in
+        // `get_iterator_options`: forward sets `lower_bound = token ++ [0]`, reverse
+        // sets `upper_bound = token` exactly. All three enumerators return the raw
+        // last key as their token, which is correct for both — but only because of
+        // that asymmetry, so it needs pinning rather than assuming.
+        let stores = test_stores();
+        let channel = channel_id(0x50);
+        let membership_channels = [channel_id(0x70), channel_id(0x71)];
+        let membership_fid = 90;
+        let moderated = [cast_hash(11), cast_hash(12)];
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (index, fid) in [40u64, 41, 42].into_iter().enumerate() {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 1,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, membership_channel) in membership_channels.iter().enumerate() {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    membership_channel.clone(),
+                    membership_fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 10,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in moderated.iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 20,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        let reverse_page = |page_token: Option<Vec<u8>>| PageOptions {
+            page_size: Some(1),
+            page_token,
+            reverse: true,
+        };
+
+        // Members descend by fid, and every row is visited exactly once.
+        let mut seen_fids = Vec::new();
+        let mut token = None;
+        for _ in 0..3 {
+            let page = ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &reverse_page(token),
+            )
+            .unwrap();
+            assert_eq!(page.entries.len(), 1);
+            seen_fids.push(page.entries[0].fid);
+            token = page.next_page_token;
+        }
+        assert_eq!(seen_fids, vec![42, 41, 40]);
+        // Forward over the same rows is the exact mirror, so neither direction is
+        // silently dropping or repeating the boundary row.
+        let forward = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        seen_fids.reverse();
+        assert_eq!(
+            forward
+                .entries
+                .iter()
+                .map(|entry| entry.fid)
+                .collect::<Vec<_>>(),
+            seen_fids
+        );
+
+        let moderations = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &channel,
+            &reverse_page(None),
+        )
+        .unwrap();
+        assert_eq!(moderations.entries[0].cast_hash, moderated[1]);
+        let moderations_next = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &channel,
+            &reverse_page(moderations.next_page_token),
+        )
+        .unwrap();
+        assert_eq!(moderations_next.entries[0].cast_hash, moderated[0]);
+
+        let memberships = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            membership_fid,
+            &reverse_page(None),
+        )
+        .unwrap();
+        assert_eq!(memberships.entries[0].channel_id, membership_channels[1]);
+        let memberships_next = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            membership_fid,
+            &reverse_page(memberships.next_page_token),
+        )
+        .unwrap();
+        assert_eq!(
+            memberships_next.entries[0].channel_id,
+            membership_channels[0]
+        );
+    }
+
+    #[test]
+    fn out_of_prefix_page_tokens_are_rejected_instead_of_widening_the_scan() {
+        // A page token is a raw RocksDB key that REPLACES the prefix as the scan's
+        // lower bound, and the enumerators identify a row by key length alone —
+        // lengths every channel shares. So a token minted for a lower-sorting
+        // channel would otherwise return that channel's rows under the requested
+        // channel id. An empty token is the same defect from the front of the
+        // keyspace. Both must fail as caller error, not as a store fault.
+        let stores = test_stores();
+        let lower_channel = channel_id(0x10);
+        let higher_channel = channel_id(0x20);
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (channel, fid, timestamp) in [
+            (&lower_channel, 10, 1),
+            (&lower_channel, 20, 2),
+            (&higher_channel, 30, 3),
+        ] {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in [cast_hash(1), cast_hash(2)].iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    lower_channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 4,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        // Mint a real token inside the lower channel, then aim it at the higher one.
+        let lower_first = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &lower_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(lower_first.entries[0].fid, 10);
+        let foreign_member_token = lower_first.next_page_token.clone().unwrap();
+
+        let leaked = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &higher_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: Some(foreign_member_token.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(leaked.code, "bad_request.invalid_param");
+
+        // Same token in reverse: there it lands on the upper bound, so an
+        // unguarded scan runs past the requested channel instead of before it.
+        let leaked_reversed = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &higher_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: Some(foreign_member_token),
+                reverse: true,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(leaked_reversed.code, "bad_request.invalid_param");
+
+        let lower_moderations = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &lower_channel,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let foreign_moderate_token = lower_moderations.next_page_token.unwrap();
+        assert_eq!(
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &higher_channel,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(foreign_moderate_token),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .code,
+            "bad_request.invalid_param"
+        );
+
+        // memberships_by_fid is keyed by fid, so the foreign cursor is another fid's.
+        let fid_ten_page = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            10,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fid_ten_page.entries[0].channel_id, lower_channel);
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                30,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: fid_ten_page.next_page_token,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .code,
+            "bad_request.invalid_param"
+        );
+
+        // An empty token never reaches the store from the RPC layer, which maps it
+        // to None. Reject it here too rather than scanning from key zero.
+        for empty_token_result in [
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &higher_channel,
+                None,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &lower_channel,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                30,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+        ] {
+            assert_eq!(
+                empty_token_result.unwrap_err().code,
+                "bad_request.invalid_param"
+            );
+        }
+
+        // A token that does belong to the requested prefix still pages normally.
+        let higher_page = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &lower_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: lower_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            higher_page
+                .entries
+                .iter()
+                .map(|entry| entry.fid)
+                .collect::<Vec<_>>(),
+            vec![20]
+        );
+    }
+
+    #[test]
     fn cross_author_same_block_supersede_keeps_store_index_trie_and_event_in_agreement() {
         let stores = test_stores();
         let mut trie = MerkleTrie::new().unwrap();
@@ -211,12 +1016,22 @@ mod tests {
         );
 
         let mut txn = RocksDbTransactionBatch::new();
-        let incumbent_event =
-            ChannelUpdateStore::merge(&stores.update, &incumbent, &mut txn).unwrap();
+        let incumbent_event = ChannelUpdateStore::merge(
+            &stores.update,
+            &incumbent,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         trie.update_for_event(&ctx, &stores.db, &incumbent_event, &mut txn)
             .unwrap();
-        let replacement_event =
-            ChannelUpdateStore::merge(&stores.update, &replacement, &mut txn).unwrap();
+        let replacement_event = ChannelUpdateStore::merge(
+            &stores.update,
+            &replacement,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         trie.update_for_event(&ctx, &stores.db, &replacement_event, &mut txn)
             .unwrap();
         assert_eq!(deleted_messages(&replacement_event), &[incumbent.clone()]);
@@ -262,16 +1077,29 @@ mod tests {
         let update_b = update_message(2, channel.clone(), 100, Some("b"), None, None, None);
         let update_a_again =
             update_message(1, channel.clone(), 50, Some("a-again"), None, None, None);
-        ChannelUpdateStore::merge(&stores.update, &update_a, &mut txn).unwrap();
+        ChannelUpdateStore::merge(&stores.update, &update_a, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelUpdateStore::merge(&stores.update, &update_b, &mut txn).unwrap()
+                &ChannelUpdateStore::merge(
+                    &stores.update,
+                    &update_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[update_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelUpdateStore::merge(&stores.update, &update_a_again, &mut txn).unwrap()
+                &ChannelUpdateStore::merge(
+                    &stores.update,
+                    &update_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[update_b]
         );
@@ -279,16 +1107,29 @@ mod tests {
         let member_a = member_message(1, channel.clone(), 99, ChannelMemberAction::AddMember, 900);
         let member_b = member_message(2, channel.clone(), 99, ChannelMemberAction::Ban, 100);
         let member_a_again = member_message(1, channel.clone(), 99, ChannelMemberAction::Unban, 50);
-        ChannelMemberStore::merge(&stores.member, &member_a, &mut txn).unwrap();
+        ChannelMemberStore::merge(&stores.member, &member_a, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelMemberStore::merge(&stores.member, &member_b, &mut txn).unwrap()
+                &ChannelMemberStore::merge(
+                    &stores.member,
+                    &member_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[member_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelMemberStore::merge(&stores.member, &member_a_again, &mut txn).unwrap()
+                &ChannelMemberStore::merge(
+                    &stores.member,
+                    &member_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[member_b]
         );
@@ -296,13 +1137,24 @@ mod tests {
         let pin_a = pin_message(1, channel.clone(), cast_hash(1), 900);
         let pin_b = pin_message(2, channel.clone(), cast_hash(2), 100);
         let pin_a_again = pin_message(1, channel.clone(), Vec::new(), 50);
-        ChannelPinStore::merge(&stores.pin, &pin_a, &mut txn).unwrap();
+        ChannelPinStore::merge(&stores.pin, &pin_a, &mut txn, DerivedIndexGate::Write).unwrap();
         assert_eq!(
-            deleted_messages(&ChannelPinStore::merge(&stores.pin, &pin_b, &mut txn).unwrap()),
+            deleted_messages(
+                &ChannelPinStore::merge(&stores.pin, &pin_b, &mut txn, DerivedIndexGate::Write)
+                    .unwrap()
+            ),
             &[pin_a]
         );
         assert_eq!(
-            deleted_messages(&ChannelPinStore::merge(&stores.pin, &pin_a_again, &mut txn).unwrap()),
+            deleted_messages(
+                &ChannelPinStore::merge(
+                    &stores.pin,
+                    &pin_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
+            ),
             &[pin_b]
         );
 
@@ -323,17 +1175,34 @@ mod tests {
         );
         let moderate_a_again =
             moderate_message(1, channel, moderated_cast, ChannelModerateAction::Hide, 50);
-        ChannelModerateStore::merge(&stores.moderate, &moderate_a, &mut txn).unwrap();
+        ChannelModerateStore::merge(
+            &stores.moderate,
+            &moderate_a,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelModerateStore::merge(&stores.moderate, &moderate_b, &mut txn).unwrap()
+                &ChannelModerateStore::merge(
+                    &stores.moderate,
+                    &moderate_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[moderate_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelModerateStore::merge(&stores.moderate, &moderate_a_again, &mut txn)
-                    .unwrap()
+                &ChannelModerateStore::merge(
+                    &stores.moderate,
+                    &moderate_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[moderate_b]
         );
@@ -356,12 +1225,14 @@ mod tests {
                 Some(MembershipMode::Open),
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelUpdateStore::merge(
             &stores.update,
             &update_message(1, channel.clone(), 2, Some("second"), None, None, None),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -405,6 +1276,7 @@ mod tests {
                         &stores.member,
                         &member_message(1, channel.clone(), target_fid, prior_action, timestamp),
                         &mut txn,
+                        DerivedIndexGate::Write,
                     )
                     .unwrap();
                     timestamp += 1;
@@ -413,6 +1285,7 @@ mod tests {
                     &stores.member,
                     &member_message(1, channel.clone(), target_fid, action, timestamp),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap();
                 timestamp += 1;
@@ -454,6 +1327,7 @@ mod tests {
                 &stores.member,
                 &member_message(1, channel.clone(), target_fid, action, index as u32 + 1),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -478,12 +1352,14 @@ mod tests {
             &stores.pin,
             &pin_message(1, channel.clone(), cast_hash(8), 1),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelPinStore::merge(
             &stores.pin,
             &pin_message(1, channel.clone(), Vec::new(), 2),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -504,6 +1380,7 @@ mod tests {
                 3,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -526,6 +1403,7 @@ mod tests {
                 4,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -542,6 +1420,51 @@ mod tests {
             ChannelModerateStore::slot_count(&stores.moderate, &channel, Some(&txn)).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn pin_slot_merge_enforces_the_cast_hash_width_itself() {
+        // Snapshot bootstrap and replication replay reach merge_slot without running
+        // the stateless body validators, so the store has to hold the same width rule
+        // as `validate_channel_pin_body` rather than trusting its callers.
+        let stores = test_stores();
+        let channel = channel_id(0x66);
+
+        for bad_hash in [vec![0xAB; 19], vec![0xAB; 21], vec![0xAB; 32]] {
+            let mut txn = RocksDbTransactionBatch::new();
+            let error = ChannelPinStore::merge(
+                &stores.pin,
+                &pin_message(1, channel.clone(), bad_hash.clone(), 1),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "bad_request.validation_failure");
+            assert!(
+                txn.batch.is_empty(),
+                "a rejected pin of width {} must stage no write",
+                bad_hash.len()
+            );
+        }
+
+        // 20 bytes pins; empty is an unpin, not a malformed hash.
+        for good_hash in [cast_hash(3), Vec::new()] {
+            let mut txn = RocksDbTransactionBatch::new();
+            ChannelPinStore::merge(
+                &stores.pin,
+                &pin_message(1, channel.clone(), good_hash.clone(), 2),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+            assert_eq!(
+                ChannelPinStore::get_channel_pin(&stores.pin, &channel, Some(&txn))
+                    .unwrap()
+                    .unwrap()
+                    .cast_hash,
+                good_hash
+            );
+        }
     }
 
     #[test]
@@ -568,6 +1491,7 @@ mod tests {
                     target_fid as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -585,7 +1509,9 @@ mod tests {
                 action,
                 CHANNEL_MEMBER_SLOT_CAP + index as u32 + 1,
             );
-            let error = ChannelMemberStore::merge(&stores.member, &mint, &mut txn).unwrap_err();
+            let error =
+                ChannelMemberStore::merge(&stores.member, &mint, &mut txn, DerivedIndexGate::Write)
+                    .unwrap_err();
             assert_eq!(error.message, "channel slot cap exceeded");
             assert_eq!(txn.batch, before, "failed {action:?} mint changed txn");
         }
@@ -601,6 +1527,7 @@ mod tests {
                     CHANNEL_MEMBER_SLOT_CAP + 100 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -633,6 +1560,7 @@ mod tests {
                     index + 1,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -650,7 +1578,13 @@ mod tests {
                 action,
                 CHANNEL_MODERATE_SLOT_CAP + index as u32 + 1,
             );
-            let error = ChannelModerateStore::merge(&stores.moderate, &mint, &mut txn).unwrap_err();
+            let error = ChannelModerateStore::merge(
+                &stores.moderate,
+                &mint,
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap_err();
             assert_eq!(error.message, "channel slot cap exceeded");
             assert_eq!(txn.batch, before, "failed {action:?} mint changed txn");
         }
@@ -666,6 +1600,7 @@ mod tests {
                     CHANNEL_MODERATE_SLOT_CAP + 100 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -694,6 +1629,7 @@ mod tests {
                 1,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -711,6 +1647,7 @@ mod tests {
                 2,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap_err();
         assert_eq!(error.message, "channel id must be 32 bytes");
@@ -745,24 +1682,28 @@ mod tests {
                     &stores.update,
                     &update_message(1, bad.clone(), 1, Some("x"), None, None, None),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelMemberStore::merge(
                     &stores.member,
                     &member_message(1, bad.clone(), 9, ChannelMemberAction::AddMember, 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelPinStore::merge(
                     &stores.pin,
                     &pin_message(1, bad.clone(), cast_hash(1), 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelModerateStore::merge(
                     &stores.moderate,
                     &moderate_message(1, bad.clone(), cast_hash(1), ChannelModerateAction::Hide, 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
             ] {
@@ -781,6 +1722,7 @@ mod tests {
                 1,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap_err();
         assert_eq!(error.message, "channel moderate cast hash must be 20 bytes");
@@ -805,6 +1747,7 @@ mod tests {
                 Some(MembershipMode::None),
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -827,7 +1770,9 @@ mod tests {
             Body::ChannelUpdateBody(body) => body.casting_mode = Some(9999),
             _ => unreachable!(),
         }
-        let error = ChannelUpdateStore::merge(&stores.update, &poison, &mut txn).unwrap_err();
+        let error =
+            ChannelUpdateStore::merge(&stores.update, &poison, &mut txn, DerivedIndexGate::Write)
+                .unwrap_err();
         assert_eq!(error.message, "invalid channel casting mode");
         assert!(txn.batch.is_empty());
         assert!(
@@ -843,9 +1788,12 @@ mod tests {
         let channel = channel_id(0x6C);
         let mut txn = RocksDbTransactionBatch::new();
         let message = update_message(1, channel, 1, Some("only"), None, None, None);
-        ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap();
+        ChannelUpdateStore::merge(&stores.update, &message, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         let before = txn.batch.clone();
-        let error = ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap_err();
+        let error =
+            ChannelUpdateStore::merge(&stores.update, &message, &mut txn, DerivedIndexGate::Write)
+                .unwrap_err();
         assert_eq!(error.message, "message has already been merged");
         assert_eq!(txn.batch, before, "duplicate re-merge mutated the txn");
     }

@@ -13,10 +13,10 @@ use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberState,
     ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef,
-    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8,
-    MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, VerificationStore,
-    VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
+    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef,
+    DerivedIndexGate, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, StoreOptions,
+    VerificationStore, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -334,6 +334,11 @@ pub struct BlockStores {
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub verification_store: Store<VerificationStoreDef>,
+    // AUTHORITY. These four are the only channel stores an admission decision may
+    // consult, and the only ones a read should serve from — the identically typed
+    // and named fields on `Stores` are per-data-shard replicas of them. Shard 0 is
+    // where the registry fold and the verification replica live, so it is the only
+    // place channel authority is computable.
     pub channel_update_store: Store<ChannelUpdateStoreDef>,
     pub channel_member_store: Store<ChannelMemberStoreDef>,
     pub channel_pin_store: Store<ChannelPinStoreDef>,
@@ -346,6 +351,15 @@ pub struct BlockStores {
 
 impl BlockStores {
     pub fn new(db: Arc<RocksDB>, trie: MerkleTrie, network: FarcasterNetwork) -> Self {
+        Self::new_with_opts(db, trie, network, StoreOptions::default())
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        trie: MerkleTrie,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         let store_event_handler = StoreEventHandler::new();
         BlockStores {
             block_store: BlockStore::new(db.clone()),
@@ -357,21 +371,29 @@ impl BlockStores {
                 store_event_handler.clone(),
                 100,
             ),
-            channel_update_store: ChannelUpdateStore::new(
+            channel_update_store: ChannelUpdateStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
             ),
-            channel_member_store: ChannelMemberStore::new(
+            channel_member_store: ChannelMemberStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
             ),
-            channel_pin_store: ChannelPinStore::new(db.clone(), store_event_handler.clone(), 100),
-            channel_moderate_store: ChannelModerateStore::new(
+            channel_pin_store: ChannelPinStore::new_with_opts(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
+                store_opts.clone(),
+            ),
+            channel_moderate_store: ChannelModerateStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts,
             ),
             network,
             db: db.clone(),
@@ -415,7 +437,8 @@ impl BlockStores {
             };
             let Some(data) = primary_add.data.as_ref() else {
                 // A data-integrity anomaly, not an expected state: log it rather than silently
-                // under-reporting the owner as parked. Mirrors the RPC resolver.
+                // under-reporting the owner as parked. The RPC reads delegate here, so this
+                // is the only site that needs to log it.
                 warn!(
                     fid = fid,
                     address = hex::encode(owner_address),
@@ -512,16 +535,36 @@ pub(crate) fn block_engine_system_messages_for_replay<'a>(
 
 impl BlockEngine {
     pub fn new(
-        mut trie: MerkleTrie,
+        trie: MerkleTrie,
         statsd_client: StatsdClientWrapper,
         db: Arc<RocksDB>,
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         network: FarcasterNetwork,
     ) -> Self {
+        Self::new_with_opts(
+            trie,
+            statsd_client,
+            db,
+            max_messages_per_block,
+            messages_request_tx,
+            network,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        mut trie: MerkleTrie,
+        statsd_client: StatsdClientWrapper,
+        db: Arc<RocksDB>,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            stores: BlockStores::new(db.clone(), trie, network),
+            stores: BlockStores::new_with_opts(db.clone(), trie, network, store_opts),
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,
@@ -1164,24 +1207,33 @@ impl BlockEngine {
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
         dispatch: ChannelMergeDispatch,
+        channel_messages_enabled: bool,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         // `dispatch` is minted only by the gated validation arm after type/body agreement. Merge
         // does not re-read a version or re-dispatch on the wire type, so those decisions are
         // structurally unable to disagree.
+        let gate = DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled);
         let event = match dispatch {
-            ChannelMergeDispatch::Update => {
-                ChannelUpdateStore::merge(&self.stores.channel_update_store, message, txn_batch)?
-            }
-            ChannelMergeDispatch::Member => {
-                ChannelMemberStore::merge(&self.stores.channel_member_store, message, txn_batch)?
-            }
+            ChannelMergeDispatch::Update => ChannelUpdateStore::merge(
+                &self.stores.channel_update_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
+            ChannelMergeDispatch::Member => ChannelMemberStore::merge(
+                &self.stores.channel_member_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
             ChannelMergeDispatch::Pin => {
-                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
+                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch, gate)?
             }
             ChannelMergeDispatch::Moderate => ChannelModerateStore::merge(
                 &self.stores.channel_moderate_store,
                 message,
                 txn_batch,
+                gate,
             )?,
         };
         Ok(vec![event])
@@ -1501,7 +1553,7 @@ impl BlockEngine {
                     // THE live path for verifications once V20 is enabled: routing sends them
                     // here, admission has already applied the timestamp floor and the replica
                     // quota, and successful merges fan out as BlockEvents for force-override
-                    // replay onto the fid's data shard. Below V20 this arm is unreachable —
+                    // replay onto every data shard. Below V20 this arm is unreachable —
                     // `validate_user_message` rejects verification bodies outright, so the merge
                     // is never attempted and nothing here can perturb pre-V20 streams.
                     MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
@@ -1583,7 +1635,12 @@ impl BlockEngine {
                                 "validated channel message is missing merge dispatch",
                             ))
                         })?;
-                        match self.merge_channel_message(message, txn_batch, dispatch) {
+                        match self.merge_channel_message(
+                            message,
+                            txn_batch,
+                            dispatch,
+                            version.is_enabled(ProtocolFeature::ChannelMessages),
+                        ) {
                             Ok(events) => hub_events.extend(events),
                             Err(err) => {
                                 // State-aware admission catches ordinary authority failures,
@@ -1669,6 +1726,7 @@ impl BlockEngine {
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let version = EngineVersion::version_for(timestamp, self.network);
         let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+        let channel_messages_enabled = version.is_enabled(ProtocolFeature::ChannelMessages);
         let mut events = vec![];
         let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
         for hub_event in hub_events {
@@ -1708,10 +1766,30 @@ impl BlockEngine {
                                 let event = Self::build_block_event(data);
                                 events.push(event);
                             }
-                            // Channel messages deliberately do not fan out until inc 7 wires the
-                            // data-shard stores and replay dispatch. Devnet messages merged before
-                            // that increment will not be emitted retroactively; the testbed is
-                            // ephemeral, so stranding those early messages is acceptable.
+                            MessageType::ChannelUpdate
+                            | MessageType::ChannelMember
+                            | MessageType::ChannelPin
+                            | MessageType::ChannelModerate
+                                if channel_messages_enabled =>
+                            {
+                                // Channel rows fan out only after the same feature gate that admits
+                                // them on shard 0. Data shards replay the original message in this
+                                // consensus order and derive superseded rows locally.
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::MergeMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::MergeMessageEventBody(
+                                        proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                events.push(Self::build_block_event(data));
+                            }
                             _ => {}
                         }
                     }
@@ -1913,6 +1991,77 @@ impl BlockEngine {
             .time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
         self.metrics.count("propose.invoked", 1, vec![]);
+        state_change
+    }
+
+    /// Test-only proposal path for scenarios that must pin both valid cross-fid transaction
+    /// orderings. Production proposal order is intentionally proposer-chosen via HashMap
+    /// grouping, so tests cannot request a particular order through `propose_state_change`.
+    #[cfg(test)]
+    pub(crate) fn propose_state_change_with_transaction_order_for_test(
+        &mut self,
+        messages: Vec<MempoolMessage>,
+        ordered_fids: &[u64],
+        height: Height,
+        timestamp: FarcasterTime,
+    ) -> BlockStateChange {
+        let version = EngineVersion::version_for(&timestamp, self.network);
+        assert!(version.is_enabled(ProtocolFeature::WriteDataToShardZero));
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)
+            .unwrap()
+            .into_iter()
+            .filter_map(|mut transaction| {
+                let storage_slot =
+                    self.storage_slot_for_transaction(&transaction, version, true, true)?;
+                if !storage_slot.is_active() {
+                    transaction.user_messages.clear();
+                }
+                (!transaction.system_messages.is_empty() || !transaction.user_messages.is_empty())
+                    .then_some(transaction)
+            })
+            .collect_vec();
+        let mut actual_fids = snapchain_txns
+            .iter()
+            .map(|transaction| transaction.fid)
+            .collect_vec();
+        actual_fids.sort_unstable();
+        let mut expected_fids = ordered_fids.to_vec();
+        expected_fids.sort_unstable();
+        assert_eq!(actual_fids, expected_fids);
+        snapchain_txns.sort_by_key(|transaction| {
+            ordered_fids
+                .iter()
+                .position(|fid| *fid == transaction.fid)
+                .unwrap()
+        });
+
+        self.set_height(&version, height);
+        let mut all_hub_events = Vec::new();
+        for snapchain_txn in &mut snapchain_txns {
+            let (account_root, hub_events, _) = self
+                .replay_snapchain_txn(
+                    &merkle_trie::Context::new(),
+                    snapchain_txn,
+                    &mut txn_batch,
+                    &timestamp,
+                    version,
+                )
+                .unwrap();
+            snapchain_txn.account_root = account_root;
+            all_hub_events.extend(hub_events);
+        }
+        let (events, events_hash) =
+            self.generate_block_events(height, &timestamp, all_hub_events, &mut txn_batch);
+        let state_change = BlockStateChange {
+            timestamp,
+            new_state_root: self.stores.trie.root_hash().unwrap(),
+            events_hash,
+            transactions: snapchain_txns,
+            events,
+        };
+        self.stores.trie.reload(&self.db).unwrap();
         state_change
     }
 
@@ -2476,11 +2625,61 @@ mod channel_message_gate_tests {
                 &message,
                 &mut RocksDbTransactionBatch::new(),
                 dispatch,
+                true,
             );
             assert!(
                 active.is_ok(),
                 "{message_type:?} dispatch failed: {active:?}"
             );
         }
+    }
+
+    #[test]
+    fn block_engine_channel_width_checks_remain_independent() {
+        use crate::proto::message_data::Body;
+
+        let (engine, _tmpdir) = block_engine_test_helpers::setup();
+        let txn = RocksDbTransactionBatch::new();
+
+        let mut update = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![1; 31],
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel id must be 32 bytes"
+        ));
+
+        if let Some(Body::ChannelUpdateBody(body)) =
+            update.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.channel_id = vec![1; 32];
+        }
+        update.data.as_mut().unwrap().r#type = MessageType::ChannelModerate as i32;
+        update.data.as_mut().unwrap().body = Some(Body::ChannelModerateBody(
+            crate::proto::ChannelModerateBody {
+                channel_id: vec![1; 32],
+                cast_hash: vec![2; 19],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            },
+        ));
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel moderate cast hash must be 20 bytes"
+        ));
     }
 }

@@ -19,8 +19,9 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MergeContext, MessagesPage, StorageLendStore, StoreOptions,
-    VerificationStore,
+    BlockEventStorageError, CastStore, ChannelMemberStore, ChannelModerateStore, ChannelPinStore,
+    ChannelUpdateStore, DerivedIndexGate, MergeContext, MessagesPage, StorageLendStore,
+    StoreOptions, VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -599,10 +600,11 @@ impl ShardEngine {
         &self,
         txn_batch: &mut RocksDbTransactionBatch,
         trie_message: &ShardTrieEntryWithMessage,
+        channel_messages_enabled: bool,
     ) -> Result<MergedReplicatorMessage, EngineError> {
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
-                let events = self.merge_message(m, txn_batch)?;
+                let events = self.merge_message(m, txn_batch, channel_messages_enabled)?;
                 // This is only expected for deleted
                 if events.len() != 1 {
                     return Err(EngineError::ReplicatorError(format!(
@@ -670,13 +672,18 @@ impl ShardEngine {
     pub(crate) fn commit_replicator_message_for_test(
         &mut self,
         message: &proto::Message,
+        channel_messages_enabled: bool,
     ) -> Result<(), EngineError> {
         let trie_message = ShardTrieEntryWithMessage {
             trie_message: Some(TrieMessage::UserMessage(message.clone())),
             ..Default::default()
         };
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let merged = self.replay_replicator_message(&mut txn_batch, &trie_message)?;
+        let merged = self.replay_replicator_message(
+            &mut txn_batch,
+            &trie_message,
+            channel_messages_enabled,
+        )?;
         self.update_trie(
             &merkle_trie::Context::new(),
             &merged.hub_event,
@@ -697,12 +704,25 @@ impl ShardEngine {
     /// Read from the replayed `BlockEvent` rather than from the emitted events, mirroring the
     /// live-merge site, which enrolls `msg.msg_type()` on a successful merge without inspecting
     /// what that merge emitted. Callers must only apply this on the dispatch's `Ok` arm.
+    fn replayed_message_type(block_event: &proto::BlockEvent) -> Option<MessageType> {
+        match block_event.data.as_ref()?.body.as_ref()? {
+            proto::block_event_data::Body::MergeMessageEventBody(body) => {
+                Some(body.message.as_ref()?.msg_type())
+            }
+            _ => None,
+        }
+    }
+
+    /// Message-type label for a replayed BlockEvent, for logs and metric tags.
+    /// A body that carries no message (or a malformed one) reports as `UNKNOWN`
+    /// rather than being attributed to a type it may not have.
+    fn replayed_message_type_label(block_event: &proto::BlockEvent) -> &'static str {
+        Self::replayed_message_type(block_event)
+            .map_or("UNKNOWN", |msg_type| msg_type.as_str_name())
+    }
+
     fn replayed_verification_prune_type(block_event: &proto::BlockEvent) -> Option<MessageType> {
-        let message = match block_event.data.as_ref()?.body.as_ref()? {
-            proto::block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref()?,
-            _ => return None,
-        };
-        match message.msg_type() {
+        match Self::replayed_message_type(block_event)? {
             msg_type @ (MessageType::VerificationAddEthAddress
             | MessageType::VerificationRemove) => Some(msg_type),
             _ => None,
@@ -756,11 +776,9 @@ impl ShardEngine {
                         Some(ProtocolFeature::VerificationsOnShardZero),
                         ReplayMerge::Forced,
                     ),
-                    // Intentionally gated but undispatchable in this increment. Shard 0 can merge
-                    // channel messages, but its BlockEvent allowlist does not emit them yet and
-                    // ShardEngine::merge_message still has no channel stores. Inc 7 adds both;
-                    // keeping ReplayMerge::Normal here closes the wildcard fail-open without
-                    // wiring data-shard state early.
+                    // Channel messages replay through their slot stores' consensus-order merge.
+                    // The BlockEvent timestamp is the authoritative feature-gate input; the
+                    // original message timestamp never decides replay reachability.
                     MessageType::ChannelUpdate
                     | MessageType::ChannelMember
                     | MessageType::ChannelPin
@@ -769,6 +787,7 @@ impl ShardEngine {
                     }
                     _ => (None, ReplayMerge::Normal),
                 };
+                let mut channel_messages_enabled = false;
                 if let Some(feature) = feature_gate {
                     let block_ts = block_event.block_timestamp();
                     let version =
@@ -784,10 +803,19 @@ impl ShardEngine {
                             MessageValidationError::InvalidMessageType(msg_type as i32).into()
                         );
                     }
+                    channel_messages_enabled = matches!(
+                        msg_type,
+                        MessageType::ChannelUpdate
+                            | MessageType::ChannelMember
+                            | MessageType::ChannelPin
+                            | MessageType::ChannelModerate
+                    );
                 }
                 let mut hub_events = match merge_strategy {
                     ReplayMerge::Forced => self.merge_replayed_verification(message, txn_batch)?,
-                    ReplayMerge::Normal => self.merge_message(message, txn_batch)?,
+                    ReplayMerge::Normal => {
+                        self.merge_message(message, txn_batch, channel_messages_enabled)?
+                    }
                 };
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
@@ -1409,19 +1437,64 @@ impl ShardEngine {
                                 events.extend(hub_events)
                             }
                             Err(err) => {
-                                warn!(
+                                // A dropped replay is not recoverable: the seqnum has
+                                // already advanced, and nothing re-drives a decided
+                                // shard-0 event. If every node fails identically the
+                                // shard roots still agree, so consensus cannot flag the
+                                // resulting replica gap — this log and counter are the
+                                // only signal that a data shard is now missing a row
+                                // shard 0 holds. If the failure is node-local instead
+                                // (transient I/O, a corrupt counter on one host), the
+                                // skipped `update_trie` moves this shard's root and the
+                                // node fails validation against its peers, so the
+                                // structured fields below are what connect that mismatch
+                                // back to its cause.
+                                //
+                                // Log-and-continue is the settled behavior here, not a
+                                // deferral. Propagating instead — a replica refusing to
+                                // commit an event it cannot apply — was considered and
+                                // rejected on two grounds. A deterministic failure fails
+                                // identically on every node, so propagating would halt the
+                                // chain rather than isolate one bad replica; and a
+                                // node-local failure already self-reports, because the
+                                // skipped `update_trie` diverges this node's root from its
+                                // peers'. Reaching this arm at all is expected to be
+                                // vanishingly rare, which is what makes an error-level
+                                // signal proportionate to it. Revisit only with evidence
+                                // that it fires in practice.
+                                let msg_type = Self::replayed_message_type_label(block_event);
+                                self.metrics.count(
+                                    "block_event.replay_failed",
+                                    1,
+                                    vec![("msg_type", msg_type)],
+                                );
+                                error!(
+                                    seqnum = block_event.seqnum(),
+                                    block_timestamp = block_event.block_timestamp(),
+                                    msg_type,
                                     fid = snapchain_txn.fid,
-                                    "Error merging block event {}",
+                                    "Error merging block event; this shard's replica is now missing a row shard 0 holds: {}",
                                     err.to_string()
                                 );
                             }
                         }
                     } else {
-                        warn!(
+                        // Terminal for replay on this shard, not a single dropped row:
+                        // `last_block_event_seqnum` never advances past a gap, so every
+                        // later event fails this same check. The shard keeps serving
+                        // reads while its shard-0-derived state is frozen at this point,
+                        // which is why this is an error! with its own counter rather
+                        // than sharing the merge-failure signal above.
+                        self.metrics.count(
+                            "block_event.replay_out_of_order",
+                            1,
+                            vec![("msg_type", Self::replayed_message_type_label(block_event))],
+                        );
+                        error!(
                             seqnum = block_event.seqnum(),
                             last_block_event_seqnum,
                             fid = snapchain_txn.fid,
-                            "Error merging block event because it's not next"
+                            "Block event is not next in sequence; block event replay on this shard is stalled from here"
                         )
                     }
                 }
@@ -1494,7 +1567,11 @@ impl ShardEngine {
             // Errors are validated based on the shard root
             match self.validate_user_message(msg, timestamp, version, txn_batch) {
                 Ok(()) => {
-                    let result = self.merge_message(msg, txn_batch);
+                    let result = self.merge_message(
+                        msg,
+                        txn_batch,
+                        version.is_enabled(ProtocolFeature::ChannelMessages),
+                    );
                     match result {
                         Ok(merge_events) => {
                             for event in &merge_events {
@@ -1711,6 +1788,7 @@ impl ShardEngine {
         &self,
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        channel_messages_enabled: bool,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let now = std::time::Instant::now();
         let data = msg
@@ -1788,6 +1866,36 @@ impl ShardEngine {
                     &self.stores.onchain_event_store,
                     msg,
                     txn_batch,
+                )?]
+            }
+            MessageType::ChannelUpdate if channel_messages_enabled => {
+                vec![ChannelUpdateStore::merge(
+                    &self.stores.channel_update_store,
+                    msg,
+                    txn_batch,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
+                )?]
+            }
+            MessageType::ChannelMember if channel_messages_enabled => {
+                vec![ChannelMemberStore::merge(
+                    &self.stores.channel_member_store,
+                    msg,
+                    txn_batch,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
+                )?]
+            }
+            MessageType::ChannelPin if channel_messages_enabled => vec![ChannelPinStore::merge(
+                &self.stores.channel_pin_store,
+                msg,
+                txn_batch,
+                DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
+            )?],
+            MessageType::ChannelModerate if channel_messages_enabled => {
+                vec![ChannelModerateStore::merge(
+                    &self.stores.channel_moderate_store,
+                    msg,
+                    txn_batch,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
                 )?]
             }
             unhandled_type => {
@@ -2038,9 +2146,9 @@ impl ShardEngine {
             ));
         }
 
-        // Channel state is shard-0-only in this increment. Keep direct data-shard admission
-        // rejected even after stateless channel validation activates; the replay gate below is
-        // intentionally gated-but-undispatchable until data-shard stores land.
+        // Channel state is admitted only on shard 0. Data-shard replica stores are writable solely
+        // through gated BlockEvent replay or state-root-verified replication; direct admission
+        // remains rejected so every replica merge inherits shard-0 authority and cap provenance.
         if matches!(
             message_data.r#type(),
             MessageType::ChannelUpdate
@@ -2941,8 +3049,10 @@ mod verification_replay_gate_tests {
     use super::{EngineError, MessageValidationError};
     use crate::proto::{FarcasterNetwork, MessageType};
     use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::ChannelUpdateStore;
     use crate::storage::store::test_helper::{self, trie_ctx, EngineOptions, FID3_FOR_TEST};
     use crate::utils::factory::{events_factory, messages_factory};
+    use crate::{core::util::FarcasterTime, version::version::EngineVersion};
 
     #[tokio::test]
     async fn pre_feature_verification_block_event_returns_invalid_message_type() {
@@ -2976,8 +3086,15 @@ mod verification_replay_gate_tests {
     }
 
     #[tokio::test]
-    async fn channel_block_event_is_gated_but_has_no_data_shard_dispatch() {
+    async fn channel_replica_merge_requires_gated_replay_provenance() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let (message_type, body) = messages_factory::channels::all_message_bodies()
             .into_iter()
             .next()
@@ -2989,22 +3106,91 @@ mod verification_replay_gate_tests {
             None,
             None,
         );
-        let block_event = events_factory::create_merge_message_event(message, 1);
+        let block_event = events_factory::create_merge_message_event(message.clone(), 1);
 
-        // Devnet resolves the event timestamp with ChannelMessages active, so this passes the
-        // new replay gate and reaches the deliberately absent ShardEngine dispatch.
+        let direct_error = engine
+            .validate_user_message(
+                &message,
+                &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            direct_error,
+            MessageValidationError::InvalidMessageType(value)
+                if value == MessageType::ChannelUpdate as i32
+        ));
+
+        // The identical message is writable only when wrapped in the shard-0 BlockEvent provenance
+        // envelope. Keep the transaction uncommitted and read through it to pin the exact hop.
+        let mut replay_txn = RocksDbTransactionBatch::new();
         let result = engine.handle_block_event(
             trie_ctx(),
             &block_event,
-            &mut RocksDbTransactionBatch::new(),
-            crate::version::version::EngineVersion::V20,
+            &mut replay_txn,
+            EngineVersion::V20,
         );
-        assert!(matches!(
-            result,
-            Err(EngineError::EngineMessageValidationError(
-                MessageValidationError::InvalidMessageType(value)
-            )) if value == MessageType::ChannelUpdate as i32
-        ));
+        assert_eq!(result.unwrap().len(), 1);
+        let channel_id = match message.data.unwrap().body.unwrap() {
+            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id,
+            _ => unreachable!(),
+        };
+        assert!(ChannelUpdateStore::get_channel_update(
+            &engine.get_stores().channel_update_store,
+            &channel_id,
+            Some(&replay_txn),
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn s4_pre_v20_channel_block_event_cannot_reach_replica_store() {
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Mainnet),
+            ..Default::default()
+        })
+        .await;
+        let root_before = engine.trie_root_hash();
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let channel_id = match &body {
+                crate::proto::message_data::Body::ChannelUpdateBody(body) => {
+                    Some(body.channel_id.clone())
+                }
+                _ => None,
+            };
+            let message = messages_factory::create_message_with_data(
+                FID3_FOR_TEST,
+                message_type,
+                body,
+                None,
+                None,
+            );
+            // Factory BlockEvents carry timestamp zero. The replay gate must use that passed-in
+            // consensus timestamp, not the data-shard block version supplied below.
+            let block_event = events_factory::create_merge_message_event(message, 1);
+            let mut txn = RocksDbTransactionBatch::new();
+            let result =
+                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V20);
+            assert!(matches!(
+                result,
+                Err(EngineError::EngineMessageValidationError(
+                    MessageValidationError::InvalidMessageType(value)
+                )) if value == message_type as i32
+            ));
+            if let Some(channel_id) = channel_id {
+                assert!(ChannelUpdateStore::get_channel_update(
+                    &engine.get_stores().channel_update_store,
+                    &channel_id,
+                    Some(&txn),
+                )
+                .unwrap()
+                .is_none());
+            }
+            assert!(txn.batch.is_empty());
+        }
+        assert_eq!(engine.trie_root_hash(), root_before);
     }
 }
 
@@ -3067,20 +3253,24 @@ mod prune_arm_tests {
 }
 
 #[cfg(test)]
-mod channel_message_inertness_tests {
+mod channel_message_shard_engine_boundary_tests {
     use super::MessageValidationError;
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
     use crate::mempool::routing::{route_message, MessageRouter, ShardRouter};
+    use crate::proto::HubEvent;
     use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::HubEventStorageExt;
     use crate::storage::store::test_helper;
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Routing sends channel messages to shard 0, but ShardEngine still rejects them if they are
-    /// injected directly. Its merge dispatch remains absent until data-shard replay lands.
+    /// Routing sends channel messages to shard 0, and ShardEngine rejects all four types if they
+    /// are injected directly. Data-shard replay landing does not widen this: `merge_message` now
+    /// has channel arms, but they are reachable only from gated BlockEvent replay and
+    /// replication, never from a mempool user message.
     #[tokio::test]
-    async fn channel_messages_are_rejected_by_shard_engine_validation() {
+    async fn s4_channel_messages_are_rejected_by_shard_engine_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let fid = 1234;
         test_helper::register_user(
@@ -3090,16 +3280,21 @@ mod channel_message_inertness_tests {
             &mut engine,
         )
         .await;
+        let root_before = engine.trie_root_hash();
+        let events_before = HubEvent::get_events(engine.get_stores().db.clone(), 0, None, None)
+            .unwrap()
+            .events;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+            let mut v20_txn = RocksDbTransactionBatch::new();
             let result = engine.validate_user_message(
                 &message,
                 &timestamp,
                 EngineVersion::V20,
-                &mut RocksDbTransactionBatch::new(),
+                &mut v20_txn,
             );
             assert!(
                 matches!(
@@ -3111,12 +3306,14 @@ mod channel_message_inertness_tests {
                 message_type,
                 result
             );
+            assert!(v20_txn.batch.is_empty());
 
+            let mut pre_feature_txn = RocksDbTransactionBatch::new();
             let pre_feature = engine.validate_user_message(
                 &message,
                 &timestamp,
                 EngineVersion::V19,
-                &mut RocksDbTransactionBatch::new(),
+                &mut pre_feature_txn,
             );
             assert!(matches!(
                 pre_feature,
@@ -3124,22 +3321,39 @@ mod channel_message_inertness_tests {
                     ValidationError::InvalidMessageType
                 ))
             ));
+            assert!(pre_feature_txn.batch.is_empty());
         }
+        assert_eq!(engine.trie_root_hash(), root_before);
+        assert_eq!(
+            HubEvent::get_events(engine.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            events_before
+        );
     }
 
+    /// The four channel arms in `merge_message` carry an `if channel_messages_enabled` guard, so
+    /// with the gate off they fall through to the catch-all and reject. That guard — not the
+    /// absence of dispatch — is what keeps replay from running before its feature is active.
     #[tokio::test]
-    async fn channel_messages_have_no_shard_engine_merge_dispatch() {
+    async fn channel_merge_dispatch_falls_through_when_the_feature_gate_is_off() {
         let (engine, _tmpdir) = test_helper::new_engine().await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new());
+            let mut txn = RocksDbTransactionBatch::new();
+            let result = engine.merge_message(&message, &mut txn, false);
             assert!(matches!(
                 result,
                 Err(MessageValidationError::InvalidMessageType(value))
                     if value == message_type as i32
             ));
+            assert!(
+                txn.batch.is_empty(),
+                "{:?} must not stage any write when the gate is off",
+                message_type
+            );
         }
     }
 

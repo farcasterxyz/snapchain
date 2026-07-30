@@ -1,14 +1,15 @@
 use super::{
     get_from_db_or_txn, get_message, make_ts_hash, make_user_key, read_fid_key, Store, StoreDef,
-    StoreEventHandler, TS_HASH_LENGTH,
+    StoreEventHandler, StoreOptions, TS_HASH_LENGTH,
 };
 use crate::core::error::HubError;
 use crate::proto::{
     message_data::Body, CastingMode, ChannelMemberAction, ChannelModerateAction, ChannelPinBody,
     ChannelUpdateBody, HubEvent, MembershipMode, Message, MessageType, SignatureScheme,
 };
-use crate::storage::constants::{RootPrefix, UserPostfix};
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::constants::{RootPrefix, UserPostfix, PAGE_SIZE_MAX};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::util::increment_vec_u8;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -41,6 +42,7 @@ enum ChannelIndex {
     MemberSlotCount = 5,
     ModerateSlotCount = 6,
     LiveModeratorCount = 7,
+    MemberByFid = 8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,24 +66,97 @@ pub enum ChannelModerationState {
     Visible,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMemberEntry {
+    pub fid: u64,
+    pub state: ChannelMemberState,
+    pub last_action_ts: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMembershipEntry {
+    pub channel_id: Vec<u8>,
+    pub state: ChannelMemberState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelModerationEntry {
+    pub cast_hash: Vec<u8>,
+    pub action: ChannelModerateAction,
+    pub author_fid: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelPinState {
+    pub body: ChannelPinBody,
+    pub author_fid: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelPage<T> {
+    pub entries: Vec<T>,
+    pub next_page_token: Option<Vec<u8>>,
+}
+
+/// Whether a merge may write the `ChannelMessages`-gated derived indices — today
+/// only the member by-fid index, which lives outside the trie.
+///
+/// This is a required argument on every channel merge rather than a default,
+/// because getting it wrong is invisible: a `Skip`ped merge still writes the slot,
+/// updates the trie, and produces a matching state root, but the row never appears
+/// in `memberships_by_fid`, so `GetChannelMembershipsByFid` reports "no memberships"
+/// with no error anywhere. The stores whose defs have no gated index today still
+/// take it, so adding one to them later is a compile error at each call site rather
+/// than a silent skip on the replay path (see the topology note in version.rs —
+/// catch-all match arms provide no compiler-enforced reminder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedIndexGate {
+    /// `ChannelMessages` is active for this merge's clock; write derived indices.
+    Write,
+    /// Feature inactive for this merge's clock; primary slot state only.
+    Skip,
+}
+
+impl DerivedIndexGate {
+    /// Lifts a caller's already-resolved `ChannelMessages` gate. Callers that hold
+    /// the boolean should use this rather than picking a variant by hand, so the
+    /// merge cannot disagree with the gate its own dispatch arm was chosen under.
+    pub fn when_channel_messages_enabled(channel_messages_enabled: bool) -> Self {
+        if channel_messages_enabled {
+            Self::Write
+        } else {
+            Self::Skip
+        }
+    }
+
+    fn writes_derived_indices(self) -> bool {
+        self == Self::Write
+    }
+}
+
 #[derive(Clone)]
 pub struct ChannelUpdateStoreDef {
     prune_size_limit: u32,
+    // Resolved slot cap; `None` for uncapped stores. See `define_channel_store!`.
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelMemberStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelPinStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 #[derive(Clone)]
 pub struct ChannelModerateStoreDef {
     prune_size_limit: u32,
+    slot_cap: Option<u32>,
 }
 
 fn invalid_body(store_name: &str) -> HubError {
@@ -176,6 +251,26 @@ fn channel_index_key(index: ChannelIndex, channel_id: &[u8], suffix: &[u8]) -> V
     key
 }
 
+/// Rejects a `page_token` that does not sit inside `prefix`.
+///
+/// `RocksDB::get_iterator_options` uses the token as the scan's lower bound
+/// (or, when reversed, its upper bound) *instead of* the prefix, so a token from
+/// outside the prefix widens the range rather than narrowing it. The three
+/// enumerators below identify a row by key length alone, and every channel's
+/// slot keys share a length — so without this check a token minted for one
+/// channel would return a different channel's rows under the requested channel
+/// id. An empty token is out-of-prefix by the same test: it makes the scan start
+/// at the front of the column family. Callers that mean "first page" must pass
+/// `None`; the RPC layer normalizes an empty token to `None` before it gets here.
+fn require_page_token_in_prefix(prefix: &[u8], page_options: &PageOptions) -> Result<(), HubError> {
+    match &page_options.page_token {
+        Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
+            "page token does not belong to the requested channel index",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn read_counter(db: &RocksDB, txn: &RocksDbTransactionBatch, key: &[u8]) -> Result<u32, HubError> {
     match get_from_db_or_txn(db, txn, key)? {
         None => Ok(0),
@@ -212,6 +307,21 @@ fn load_slot_message<T: ChannelSlotStoreDef + Clone>(
     let Some(pointer) = get_from_db_or_txn(&store.db(), txn, slot_key)? else {
         return Ok(None);
     };
+    message_for_slot_pointer(store, txn, &pointer).map(Some)
+}
+
+/// Resolves an already-read slot pointer to its primary message.
+///
+/// Split out from `load_slot_message` for the by-channel enumerators: their
+/// iterator callback is handed the pointer as the row's value, so going back
+/// through `load_slot_message` would re-fetch a key RocksDB just gave them —
+/// one avoidable point-get per row, on reads that scan up to a channel's whole
+/// slot cap when a state filter matches nothing.
+fn message_for_slot_pointer<T: ChannelSlotStoreDef + Clone>(
+    store: &Store<T>,
+    txn: &RocksDbTransactionBatch,
+    pointer: &[u8],
+) -> Result<Message, HubError> {
     if pointer.len() != 4 + TS_HASH_LENGTH {
         warn!(
             actual_length = pointer.len(),
@@ -222,10 +332,10 @@ fn load_slot_message<T: ChannelSlotStoreDef + Clone>(
             "channel slot pointer has invalid length",
         ));
     }
-    let fid = read_fid_key(&pointer, 0);
+    let fid = read_fid_key(pointer, 0);
     let ts_hash: [u8; TS_HASH_LENGTH] = pointer[4..].try_into().unwrap();
     match get_message(&store.db(), txn, fid, store.store_def().postfix(), &ts_hash)? {
-        Some(message) => Ok(Some(message)),
+        Some(message) => Ok(message),
         None => {
             warn!(fid, "Channel slot points to a missing message");
             Err(HubError::invalid_internal_state(
@@ -253,6 +363,15 @@ trait ChannelSlotStoreDef: StoreDef {
 
     fn is_live_moderator(&self, _message: &Message) -> Result<Option<bool>, HubError> {
         Ok(None)
+    }
+
+    fn build_gated_secondary_indices(
+        &self,
+        _txn: &mut RocksDbTransactionBatch,
+        _message: &Message,
+        _gate: DerivedIndexGate,
+    ) -> Result<(), HubError> {
+        Ok(())
     }
 }
 
@@ -319,7 +438,22 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     store: &Store<T>,
     message: &Message,
     txn: &mut RocksDbTransactionBatch,
+    gate: DerivedIndexGate,
 ) -> Result<HubEvent, HubError> {
+    // DATA-SHARD ADMISSION PROVENANCE: a channel message reaches this shared slot merge on a data
+    // shard only as (1) a ChannelMessages-gated BlockEvent that shard 0 minted after its authority
+    // and policy checks succeeded, or (2) a replication row whose trie key is verified against a
+    // decided state root. Direct ShardEngine admission rejects all four channel types. Therefore
+    // authority and admission-only policy caps (notably the live-moderator cap) must not be
+    // re-evaluated here: doing so would turn evaluator drift into a silently missing replica row.
+    //
+    // The slot-count checks below ARE the same caps shard 0 already applied, re-evaluated against
+    // this store's own counter — so they are subject to exactly that failure mode, and are kept
+    // only because the counter is a deterministic function of the identical ordered merge stream.
+    // If it ever drifts, `merge_slot` fails, `handle_block_event` propagates, and the caller in
+    // engine.rs logs "Error merging block event" and continues: the row is absent from this
+    // replica for good, with no re-drive. `block_event.replay_failed` is the only signal. Do not
+    // add further checks here on the reasoning that these ones are already present.
     let store_def = store.store_def();
     if !store_def.is_add_type(message) {
         return Err(HubError::validation_failure("invalid channel message type"));
@@ -411,6 +545,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     }
     let event =
         store.merge_add_with_conflicts(&ts_hash, message, &mut slot_txn, deleted_messages)?;
+    store_def.build_gated_secondary_indices(&mut slot_txn, message, gate)?;
     txn.merge(slot_txn);
     Ok(event)
 }
@@ -536,6 +671,10 @@ impl ChannelSlotStoreDef for ChannelUpdateStoreDef {
         update_slot_suffix(message)
     }
 
+    fn slot_cap(&self) -> Option<u32> {
+        self.slot_cap
+    }
+
     /// Without this the slot could accept a body whose modes `get_channel_update` cannot parse,
     /// leaving every read of the channel erroring until something supersedes it.
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -577,7 +716,7 @@ impl ChannelSlotStoreDef for ChannelMemberStoreDef {
     }
 
     fn slot_cap(&self) -> Option<u32> {
-        Some(CHANNEL_MEMBER_SLOT_CAP)
+        self.slot_cap
     }
 
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -597,11 +736,69 @@ impl ChannelSlotStoreDef for ChannelMemberStoreDef {
             member_state_for_message(message)? == ChannelMemberState::Moderator,
         ))
     }
+
+    fn build_gated_secondary_indices(
+        &self,
+        txn: &mut RocksDbTransactionBatch,
+        message: &Message,
+        gate: DerivedIndexGate,
+    ) -> Result<(), HubError> {
+        if !gate.writes_derived_indices() {
+            return Ok(());
+        }
+        let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelMemberBody(body)) => body,
+            _ => return Err(invalid_body("ChannelMember")),
+        };
+        txn.put(
+            ChannelMemberStoreDef::make_member_by_fid_key(body.fid, &body.channel_id)?,
+            Vec::new(),
+        );
+        Ok(())
+    }
+}
+
+impl ChannelMemberStoreDef {
+    pub fn make_member_by_fid_key(target_fid: u64, channel_id: &[u8]) -> Result<Vec<u8>, HubError> {
+        let target_fid = u32::try_from(target_fid)
+            .map_err(|_| HubError::invalid_parameter("channel member fid exceeds u32"))?;
+        let mut key = Vec::with_capacity(2 + 4 + channel_id.len());
+        key.push(RootPrefix::Channel as u8);
+        key.push(ChannelIndex::MemberByFid as u8);
+        key.extend_from_slice(&target_fid.to_be_bytes());
+        key.extend_from_slice(channel_id);
+        Ok(key)
+    }
 }
 
 impl ChannelSlotStoreDef for ChannelPinStoreDef {
     fn channel_id(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         pin_slot_suffix(message)
+    }
+
+    fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
+        // Unlike the moderate slot, the pin key is `channel_id` alone — cast_hash is
+        // payload, not key material — so an off-width hash cannot corrupt the
+        // keyspace. Enforced anyway to match `validate_channel_pin_body`, because the
+        // paths that skip stateless validation (snapshot bootstrap, replication
+        // replay) reach this merge directly, and `GetChannelPin` echoes the bytes it
+        // finds. Empty is legal: that is an unpin.
+        match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelPinBody(body))
+                if body.cast_hash.is_empty()
+                    || body.cast_hash.len() == CHANNEL_MODERATE_CAST_HASH_LENGTH =>
+            {
+                Ok(())
+            }
+            Some(Body::ChannelPinBody(_)) => Err(HubError::validation_failure(
+                "channel pin cast hash must be empty or 20 bytes",
+            )),
+            _ => Err(invalid_body("ChannelPin")),
+        }
+    }
+
+    fn slot_cap(&self) -> Option<u32> {
+        self.slot_cap
     }
 
     fn slot_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
@@ -634,7 +831,7 @@ impl ChannelSlotStoreDef for ChannelModerateStoreDef {
     }
 
     fn slot_cap(&self) -> Option<u32> {
-        Some(CHANNEL_MODERATE_SLOT_CAP)
+        self.slot_cap
     }
 
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
@@ -665,7 +862,11 @@ impl ChannelSlotStoreDef for ChannelModerateStoreDef {
 }
 
 macro_rules! define_channel_store {
-    ($store:ident, $def:ident) => {
+    // `$default_slot_cap` is the store's production slot cap as an `Option<u32>` (`None` for the
+    // uncapped update/pin stores). `StoreOptions::channel_slot_cap_override` is a test-only knob
+    // that replaces that cap with a small value so slot-boundary tests don't insert thousands of
+    // rows; it only affects capped stores, and `None` leaves the production cap in place.
+    ($store:ident, $def:ident, $default_slot_cap:expr) => {
         pub struct $store;
 
         impl $store {
@@ -674,28 +875,81 @@ macro_rules! define_channel_store {
                 store_event_handler: Arc<StoreEventHandler>,
                 prune_size_limit: u32,
             ) -> Store<$def> {
-                Store::new_with_store_def(db, store_event_handler, $def { prune_size_limit })
+                Self::new_with_opts(
+                    db,
+                    store_event_handler,
+                    prune_size_limit,
+                    StoreOptions::default(),
+                )
+            }
+
+            pub fn new_with_opts(
+                db: Arc<RocksDB>,
+                store_event_handler: Arc<StoreEventHandler>,
+                prune_size_limit: u32,
+                store_opts: StoreOptions,
+            ) -> Store<$def> {
+                let slot_cap = $default_slot_cap
+                    .map(|cap| store_opts.channel_slot_cap_override.unwrap_or(cap));
+                Store::new_with_store_def_opts(
+                    db,
+                    store_event_handler,
+                    $def {
+                        prune_size_limit,
+                        slot_cap,
+                    },
+                    store_opts,
+                )
+            }
+
+            /// The slot cap this store was actually constructed with.
+            ///
+            /// Boundary behavior is exercised through the test-only override, which
+            /// means nothing else proves the PRODUCTION constant is the one wired in
+            /// here. This lets a test assert that separately from exercising it.
+            pub fn slot_cap(store: &Store<$def>) -> Option<u32> {
+                ChannelSlotStoreDef::slot_cap(&store.store_def())
             }
         }
     };
 }
 
-define_channel_store!(ChannelUpdateStore, ChannelUpdateStoreDef);
-define_channel_store!(ChannelMemberStore, ChannelMemberStoreDef);
-define_channel_store!(ChannelPinStore, ChannelPinStoreDef);
-define_channel_store!(ChannelModerateStore, ChannelModerateStoreDef);
+define_channel_store!(ChannelUpdateStore, ChannelUpdateStoreDef, None);
+define_channel_store!(
+    ChannelMemberStore,
+    ChannelMemberStoreDef,
+    Some(CHANNEL_MEMBER_SLOT_CAP)
+);
+define_channel_store!(ChannelPinStore, ChannelPinStoreDef, None);
+define_channel_store!(
+    ChannelModerateStore,
+    ChannelModerateStoreDef,
+    Some(CHANNEL_MODERATE_SLOT_CAP)
+);
 
 impl ChannelUpdateStore {
     pub fn merge(
         store: &Store<ChannelUpdateStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
         channel_index_key(ChannelIndex::UpdateSlot, channel_id, &[])
+    }
+
+    /// Effective modes for a registered channel that has no ChannelUpdate yet.
+    ///
+    /// Derived from `fold_channel_modes` rather than restated, so the read path's
+    /// "no update" branch cannot drift from the policy admission actually applies.
+    /// An unconfigured channel and one whose update omitted both modes must report
+    /// the same thing, because to the fold they ARE the same thing.
+    pub fn default_channel_modes() -> (CastingMode, MembershipMode) {
+        fold_channel_modes(&ChannelUpdateBody::default())
+            .expect("an empty channel update body folds to the restrictive defaults")
     }
 
     pub fn get_channel_update(
@@ -726,8 +980,9 @@ impl ChannelMemberStore {
         store: &Store<ChannelMemberStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8], target_fid: u64) -> Result<Vec<u8>, HubError> {
@@ -749,6 +1004,132 @@ impl ChannelMemberStore {
         read_slot(store, Self::slot_key(channel_id, target_fid)?, maybe_txn)?
             .map(|message| member_state_for_message(&message))
             .transpose()
+    }
+
+    pub fn member(
+        store: &Store<ChannelMemberStoreDef>,
+        channel_id: &[u8],
+        target_fid: u64,
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<ChannelMemberEntry>, HubError> {
+        read_slot(store, Self::slot_key(channel_id, target_fid)?, maybe_txn)?
+            .map(|message| {
+                let last_action_ts = message
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| HubError::invalid_internal_state("channel member missing data"))?
+                    .timestamp;
+                Ok(ChannelMemberEntry {
+                    fid: target_fid,
+                    state: member_state_for_message(&message)?,
+                    last_action_ts,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn members_by_channel(
+        store: &Store<ChannelMemberStoreDef>,
+        channel_id: &[u8],
+        state_filter: Option<ChannelMemberState>,
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelMemberEntry>, HubError> {
+        let prefix = channel_index_key(ChannelIndex::MemberSlot, channel_id, &[]);
+        require_page_token_in_prefix(&prefix, page_options)?;
+        let empty_txn = RocksDbTransactionBatch::new();
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, pointer| {
+                if key.len() != prefix.len() + 4 {
+                    return Err(HubError::invalid_internal_state(
+                        "channel member slot key has invalid length",
+                    ));
+                }
+                let fid = read_fid_key(key, prefix.len());
+                // `pointer` is the row's own value, so this resolves the primary
+                // message without re-reading the slot key.
+                let message =
+                    message_for_slot_pointer(store, &empty_txn, pointer).map_err(|err| {
+                        warn!(
+                            channel_id = hex::encode(channel_id),
+                            fid, "channel member slot could not be resolved from its pointer",
+                        );
+                        err
+                    })?;
+                let state = member_state_for_message(&message)?;
+                if state_filter.is_none_or(|filter| filter == state) {
+                    let last_action_ts = message
+                        .data
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HubError::invalid_internal_state("channel member missing data")
+                        })?
+                        .timestamp;
+                    entries.push(ChannelMemberEntry {
+                        fid,
+                        state,
+                        last_action_ts,
+                    });
+                    last_key = Some(key.to_vec());
+                    if entries.len() >= page_size {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
+    }
+
+    pub fn memberships_by_fid(
+        store: &Store<ChannelMemberStoreDef>,
+        target_fid: u64,
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelMembershipEntry>, HubError> {
+        let prefix = ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &[])?;
+        require_page_token_in_prefix(&prefix, page_options)?;
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, _| {
+                if key.len() != prefix.len() + CHANNEL_ID_LENGTH {
+                    return Err(HubError::invalid_internal_state(
+                        "channel member by-fid key has invalid length",
+                    ));
+                }
+                let channel_id = key[prefix.len()..].to_vec();
+                let state =
+                    Self::member_state(store, &channel_id, target_fid, None)?.ok_or_else(|| {
+                        warn!(
+                            target_fid,
+                            channel_id = hex::encode(&channel_id),
+                            "channel member by-fid index points to a missing slot",
+                        );
+                        HubError::invalid_internal_state(
+                            "channel member by-fid index points to a missing slot",
+                        )
+                    })?;
+                entries.push(ChannelMembershipEntry { channel_id, state });
+                last_key = Some(key.to_vec());
+                Ok(entries.len() >= page_size)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
     }
 
     pub fn slot_count(
@@ -781,8 +1162,9 @@ impl ChannelPinStore {
         store: &Store<ChannelPinStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
@@ -801,6 +1183,22 @@ impl ChannelPinStore {
             })
             .transpose()
     }
+
+    pub fn get_channel_pin_state(
+        store: &Store<ChannelPinStoreDef>,
+        channel_id: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<ChannelPinState>, HubError> {
+        read_slot(store, Self::slot_key(channel_id), maybe_txn)?
+            .map(|message| {
+                let author_fid = message.fid();
+                match message.data.and_then(|data| data.body) {
+                    Some(Body::ChannelPinBody(body)) => Ok(ChannelPinState { body, author_fid }),
+                    _ => Err(invalid_body("ChannelPin")),
+                }
+            })
+            .transpose()
+    }
 }
 
 impl ChannelModerateStore {
@@ -808,8 +1206,9 @@ impl ChannelModerateStore {
         store: &Store<ChannelModerateStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8], cast_hash: &[u8]) -> Vec<u8> {
@@ -837,5 +1236,57 @@ impl ChannelModerateStore {
             channel_index_key(ChannelIndex::ModerateSlotCount, channel_id, &[]),
             maybe_txn,
         )
+    }
+
+    pub fn moderations_by_channel(
+        store: &Store<ChannelModerateStoreDef>,
+        channel_id: &[u8],
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelModerationEntry>, HubError> {
+        let prefix = channel_index_key(ChannelIndex::ModerateSlot, channel_id, &[]);
+        require_page_token_in_prefix(&prefix, page_options)?;
+        let empty_txn = RocksDbTransactionBatch::new();
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, pointer| {
+                if key.len() != prefix.len() + CHANNEL_MODERATE_CAST_HASH_LENGTH {
+                    return Err(HubError::invalid_internal_state(
+                        "channel moderate slot key has invalid length",
+                    ));
+                }
+                // `pointer` is the row's own value, so this resolves the primary
+                // message without re-reading the slot key.
+                let message =
+                    message_for_slot_pointer(store, &empty_txn, pointer).map_err(|err| {
+                        warn!(
+                            channel_id = hex::encode(channel_id),
+                            "channel moderate slot could not be resolved from its pointer",
+                        );
+                        err
+                    })?;
+                let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+                    Some(Body::ChannelModerateBody(body)) => body,
+                    _ => return Err(invalid_body("ChannelModerate")),
+                };
+                let action = ChannelModerateAction::try_from(body.action)
+                    .map_err(|_| HubError::validation_failure("invalid channel moderate action"))?;
+                entries.push(ChannelModerationEntry {
+                    cast_hash: body.cast_hash.clone(),
+                    action,
+                    author_fid: message.fid(),
+                });
+                last_key = Some(key.to_vec());
+                Ok(entries.len() >= page_size)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
     }
 }

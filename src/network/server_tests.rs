@@ -5,7 +5,7 @@ mod tests {
     use async_trait::async_trait;
     use base64::Engine;
     use prost::Message;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout};
@@ -19,16 +19,22 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, Block, ChannelOwnerRequest, ChannelOwnerResponse, ChannelRegisterEventType,
-        ChannelsByAddressRequest, ChannelsByFidRequest, EventRequest, EventsRequest,
-        FarcasterNetwork, FnameTransfer, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        StorageUnitType, SubmitBulkMessagesRequest, SubmitBulkMessagesResponse, UserDataType,
-        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
+        self, Block, ChannelMemberRequest, ChannelMembersRequest, ChannelMembershipsByFidRequest,
+        ChannelModerationsRequest, ChannelOwnerRequest, ChannelOwnerResponse,
+        ChannelRegisterEventType, ChannelRequest, ChannelsByAddressRequest, ChannelsByFidRequest,
+        EventRequest, EventsRequest, FarcasterNetwork, FnameTransfer, HubEvent, HubEventType,
+        OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
+        SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
+        UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::constants::RootPrefix;
+    use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        make_ts_hash, HubEventIdGenerator, HubEventStorageExt, VerificationStoreDef, SEQUENCE_BITS,
+        make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
+        ChannelPinStore, ChannelUpdateStore, DerivedIndexGate, HubEventIdGenerator,
+        HubEventStorageExt, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MEMBER_SLOT_CAP,
+        CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -37,6 +43,7 @@ mod tests {
     use crate::storage::store::test_helper::{commit_event, register_user};
     use crate::storage::store::{block_engine_test_helpers, test_helper};
     use crate::storage::trie::merkle_trie;
+    use crate::storage::util::increment_vec_u8;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -73,6 +80,22 @@ mod tests {
 
     fn owner_address(byte: u8) -> Vec<u8> {
         vec![byte; 20]
+    }
+
+    fn channel_rows(db: &RocksDB) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let prefix = vec![RootPrefix::Channel as u8];
+        let mut rows = BTreeMap::new();
+        db.for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            &PageOptions::default(),
+            |key, value| {
+                rows.insert(key.to_vec(), value.to_vec());
+                Ok(false)
+            },
+        )
+        .unwrap();
+        rows
     }
 
     fn merge_channel_registration(
@@ -123,6 +146,51 @@ mod tests {
             .merge_onchain_event(event, &mut txn)
             .unwrap();
         block_stores.onchain_event_store.db.commit(txn).unwrap();
+    }
+
+    fn merge_channel_message(block_engine: &BlockEngine, message: &proto::Message) {
+        let block_stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        match message.msg_type() {
+            proto::MessageType::ChannelUpdate => {
+                ChannelUpdateStore::merge(
+                    &block_stores.channel_update_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
+            }
+            proto::MessageType::ChannelMember => {
+                ChannelMemberStore::merge(
+                    &block_stores.channel_member_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
+            }
+            proto::MessageType::ChannelPin => {
+                ChannelPinStore::merge(
+                    &block_stores.channel_pin_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
+            }
+            proto::MessageType::ChannelModerate => {
+                ChannelModerateStore::merge(
+                    &block_stores.channel_moderate_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
+            }
+            other => panic!("unexpected channel message type: {other:?}"),
+        }
+        block_stores.db.commit(txn).unwrap();
     }
 
     async fn get_channel_owner_response(
@@ -220,6 +288,25 @@ mod tests {
             .merge(verification, &mut txn, &test_helper::default_merge_ctx())
             .unwrap();
         stores.db.commit(txn).unwrap();
+    }
+
+    fn merge_shard_zero_verification(block_engine: &BlockEngine, verification: &proto::Message) {
+        let stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(verification, &mut txn, &test_helper::default_merge_ctx())
+            .unwrap();
+        stores.db.commit(txn).unwrap();
+    }
+
+    fn merge_channel_owner_verification(
+        stores: &Stores,
+        block_engine: &BlockEngine,
+        verification: &proto::Message,
+    ) {
+        merge_verification(stores, verification);
+        merge_shard_zero_verification(block_engine, verification);
     }
 
     struct MockL1Client {}
@@ -359,6 +446,25 @@ mod tests {
         broadcast::Sender<ShardChunk>,
         broadcast::Sender<Block>,
     ) {
+        make_server_with_slot_cap(rpc_auth, admin_rpc_auth, None).await
+    }
+
+    // Like `make_server`, but lets a test shrink the channel member/moderate slot caps so
+    // slot-boundary coverage doesn't have to insert thousands of rows. `None` keeps the
+    // production caps.
+    async fn make_server_with_slot_cap(
+        rpc_auth: Option<String>,
+        admin_rpc_auth: Option<String>,
+        channel_slot_cap_override: Option<u32>,
+    ) -> (
+        HashMap<u32, Stores>,
+        HashMap<u32, Senders>,
+        [ShardEngine; 2],
+        BlockEngine,
+        MyHubService,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+    ) {
         let (msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
         let statsd_client = StatsdClientWrapper::new(
@@ -370,6 +476,7 @@ mod tests {
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             messages_request_tx: Some(msgs_request_tx.clone()),
+            channel_slot_cap_override,
             ..Default::default()
         })
         .await;
@@ -377,6 +484,7 @@ mod tests {
             limits: Some(limits.clone()),
             messages_request_tx: Some(msgs_request_tx.clone()),
             shard_id: 2,
+            channel_slot_cap_override,
             ..Default::default()
         })
         .await;
@@ -418,6 +526,7 @@ mod tests {
         let (block_decision_tx, block_decision_rx) = broadcast::channel(1000);
         let (block_engine, _) = block_engine_test_helpers::setup_with_options(BlockEngineOptions {
             messages_request_tx: Some(msgs_request_tx),
+            channel_slot_cap_override,
             ..BlockEngineOptions::default()
         });
         let block_stores = block_engine.stores();
@@ -528,6 +637,7 @@ mod tests {
             None,
         );
         merge_verification(stores.get(&1).unwrap(), &verification);
+        merge_shard_zero_verification(&block_engine, &verification);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -571,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_channel_owner_resolves_single_verification() {
+    async fn test_get_channel_owner_ignores_pre_v20_data_shard_verification() {
         let (
             stores,
             _senders,
@@ -595,6 +705,27 @@ mod tests {
         );
         merge_verification(stores.get(&1).unwrap(), &verification_add);
 
+        assert!(
+            crate::storage::store::account::VerificationStore::get_verification_add(
+                &stores.get(&1).unwrap().verification_store,
+                SHARD1_FID,
+                &address,
+                None,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            crate::storage::store::account::VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                SHARD1_FID,
+                &address,
+                None,
+            )
+            .unwrap()
+            .is_none()
+        );
+
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
                 channel_key: "verified".to_string(),
@@ -603,15 +734,15 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.fid, 0);
         assert_eq!(response.owner_address, address);
         assert_eq!(response.expiry, expiry);
     }
 
     #[tokio::test]
-    async fn test_get_channel_owner_lww_across_hosted_shards() {
+    async fn test_get_channel_owner_lww_in_shard_zero_replica() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -644,8 +775,8 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&2).unwrap(), &later);
-        merge_verification(stores.get(&1).unwrap(), &earlier);
+        merge_shard_zero_verification(&block_engine, &later);
+        merge_shard_zero_verification(&block_engine, &earlier);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -664,9 +795,9 @@ mod tests {
     // "last shard iterated wins" — one direction alone could pass by luck of the
     // hash order.
     #[tokio::test]
-    async fn test_get_channel_owner_lww_across_hosted_shards_reversed() {
+    async fn test_get_channel_owner_lww_in_shard_zero_replica_reversed() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -699,8 +830,8 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &later);
-        merge_verification(stores.get(&2).unwrap(), &earlier);
+        merge_shard_zero_verification(&block_engine, &later);
+        merge_shard_zero_verification(&block_engine, &earlier);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -720,7 +851,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_owner_reverts_to_parked_after_verification_remove() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -740,7 +871,7 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &verification_add);
+        merge_shard_zero_verification(&block_engine, &verification_add);
 
         // Sanity: resolves to the verifier before the remove.
         let resolved = service
@@ -759,7 +890,7 @@ mod tests {
             Some(20),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &verification_remove);
+        merge_shard_zero_verification(&block_engine, &verification_remove);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -777,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_owner_drops_orphan_index_candidate() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -796,7 +927,7 @@ mod tests {
             VerificationStoreDef::make_verification_by_address_key(&address, SHARD1_FID),
             orphan_ts_hash.to_vec(),
         );
-        stores.get(&1).unwrap().db.commit(txn).unwrap();
+        block_engine.stores().db.commit(txn).unwrap();
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -842,8 +973,9 @@ mod tests {
         assert_eq!(by_address_parked.channels[0].fid, 0);
         assert_eq!(by_address_parked.channels[0].channel_key, "delayed_flip");
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -876,8 +1008,9 @@ mod tests {
         let address = owner_address(9);
         let expiry = now_unix_seconds() - 1;
         merge_channel_registration(&block_engine, "lapsed_list", address.clone(), expiry);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -918,8 +1051,8 @@ mod tests {
 
         let later = verification_add(SHARD2_FID, address.clone(), 20);
         let earlier = verification_add(SHARD1_FID, address, 10);
-        merge_verification(stores.get(&2).unwrap(), &later);
-        merge_verification(stores.get(&1).unwrap(), &earlier);
+        merge_channel_owner_verification(stores.get(&2).unwrap(), &block_engine, &later);
+        merge_channel_owner_verification(stores.get(&1).unwrap(), &block_engine, &earlier);
 
         assert_channel_owner_fid_invariant(
             &service,
@@ -948,12 +1081,14 @@ mod tests {
             address.clone(),
             now_unix_seconds() + 3600,
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_add(SHARD2_FID, address.clone(), 20),
         );
         assert_channel_owner_fid_invariant(
@@ -964,8 +1099,9 @@ mod tests {
         )
         .await;
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_remove(SHARD2_FID, address.clone(), 30),
         );
         assert_channel_owner_fid_invariant(
@@ -976,8 +1112,9 @@ mod tests {
         )
         .await;
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_remove(SHARD1_FID, address, 40),
         );
         let parked = get_channel_owner_response(&service, "remove_fallback").await;
@@ -1011,8 +1148,9 @@ mod tests {
         assert_eq!(parked.owner_address, address_a);
         assert_eq!(parked.expiry, expiry);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_a, 10),
         );
         assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD1_FID, None).await;
@@ -1028,8 +1166,9 @@ mod tests {
         assert_eq!(transferred.owner_address, address_b);
         assert_eq!(transferred.expiry, expiry);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_add(SHARD2_FID, address_b, 20),
         );
         assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD2_FID, Some(SHARD1_FID))
@@ -1068,6 +1207,3576 @@ mod tests {
             .into_inner();
         assert!(by_address.channels.is_empty());
         assert_eq!(by_address.next_page_token, None);
+    }
+
+    #[tokio::test]
+    async fn test_channel_message_read_surface_uses_shard_zero_folds_and_indexes() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "message_reads";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(55),
+            now_unix_seconds() + 3600,
+        );
+
+        let empty_member = service
+            .get_channel_member(Request::new(ChannelMemberRequest {
+                channel_id: channel_id.clone(),
+                fid: 101,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(empty_member.state, proto::ChannelMemberState::None as i32);
+        assert_eq!(empty_member.last_action_ts, None);
+
+        let update = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelUpdate,
+            proto::message_data::Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                channel_id: channel_id.clone(),
+                name: Some("Channel name".to_string()),
+                image_url: Some("https://example.com/image.png".to_string()),
+                ..Default::default()
+            }),
+            Some(9),
+            None,
+        );
+        let moderator = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: 101,
+                action: proto::ChannelMemberAction::AddModerator as i32,
+            }),
+            Some(10),
+            None,
+        );
+        let banned = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: 102,
+                action: proto::ChannelMemberAction::Ban as i32,
+            }),
+            Some(11),
+            None,
+        );
+        let pin_hash = vec![0xAB; 20];
+        let pin = messages_factory::create_message_with_data(
+            501,
+            proto::MessageType::ChannelPin,
+            proto::message_data::Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: channel_id.clone(),
+                cast_hash: pin_hash.clone(),
+            }),
+            Some(12),
+            None,
+        );
+        let moderated_hash = vec![0xCD; 20];
+        let moderation = messages_factory::create_message_with_data(
+            502,
+            proto::MessageType::ChannelModerate,
+            proto::message_data::Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: channel_id.clone(),
+                cast_hash: moderated_hash.clone(),
+                action: proto::ChannelModerateAction::Hide as i32,
+            }),
+            Some(13),
+            None,
+        );
+        for message in [&update, &moderator, &banned, &pin, &moderation] {
+            merge_channel_message(&block_engine, message);
+        }
+
+        let member = service
+            .get_channel_member(Request::new(ChannelMemberRequest {
+                channel_id: channel_id.clone(),
+                fid: 101,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(member.state, proto::ChannelMemberState::Moderator as i32);
+        assert_eq!(member.last_action_ts, Some(10));
+
+        let members = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: Some(1),
+                page_token: None,
+                reverse: Some(false),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(members.members.len(), 1);
+        assert!(members.next_page_token.is_some());
+
+        let moderators = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: Some(proto::ChannelMemberState::Moderator as i32),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(moderators.members.len(), 1);
+        assert_eq!(moderators.members[0].fid, 101);
+
+        let memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 101,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(memberships.memberships.len(), 1);
+        assert_eq!(memberships.memberships[0].channel_id, channel_id);
+        assert_eq!(
+            memberships.memberships[0].state,
+            proto::ChannelMemberState::Moderator as i32
+        );
+
+        let pin_response = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: channel_label(channel_key),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let pinned = pin_response.pin.expect("channel has a pin");
+        assert_eq!(pinned.cast_hash, pin_hash);
+        assert_eq!(pinned.author_fid, 501);
+
+        let moderations = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: channel_label(channel_key),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(moderations.moderations.len(), 1);
+        assert_eq!(moderations.moderations[0].cast_hash, moderated_hash);
+        assert_eq!(moderations.moderations[0].author_fid, 502);
+
+        let metadata = service
+            .get_channel_metadata(Request::new(ChannelRequest {
+                channel_id: channel_label(channel_key),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(metadata.name.as_deref(), Some("Channel name"));
+        assert_eq!(
+            metadata.casting_mode,
+            proto::CastingMode::MembersOnly as i32
+        );
+        assert_eq!(
+            metadata.membership_mode,
+            proto::MembershipMode::Approval as i32
+        );
+
+        let malformed = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: vec![1; 31],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+        let unregistered = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: vec![9; 32],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(unregistered.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn channel_read_page_tokens_are_scoped_to_their_own_channel() {
+        // `page_token` is `optional bytes` on the wire and reaches RocksDB as a raw
+        // scan bound, so a caller controls where the scan STARTS. Two shapes have to
+        // be handled at the RPC edge: an empty token (what generated clients send
+        // when echoing an absent `next_page_token`) must mean "first page", and a
+        // token minted for another channel must be refused as caller error rather
+        // than returning that channel's members under the requested channel id.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+
+        let mut labels = [
+            channel_label("token-scope-a"),
+            channel_label("token-scope-b"),
+        ];
+        labels.sort();
+        let [lower_channel, higher_channel] = labels;
+        // Registered directly rather than through `merge_channel_registration`, which
+        // pins block/log index and so cannot register two channels in one test.
+        for (log_index, (channel_key, address_byte)) in
+            [("token-scope-a", 0x61), ("token-scope-b", 0x62)]
+                .into_iter()
+                .enumerate()
+        {
+            merge_channel_event(
+                &block_engine,
+                events_factory::create_channel_register_event(
+                    channel_key,
+                    channel_label(channel_key),
+                    owner_address(address_byte),
+                    now_unix_seconds() + 3600,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    log_index as u32 + 1,
+                ),
+            );
+        }
+
+        // Two members in the lower channel so its first page yields a live cursor,
+        // and one in the higher channel so a leak is distinguishable from an error.
+        let mut timestamp = 20;
+        for (channel, fid) in [
+            (&lower_channel, 601),
+            (&lower_channel, 602),
+            (&higher_channel, 603),
+        ] {
+            merge_channel_message(
+                &block_engine,
+                &messages_factory::create_message_with_data(
+                    500,
+                    proto::MessageType::ChannelMember,
+                    proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                        channel_id: channel.clone(),
+                        fid,
+                        action: proto::ChannelMemberAction::AddMember as i32,
+                    }),
+                    Some(timestamp),
+                    None,
+                ),
+            );
+            timestamp += 1;
+        }
+
+        let lower_first = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel.clone(),
+                state_filter: None,
+                page_size: Some(1),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(lower_first.members.len(), 1);
+        assert_eq!(lower_first.members[0].fid, 601);
+        let foreign_token = lower_first.next_page_token.clone().unwrap();
+
+        // Without prefix scoping this returns fid 602 — a member of the lower
+        // channel — alongside the higher channel's own 603.
+        let leaked = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: higher_channel.clone(),
+                state_filter: None,
+                page_size: Some(10),
+                page_token: Some(foreign_token.clone()),
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(leaked.code(), tonic::Code::InvalidArgument);
+
+        let leaked_memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 603,
+                page_size: Some(10),
+                page_token: Some(foreign_token),
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(leaked_memberships.code(), tonic::Code::InvalidArgument);
+
+        // An empty token is "first page", not an error and not an internal fault.
+        let empty_token_members = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel.clone(),
+                state_filter: None,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            empty_token_members
+                .members
+                .iter()
+                .map(|member| member.fid)
+                .collect::<Vec<_>>(),
+            vec![601, 602]
+        );
+
+        let empty_token_memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 603,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            empty_token_memberships
+                .memberships
+                .iter()
+                .map(|membership| membership.channel_id.clone())
+                .collect::<Vec<_>>(),
+            vec![higher_channel.clone()]
+        );
+
+        let empty_token_moderations = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: higher_channel,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(empty_token_moderations.moderations.is_empty());
+
+        // A token that does belong to the requested channel still pages normally.
+        let lower_second = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel,
+                state_filter: None,
+                page_size: Some(10),
+                page_token: lower_first.next_page_token,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            lower_second
+                .members
+                .iter()
+                .map(|member| member.fid)
+                .collect::<Vec<_>>(),
+            vec![602]
+        );
+    }
+
+    #[test]
+    fn channel_store_errors_only_blame_the_caller_for_caller_supplied_input() {
+        use crate::core::error::HubError;
+        use crate::network::server::channel_store_error_to_status;
+
+        // Caller input: a page token from another index, an fid that cannot key a
+        // member slot. These are the only errors on the read paths the caller can
+        // actually cause.
+        for err in [
+            HubError::invalid_parameter(
+                "page token does not belong to the requested channel index",
+            ),
+            HubError::invalid_parameter("channel member fid exceeds u32"),
+        ] {
+            assert_eq!(
+                channel_store_error_to_status(err.clone()).code(),
+                tonic::Code::InvalidArgument,
+                "{} is caller input",
+                err.code
+            );
+        }
+
+        // Everything else describes state this node stored and can no longer
+        // interpret. `validation_failure` is the trap: it shares the `bad_request`
+        // prefix with the codes above, but on a READ it is raised by
+        // member_state_for_message / moderation_state_for_message against a STORED
+        // body whose action this binary cannot parse. Reporting that as 4xx would
+        // hide replica corruption from anyone watching error rates.
+        for err in [
+            HubError::validation_failure("invalid channel moderate action"),
+            HubError::validation_failure("invalid channel member action"),
+            HubError::validation_failure("invalid ChannelMember body"),
+            HubError::invalid_internal_state("channel slot points to a missing message"),
+            HubError::invalid_internal_state("channel counter has invalid length"),
+            HubError::internal_db_error("rocksdb exploded"),
+        ] {
+            assert_eq!(
+                channel_store_error_to_status(err.clone()).code(),
+                tonic::Code::Internal,
+                "{} is a server fault, not caller input",
+                err.code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_read_rpcs_reject_malformed_requests_before_reading() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "read-validation";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x51),
+            now_unix_seconds() + 3600,
+        );
+
+        // A fid outside a non-zero u32 cannot key a member slot. Without the explicit
+        // guard, `make_member_by_fid_key`'s own `try_from` failure would surface as
+        // `internal` — a server fault for what is caller input.
+        for fid in [0u64, u32::MAX as u64 + 1, u64::MAX] {
+            assert_eq!(
+                service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: channel_id.clone(),
+                        fid,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument,
+                "get_channel_member must reject fid {fid}"
+            );
+            assert_eq!(
+                service
+                    .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                        fid,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument,
+                "get_channel_memberships_by_fid must reject fid {fid}"
+            );
+        }
+
+        // An i32 outside ChannelMemberState is caller input, not a store fault.
+        assert_eq!(
+            service
+                .get_channel_members(Request::new(ChannelMembersRequest {
+                    channel_id: channel_id.clone(),
+                    state_filter: Some(99),
+                    page_size: None,
+                    page_token: None,
+                    reverse: None,
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // `require_registered_channel` is shared by five handlers but was only ever
+        // reached through get_channel_pin. Both of its branches, on all five.
+        let malformed = vec![0x11; CHANNEL_ID_LENGTH - 1];
+        let unregistered = vec![0x99; CHANNEL_ID_LENGTH];
+        for (bad_channel_id, expected) in [
+            (malformed, tonic::Code::InvalidArgument),
+            (unregistered, tonic::Code::NotFound),
+        ] {
+            assert_eq!(
+                service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: bad_channel_id.clone(),
+                        fid: 101,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id: bad_channel_id.clone(),
+                        state_filter: None,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_pin(Request::new(ChannelRequest {
+                        channel_id: bad_channel_id.clone(),
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                        channel_id: bad_channel_id.clone(),
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(
+                service
+                    .get_channel_metadata(Request::new(ChannelRequest {
+                        channel_id: bad_channel_id.clone(),
+                    }))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+        }
+
+        // GetChannelMembershipsByFid is fid-keyed and takes no channel_id, so it has
+        // no registration check at all and must NOT report NOT_FOUND for a fid with
+        // no memberships — the rpc.proto contract calls this out explicitly.
+        let empty = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 424_242,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(empty.memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unconfigured_channel_metadata_reports_the_restrictive_fold_defaults() {
+        // A registered channel with no ChannelUpdate must report the SAME effective
+        // policy that admission would apply to it. The fold side of that pairing was
+        // already pinned in channel_store_tests; this is the server side, which used
+        // to restate MembersOnly/Approval as literals. If the two ever disagreed, a
+        // channel would report different permissions before and after a cosmetic-only
+        // update that touched neither mode.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "unconfigured";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x53),
+            now_unix_seconds() + 3600,
+        );
+
+        let (expected_casting, expected_membership) = ChannelUpdateStore::default_channel_modes();
+        let unconfigured = service
+            .get_channel_metadata(Request::new(ChannelRequest {
+                channel_id: channel_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(unconfigured.name, None);
+        assert_eq!(unconfigured.description, None);
+        assert_eq!(unconfigured.image_url, None);
+        assert_eq!(unconfigured.header, None);
+        assert_eq!(unconfigured.rules, None);
+        assert_eq!(unconfigured.casting_mode, expected_casting as i32);
+        assert_eq!(unconfigured.membership_mode, expected_membership as i32);
+        assert_eq!(
+            unconfigured.casting_mode,
+            proto::CastingMode::MembersOnly as i32
+        );
+        assert_eq!(
+            unconfigured.membership_mode,
+            proto::MembershipMode::Approval as i32
+        );
+
+        // A cosmetic-only update that sets neither mode must land on exactly the same
+        // policy — this is the branch the "no update" defaults have to agree with.
+        merge_channel_message(
+            &block_engine,
+            &messages_factory::create_message_with_data(
+                500,
+                proto::MessageType::ChannelUpdate,
+                proto::message_data::Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                    channel_id: channel_id.clone(),
+                    name: Some("Name only".to_string()),
+                    ..Default::default()
+                }),
+                Some(40),
+                None,
+            ),
+        );
+        let cosmetic = service
+            .get_channel_metadata(Request::new(ChannelRequest { channel_id }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(cosmetic.name.as_deref(), Some("Name only"));
+        assert_eq!(cosmetic.casting_mode, unconfigured.casting_mode);
+        assert_eq!(cosmetic.membership_mode, unconfigured.membership_mode);
+    }
+
+    #[tokio::test]
+    async fn channel_member_state_none_filter_returns_every_state() {
+        // CHANNEL_MEMBER_STATE_NONE is the proto3 zero value, so it is exactly what a
+        // client sends by leaving `state_filter` set to its default. It must mean "no
+        // filter", identical to omitting the field — `channel_member_state_from_proto`
+        // maps it to None and `get_channel_members` then `and_then`s it away. Making
+        // that mapping total would silently give every such client empty pages.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "none-filter";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x52),
+            now_unix_seconds() + 3600,
+        );
+
+        for (index, (fid, action)) in [
+            (201u64, proto::ChannelMemberAction::AddMember),
+            (202, proto::ChannelMemberAction::AddModerator),
+            (203, proto::ChannelMemberAction::Ban),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            merge_channel_message(
+                &block_engine,
+                &messages_factory::create_message_with_data(
+                    500,
+                    proto::MessageType::ChannelMember,
+                    proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                        channel_id: channel_id.clone(),
+                        fid,
+                        action: action as i32,
+                    }),
+                    Some(index as u32 + 30),
+                    None,
+                ),
+            );
+        }
+
+        let fids_for = |filter: Option<i32>| {
+            let service = &service;
+            let channel_id = channel_id.clone();
+            async move {
+                let mut fids = service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id,
+                        state_filter: filter,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .members
+                    .into_iter()
+                    .map(|member| member.fid)
+                    .collect::<Vec<_>>();
+                fids.sort();
+                fids
+            }
+        };
+
+        let unfiltered = fids_for(None).await;
+        assert_eq!(unfiltered, vec![201, 202, 203]);
+        assert_eq!(
+            fids_for(Some(proto::ChannelMemberState::None as i32)).await,
+            unfiltered,
+            "an explicit NONE filter must behave exactly like an absent one"
+        );
+        // A real filter still narrows, so "NONE means everything" is not just the
+        // filter being ignored altogether.
+        assert_eq!(
+            fids_for(Some(proto::ChannelMemberState::Banned as i32)).await,
+            vec![203]
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_fanout_end_to_end_keeps_shard_zero_replicas_and_reads_in_sync() {
+        let (
+            _stores,
+            _senders,
+            mut engines,
+            mut block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        const OWNER_FID: u64 = 7101;
+        const MODERATOR_FID: u64 = 7102;
+        const TARGET_FID: u64 = 7103;
+
+        for fid in [OWNER_FID, MODERATOR_FID] {
+            block_engine_test_helpers::register_user(
+                fid,
+                block_engine_test_helpers::default_signer(),
+                block_engine_test_helpers::default_custody_address(),
+                1,
+                &mut block_engine,
+            );
+        }
+        let channel_key = "fanout-e2e";
+        let channel_id = channel_label(channel_key);
+        let owner = owner_address(0x71);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner.clone(),
+            now_unix_seconds() + 3600,
+        );
+        merge_shard_zero_verification(
+            &block_engine,
+            &verification_add(OWNER_FID, owner, messages_factory::farcaster_time()),
+        );
+
+        let timestamp = messages_factory::farcaster_time() + 10;
+        let update = messages_factory::create_message_with_data(
+            OWNER_FID,
+            proto::MessageType::ChannelUpdate,
+            proto::message_data::Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                channel_id: channel_id.clone(),
+                name: Some("fanout".to_string()),
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        );
+        let add_moderator = messages_factory::create_message_with_data(
+            OWNER_FID,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: MODERATOR_FID,
+                action: proto::ChannelMemberAction::AddModerator as i32,
+            }),
+            Some(timestamp + 1),
+            None,
+        );
+        let add_target = messages_factory::create_message_with_data(
+            OWNER_FID,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: TARGET_FID,
+                action: proto::ChannelMemberAction::AddMember as i32,
+            }),
+            Some(timestamp + 2),
+            None,
+        );
+        let pin_hash = vec![0x72; 20];
+        let pin = messages_factory::create_message_with_data(
+            MODERATOR_FID,
+            proto::MessageType::ChannelPin,
+            proto::message_data::Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: channel_id.clone(),
+                cast_hash: pin_hash.clone(),
+            }),
+            Some(timestamp + 3),
+            None,
+        );
+        let moderated_hash = vec![0x73; 20];
+        let moderation = messages_factory::create_message_with_data(
+            MODERATOR_FID,
+            proto::MessageType::ChannelModerate,
+            proto::message_data::Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: channel_id.clone(),
+                cast_hash: moderated_hash.clone(),
+                action: proto::ChannelModerateAction::Hide as i32,
+            }),
+            Some(timestamp + 4),
+            None,
+        );
+        // Cross-author supersede: the moderator's later consensus action replaces the owner's
+        // incumbent target slot even though its embedded timestamp is deliberately older.
+        let ban_target = messages_factory::create_message_with_data(
+            MODERATOR_FID,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: TARGET_FID,
+                action: proto::ChannelMemberAction::Ban as i32,
+            }),
+            Some(timestamp - 1),
+            None,
+        );
+        let workload = vec![
+            update.clone(),
+            add_moderator.clone(),
+            add_target.clone(),
+            pin.clone(),
+            moderation.clone(),
+            ban_target.clone(),
+        ];
+
+        let [replica_a, replica_b] = &mut engines;
+        // Bring both consumers to the exact BlockEvent cursor produced while registering the
+        // test authors. Those earlier blocks contribute heartbeat events; replaying them is what
+        // makes the subsequent channel event's strict seqnum provenance real rather than
+        // manufacturing a fresh sequence for the test.
+        let initial_block_events = block_engine.stores().block_event_store;
+        for seqnum in 1..=initial_block_events.max_seqnum().unwrap() {
+            let event = initial_block_events
+                .get_block_event_by_seqnum(seqnum)
+                .unwrap()
+                .unwrap();
+            let replay_a = replica_a.propose_state_change(
+                replica_a.shard_id(),
+                vec![
+                    crate::storage::store::mempool_poller::MempoolMessage::BlockEvent {
+                        for_shard: replica_a.shard_id(),
+                        message: event.clone(),
+                    },
+                ],
+                None,
+            );
+            let replay_b = replica_b.propose_state_change(
+                replica_b.shard_id(),
+                vec![
+                    crate::storage::store::mempool_poller::MempoolMessage::BlockEvent {
+                        for_shard: replica_b.shard_id(),
+                        message: event,
+                    },
+                ],
+                None,
+            );
+            test_helper::validate_and_commit_state_change(replica_a, &replay_a).await;
+            test_helper::validate_and_commit_state_change(replica_b, &replay_b).await;
+        }
+        for message in &workload {
+            let height = block_engine.get_confirmed_height().increment();
+            let state_change = block_engine.propose_state_change(
+                vec![
+                    crate::storage::store::mempool_poller::MempoolMessage::UserMessage(
+                        message.clone(),
+                    ),
+                ],
+                height,
+                Some(crate::core::util::FarcasterTime::new(
+                    message.data.as_ref().unwrap().timestamp as u64,
+                )),
+            );
+            let block = block_engine_test_helpers::validate_and_commit_state_change(
+                &mut block_engine,
+                &state_change,
+            );
+            assert_eq!(
+                block
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event.data.as_ref().and_then(|data| data.body.as_ref()),
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                                if body.message.as_ref() == Some(message)
+                        )
+                    })
+                    .count(),
+                1,
+                "one channel fan-out event per admitted merge"
+            );
+
+            let mut fanout_events = block.events.clone();
+            fanout_events.sort_by_key(|event| event.seqnum());
+            for event in fanout_events {
+                let replay_a = replica_a.propose_state_change(
+                    replica_a.shard_id(),
+                    vec![
+                        crate::storage::store::mempool_poller::MempoolMessage::BlockEvent {
+                            for_shard: replica_a.shard_id(),
+                            message: event.clone(),
+                        },
+                    ],
+                    None,
+                );
+                let replay_b = replica_b.propose_state_change(
+                    replica_b.shard_id(),
+                    vec![
+                        crate::storage::store::mempool_poller::MempoolMessage::BlockEvent {
+                            for_shard: replica_b.shard_id(),
+                            message: event,
+                        },
+                    ],
+                    None,
+                );
+                test_helper::validate_and_commit_state_change(replica_a, &replay_a).await;
+                test_helper::validate_and_commit_state_change(replica_b, &replay_b).await;
+            }
+        }
+
+        assert_eq!(replica_a.trie_root_hash(), replica_b.trie_root_hash());
+        let block_stores = block_engine.stores();
+        let replica_a_stores = replica_a.get_stores();
+        let replica_b_stores = replica_b.get_stores();
+
+        let shard_zero_channel_rows = channel_rows(&block_stores.db);
+        assert_eq!(channel_rows(&replica_a.db), shard_zero_channel_rows);
+        assert_eq!(channel_rows(&replica_b.db), shard_zero_channel_rows);
+
+        for message in [&update, &add_moderator, &pin, &moderation, &ban_target] {
+            let postfix = match message.msg_type() {
+                proto::MessageType::ChannelUpdate => block_stores.channel_update_store.postfix(),
+                proto::MessageType::ChannelMember => block_stores.channel_member_store.postfix(),
+                proto::MessageType::ChannelPin => block_stores.channel_pin_store.postfix(),
+                proto::MessageType::ChannelModerate => {
+                    block_stores.channel_moderate_store.postfix()
+                }
+                other => panic!("unexpected type {other:?}"),
+            };
+            let data = message.data.as_ref().unwrap();
+            let ts_hash = make_ts_hash(data.timestamp, &message.hash).unwrap();
+            let key = make_message_primary_key(message.fid(), postfix, Some(&ts_hash));
+            let expected = block_stores.db.get(&key).unwrap();
+            assert!(expected.is_some());
+            assert_eq!(replica_a.db.get(&key).unwrap(), expected);
+            assert_eq!(replica_b.db.get(&key).unwrap(), expected);
+            assert!(test_helper::message_exists_in_trie(replica_a, message));
+            assert!(test_helper::message_exists_in_trie(replica_b, message));
+            assert!(
+                crate::storage::trie::merkle_trie::TrieKey::for_message(message)
+                    .iter()
+                    .all(|key| block_engine.trie_key_exists(test_helper::trie_ctx(), key))
+            );
+        }
+        assert!(!test_helper::message_exists_in_trie(replica_a, &add_target));
+        assert!(!test_helper::message_exists_in_trie(replica_b, &add_target));
+
+        let merge_bodies = |engine: &ShardEngine| {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter_map(|event| match event.body {
+                    Some(proto::hub_event::Body::MergeMessageBody(body)) => Some(body),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let replica_a_bodies = merge_bodies(replica_a);
+        let replica_b_bodies = merge_bodies(replica_b);
+        assert_eq!(replica_a_bodies, replica_b_bodies);
+        let ban_event = replica_a_bodies
+            .iter()
+            .find(|body| body.message.as_ref() == Some(&ban_target))
+            .unwrap();
+        assert_eq!(ban_event.deleted_messages, vec![add_target]);
+
+        assert_eq!(
+            ChannelUpdateStore::get_channel_update(
+                &replica_a_stores.channel_update_store,
+                &channel_id,
+                None,
+            )
+            .unwrap(),
+            ChannelUpdateStore::get_channel_update(
+                &replica_b_stores.channel_update_store,
+                &channel_id,
+                None,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            ChannelMemberStore::member_state(
+                &replica_a_stores.channel_member_store,
+                &channel_id,
+                TARGET_FID,
+                None,
+            )
+            .unwrap(),
+            Some(crate::storage::store::account::ChannelMemberState::Banned)
+        );
+
+        let member = service
+            .get_channel_member(Request::new(ChannelMemberRequest {
+                channel_id: channel_id.clone(),
+                fid: TARGET_FID,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(member.state, proto::ChannelMemberState::Banned as i32);
+        let metadata = service
+            .get_channel_metadata(Request::new(ChannelRequest {
+                channel_id: channel_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(metadata.name.as_deref(), Some("fanout"));
+        let memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: TARGET_FID,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(memberships.memberships.len(), 1);
+        assert_eq!(memberships.memberships[0].channel_id, channel_id);
+
+        // `page_size: 0` is caller error, not an empty enumeration. Serving it as an
+        // empty page with no token would assert "this channel has no members, paging
+        // complete" to a client that only meant to leave the field unset.
+        let members_zero = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(members_zero.code(), tonic::Code::InvalidArgument);
+
+        let moderations_zero = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: channel_id.clone(),
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(moderations_zero.code(), tonic::Code::InvalidArgument);
+
+        let memberships_zero = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: TARGET_FID,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(memberships_zero.code(), tonic::Code::InvalidArgument);
+
+        // Omitting page_size still enumerates normally — the distinction the
+        // rejection above exists to preserve.
+        let members_default = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!members_default.members.is_empty());
+    }
+
+    mod channel_scenario_tests {
+        use super::*;
+        use crate::core::util::FarcasterTime;
+        use crate::proto::{
+            hub_event, message_data::Body, ChannelMemberAction, ChannelModerateAction,
+            MembershipMode, MessageType,
+        };
+        use crate::storage::store::mempool_poller::MempoolMessage;
+        use crate::storage::trie::merkle_trie::TrieKey;
+        use alloy_signer_local::PrivateKeySigner;
+
+        struct ReadSnapshot {
+            member: proto::ChannelMemberResponse,
+            members: proto::ChannelMembersResponse,
+            pin: proto::ChannelPinResponse,
+            moderations: proto::ChannelModerationsResponse,
+            metadata: proto::ChannelMetadataResponse,
+            memberships: proto::ChannelMembershipsResponse,
+        }
+
+        struct ScenarioDriver {
+            replicas: [ShardEngine; 2],
+            block_engine: BlockEngine,
+            service: MyHubService,
+            replayed_seqnum: u64,
+        }
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct ScenarioFingerprint {
+            shard_zero_root: Vec<u8>,
+            replica_roots: [Vec<u8>; 2],
+            hub_event_cursors: [(usize, Option<u64>); 3],
+            channel_rows: [BTreeMap<Vec<u8>, Vec<u8>>; 3],
+            block_event_seqnums: [u64; 3],
+        }
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct ScenarioEventDelta {
+            hub_event_types_by_source_shard: Vec<(usize, i32)>,
+            block_event_types_by_source_shard: Vec<(usize, i32)>,
+        }
+
+        impl ScenarioDriver {
+            async fn new() -> Self {
+                Self::new_with_slot_cap(None).await
+            }
+
+            // Builds a driver whose block engine and both replicas share a shrunken channel
+            // member/moderate slot cap, so slot-boundary tests exercise the real cap-rejection
+            // path without inserting the full production 8k/16k rows. `None` uses the production
+            // caps.
+            async fn new_with_slot_cap(channel_slot_cap_override: Option<u32>) -> Self {
+                let (
+                    _stores,
+                    _senders,
+                    replicas,
+                    block_engine,
+                    service,
+                    _shard_decision_tx,
+                    _block_decision_tx,
+                ) = make_server_with_slot_cap(None, None, channel_slot_cap_override).await;
+                Self {
+                    replicas,
+                    block_engine,
+                    service,
+                    replayed_seqnum: 0,
+                }
+            }
+
+            fn register_user(&mut self, fid: u64, custody: Vec<u8>, storage_units: u32) {
+                block_engine_test_helpers::register_user(
+                    fid,
+                    block_engine_test_helpers::default_signer(),
+                    custody,
+                    storage_units,
+                    &mut self.block_engine,
+                );
+            }
+
+            fn unreplayed_block_events(&self) -> (u64, Vec<proto::BlockEvent>) {
+                let event_store = self.block_engine.stores().block_event_store;
+                let max_seqnum = event_store.max_seqnum().unwrap();
+                let events = ((self.replayed_seqnum + 1)..=max_seqnum)
+                    .map(|seqnum| {
+                        event_store
+                            .get_block_event_by_seqnum(seqnum)
+                            .unwrap()
+                            .unwrap()
+                    })
+                    .collect();
+                (max_seqnum, events)
+            }
+
+            async fn sync_new_block_events(&mut self) {
+                let (max_seqnum, events) = self.unreplayed_block_events();
+                if max_seqnum == self.replayed_seqnum {
+                    return;
+                }
+
+                for event in events {
+                    for replica in &mut self.replicas {
+                        let shard_id = replica.shard_id();
+                        let state_change = replica.propose_state_change(
+                            shard_id,
+                            vec![MempoolMessage::BlockEvent {
+                                for_shard: shard_id,
+                                message: event.clone(),
+                            }],
+                            None,
+                        );
+                        let proposed_root = state_change.new_state_root.clone();
+                        test_helper::validate_and_commit_state_change(replica, &state_change).await;
+                        assert_eq!(replica.trie_root_hash(), proposed_root);
+                    }
+                    assert_eq!(
+                        self.replicas[0].trie_root_hash(),
+                        self.replicas[1].trie_root_hash(),
+                        "replicas must converge after every replayed shard-0 BlockEvent"
+                    );
+                }
+                self.replayed_seqnum = max_seqnum;
+            }
+
+            async fn sync_new_block_events_batched(&mut self) {
+                let (max_seqnum, events) = self.unreplayed_block_events();
+                if max_seqnum == self.replayed_seqnum {
+                    return;
+                }
+
+                // S6 fills the channel slot caps in bulk. Replay the same contiguous, mixed-fid
+                // BlockEvent stream in batched proposals so cap coverage does not manufacture one
+                // block per seeded row. This direct-engine harness sits below BlockReceiver, so it
+                // must emulate BlockReceiver's durable confirmation and bounded tail re-drive
+                // guarantee when HashMap transaction grouping transiently reorders different fids
+                // and strict seqnum replay skips the unconfirmed tail.
+                for replica in &mut self.replicas {
+                    let shard_id = replica.shard_id();
+                    let mut submissions = 0;
+                    loop {
+                        let confirmed =
+                            replica.get_stores().block_event_store.max_seqnum().unwrap();
+                        if confirmed >= max_seqnum {
+                            break;
+                        }
+                        assert!(
+                            submissions <= 3,
+                            "replica shard {shard_id} did not confirm BlockEvent {max_seqnum} after the initial submission and three tail re-drives; stopped at {confirmed}"
+                        );
+                        let pending = events
+                            .iter()
+                            .filter(|event| event.seqnum() > confirmed)
+                            .cloned()
+                            .map(|message| MempoolMessage::BlockEvent {
+                                for_shard: shard_id,
+                                message,
+                            })
+                            .collect();
+                        let state_change = replica.propose_state_change(shard_id, pending, None);
+                        let proposed_root = state_change.new_state_root.clone();
+                        test_helper::validate_and_commit_state_change(replica, &state_change).await;
+                        assert_eq!(replica.trie_root_hash(), proposed_root);
+                        submissions += 1;
+                    }
+                }
+                assert_eq!(
+                    self.replicas[0].trie_root_hash(),
+                    self.replicas[1].trie_root_hash(),
+                    "replicas must converge after batched shard-0 replay"
+                );
+                self.replayed_seqnum = max_seqnum;
+            }
+
+            fn commit_without_replay(
+                &mut self,
+                inputs: Vec<MempoolMessage>,
+                timestamp: u32,
+            ) -> Block {
+                let height = self.block_engine.get_confirmed_height().increment();
+                let state_change = self.block_engine.propose_state_change(
+                    inputs,
+                    height,
+                    Some(FarcasterTime::new(timestamp as u64)),
+                );
+                let proposed_root = state_change.new_state_root.clone();
+                let block = block_engine_test_helpers::validate_and_commit_state_change(
+                    &mut self.block_engine,
+                    &state_change,
+                );
+                assert_eq!(self.block_engine.trie_root_hash(), proposed_root);
+                block
+            }
+
+            async fn commit(&mut self, inputs: Vec<MempoolMessage>, timestamp: u32) -> Block {
+                let block = self.commit_without_replay(inputs, timestamp);
+                self.sync_new_block_events().await;
+                block
+            }
+
+            async fn commit_with_transaction_order(
+                &mut self,
+                inputs: Vec<MempoolMessage>,
+                ordered_fids: &[u64],
+                timestamp: u32,
+            ) -> Block {
+                let height = self.block_engine.get_confirmed_height().increment();
+                let state_change = self
+                    .block_engine
+                    .propose_state_change_with_transaction_order_for_test(
+                        inputs,
+                        ordered_fids,
+                        height,
+                        FarcasterTime::new(timestamp as u64),
+                    );
+                assert_eq!(
+                    state_change
+                        .transactions
+                        .iter()
+                        .map(|transaction| transaction.fid)
+                        .collect::<Vec<_>>(),
+                    ordered_fids
+                );
+                let proposed_root = state_change.new_state_root.clone();
+                let block = block_engine_test_helpers::validate_and_commit_state_change(
+                    &mut self.block_engine,
+                    &state_change,
+                );
+                assert_eq!(self.block_engine.trie_root_hash(), proposed_root);
+                self.sync_new_block_events().await;
+                block
+            }
+
+            async fn commit_messages(&mut self, messages: Vec<proto::Message>) -> Block {
+                let timestamp = messages
+                    .iter()
+                    .filter_map(|message| message.data.as_ref().map(|data| data.timestamp))
+                    .max()
+                    .unwrap_or_else(messages_factory::farcaster_time);
+                self.commit(
+                    messages
+                        .into_iter()
+                        .map(MempoolMessage::UserMessage)
+                        .collect(),
+                    timestamp,
+                )
+                .await
+            }
+
+            async fn commit_messages_batched_replay(
+                &mut self,
+                messages: Vec<proto::Message>,
+            ) -> Block {
+                let timestamp = messages
+                    .iter()
+                    .filter_map(|message| message.data.as_ref().map(|data| data.timestamp))
+                    .max()
+                    .unwrap_or_else(messages_factory::farcaster_time);
+                let block = self.commit_without_replay(
+                    messages
+                        .into_iter()
+                        .map(MempoolMessage::UserMessage)
+                        .collect(),
+                    timestamp,
+                );
+                self.sync_new_block_events_batched().await;
+                block
+            }
+
+            fn replicated_event_bodies(db: Arc<RocksDB>) -> Vec<hub_event::Body> {
+                all_hub_events(db)
+                    .into_iter()
+                    .filter_map(|event| {
+                        let body = event.body?;
+                        let replicated = match &body {
+                            hub_event::Body::MergeMessageBody(merge) => {
+                                merge.message.as_ref().is_some_and(|message| {
+                                    matches!(
+                                        message.msg_type(),
+                                        MessageType::LendStorage
+                                            | MessageType::KeyAdd
+                                            | MessageType::KeyRemove
+                                            | MessageType::VerificationAddEthAddress
+                                            | MessageType::VerificationRemove
+                                            | MessageType::ChannelUpdate
+                                            | MessageType::ChannelMember
+                                            | MessageType::ChannelPin
+                                            | MessageType::ChannelModerate
+                                    )
+                                })
+                            }
+                            _ => false,
+                        };
+                        replicated.then_some(body)
+                    })
+                    .collect()
+            }
+
+            fn event_bodies(db: Arc<RocksDB>) -> Vec<hub_event::Body> {
+                all_hub_events(db)
+                    .into_iter()
+                    .filter_map(|event| match event.body {
+                        Some(hub_event::Body::BlockConfirmedBody(_)) | None => None,
+                        body => body,
+                    })
+                    .collect()
+            }
+
+            fn assert_converged(&mut self) {
+                let shard_zero_stores = self.block_engine.stores();
+                let expected_rows = channel_rows(&shard_zero_stores.db);
+                let expected_events = Self::replicated_event_bodies(shard_zero_stores.db.clone());
+                for replica in &self.replicas {
+                    assert_eq!(channel_rows(&replica.db), expected_rows);
+                    assert_eq!(
+                        Self::replicated_event_bodies(replica.db.clone()),
+                        expected_events,
+                        "shard 0 and replicas must expose the same consensus merge bodies"
+                    );
+                }
+                assert_eq!(
+                    Self::event_bodies(self.replicas[0].db.clone()),
+                    Self::event_bodies(self.replicas[1].db.clone()),
+                    "replica HubEvent body streams must be byte-identical"
+                );
+                assert_eq!(
+                    self.replicas[0].trie_root_hash(),
+                    self.replicas[1].trie_root_hash()
+                );
+            }
+
+            async fn reads(&self, channel_id: &[u8], fid: u64) -> ReadSnapshot {
+                let member = self
+                    .service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: channel_id.to_vec(),
+                        fid,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let members = self
+                    .service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id: channel_id.to_vec(),
+                        state_filter: None,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let pin = self
+                    .service
+                    .get_channel_pin(Request::new(ChannelRequest {
+                        channel_id: channel_id.to_vec(),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let moderations = self
+                    .service
+                    .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                        channel_id: channel_id.to_vec(),
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let metadata = self
+                    .service
+                    .get_channel_metadata(Request::new(ChannelRequest {
+                        channel_id: channel_id.to_vec(),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let memberships = self
+                    .service
+                    .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                        fid,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                ReadSnapshot {
+                    member,
+                    members,
+                    pin,
+                    moderations,
+                    metadata,
+                    memberships,
+                }
+            }
+
+            fn state_fingerprint(&mut self) -> ScenarioFingerprint {
+                let shard_zero = self.block_engine.stores();
+                let replica_a = self.replicas[0].get_stores();
+                let replica_b = self.replicas[1].get_stores();
+                ScenarioFingerprint {
+                    shard_zero_root: self.block_engine.trie_root_hash(),
+                    replica_roots: [
+                        self.replicas[0].trie_root_hash(),
+                        self.replicas[1].trie_root_hash(),
+                    ],
+                    hub_event_cursors: [
+                        hub_event_cursor(&shard_zero.db),
+                        hub_event_cursor(&replica_a.db),
+                        hub_event_cursor(&replica_b.db),
+                    ],
+                    channel_rows: [
+                        channel_rows(&shard_zero.db),
+                        channel_rows(&replica_a.db),
+                        channel_rows(&replica_b.db),
+                    ],
+                    block_event_seqnums: [
+                        shard_zero.block_event_store.max_seqnum().unwrap(),
+                        replica_a.block_event_store.max_seqnum().unwrap(),
+                        replica_b.block_event_store.max_seqnum().unwrap(),
+                    ],
+                }
+            }
+
+            fn event_delta(
+                &self,
+                before: &ScenarioFingerprint,
+                after: &ScenarioFingerprint,
+            ) -> ScenarioEventDelta {
+                let shard_zero = self.block_engine.stores();
+                let replica_a = self.replicas[0].get_stores();
+                let replica_b = self.replicas[1].get_stores();
+                let dbs = [
+                    shard_zero.db.clone(),
+                    replica_a.db.clone(),
+                    replica_b.db.clone(),
+                ];
+                let block_event_stores = [
+                    shard_zero.block_event_store,
+                    replica_a.block_event_store,
+                    replica_b.block_event_store,
+                ];
+
+                let mut hub_event_types_by_source_shard = Vec::new();
+                for (source_shard, db) in dbs.iter().enumerate() {
+                    let expected_count = after.hub_event_cursors[source_shard]
+                        .0
+                        .checked_sub(before.hub_event_cursors[source_shard].0)
+                        .unwrap();
+                    let start_id = before.hub_event_cursors[source_shard]
+                        .1
+                        .map(|event_id| event_id + 1)
+                        .unwrap_or(0);
+                    let appended = HubEvent::get_events(
+                        db.clone(),
+                        start_id,
+                        None,
+                        Some(PageOptions {
+                            page_size: Some(expected_count.max(1)),
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap()
+                    .events;
+                    assert_eq!(appended.len(), expected_count);
+                    for event in appended {
+                        hub_event_types_by_source_shard.push((source_shard, event.r#type));
+                    }
+                }
+
+                let mut block_event_types_by_source_shard = Vec::new();
+                for (source_shard, store) in block_event_stores.iter().enumerate() {
+                    for seqnum in (before.block_event_seqnums[source_shard] + 1)
+                        ..=after.block_event_seqnums[source_shard]
+                    {
+                        let event = store.get_block_event_by_seqnum(seqnum).unwrap().unwrap();
+                        block_event_types_by_source_shard
+                            .push((source_shard, event.data.as_ref().unwrap().r#type));
+                    }
+                }
+
+                ScenarioEventDelta {
+                    hub_event_types_by_source_shard,
+                    block_event_types_by_source_shard,
+                }
+            }
+        }
+
+        fn hub_event_cursor(db: &RocksDB) -> (usize, Option<u64>) {
+            let prefix = vec![RootPrefix::HubEvents as u8];
+            let mut count = 0;
+            let mut last_id = None;
+            db.for_each_iterator_by_prefix(
+                Some(prefix.clone()),
+                Some(increment_vec_u8(&prefix)),
+                &PageOptions::default(),
+                |key, _| {
+                    count += 1;
+                    last_id = Some(u64::from_be_bytes(key[1..9].try_into().unwrap()));
+                    Ok(false)
+                },
+            )
+            .unwrap();
+            (count, last_id)
+        }
+
+        fn all_hub_events(db: Arc<RocksDB>) -> Vec<HubEvent> {
+            let mut page_token = None;
+            let mut events = Vec::new();
+            loop {
+                let page = HubEvent::get_events(
+                    db.clone(),
+                    0,
+                    None,
+                    Some(PageOptions {
+                        page_size: Some(1_000),
+                        page_token,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                events.extend(page.events);
+                let Some(next) = page.next_page_token else {
+                    break;
+                };
+                page_token = Some(next);
+            }
+            events
+        }
+
+        fn channel_update(
+            fid: u64,
+            channel_id: &[u8],
+            name: &str,
+            membership_mode: Option<MembershipMode>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelUpdate,
+                Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                    channel_id: channel_id.to_vec(),
+                    name: Some(name.to_string()),
+                    membership_mode: membership_mode.map(|mode| mode as i32),
+                    ..Default::default()
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn verification_contract_add(fid: u64, address: Vec<u8>, timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_add(
+                fid,
+                1,
+                address,
+                vec![],
+                vec![0xB6; 32],
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_member(
+            author_fid: u64,
+            channel_id: &[u8],
+            target_fid: u64,
+            action: ChannelMemberAction,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                author_fid,
+                MessageType::ChannelMember,
+                Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id.to_vec(),
+                    fid: target_fid,
+                    action: action as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_pin(
+            fid: u64,
+            channel_id: &[u8],
+            cast_hash: Vec<u8>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelPin,
+                Body::ChannelPinBody(proto::ChannelPinBody {
+                    channel_id: channel_id.to_vec(),
+                    cast_hash,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_moderate(
+            fid: u64,
+            channel_id: &[u8],
+            cast_hash: Vec<u8>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelModerate,
+                Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id: channel_id.to_vec(),
+                    cast_hash,
+                    action: ChannelModerateAction::Hide as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn assert_rejected_without_side_effects(
+            driver: &mut ScenarioDriver,
+            message: &proto::Message,
+            reason: &str,
+        ) {
+            let before = driver.state_fingerprint();
+            let error = driver.block_engine.simulate_message(message).unwrap_err();
+            assert!(
+                error.to_string().contains(reason),
+                "expected rejection containing {reason:?}, got {error:?}"
+            );
+            assert_eq!(driver.state_fingerprint(), before);
+
+            // Compare two full five-tick windows. Every five consecutive Devnet shard-0 blocks
+            // crosses exactly one heartbeat boundary, so the rejected window and contentless
+            // control window exercise identical housekeeping even when the rejected block itself
+            // happens to be the heartbeat block.
+            let block = driver.commit_messages(vec![message.clone()]).await;
+            assert!(block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(message)
+            )));
+            let base_timestamp = message.data.as_ref().unwrap().timestamp;
+            for offset in 1..5 {
+                driver
+                    .commit(vec![], base_timestamp.saturating_add(offset))
+                    .await;
+            }
+            let after_rejected_window = driver.state_fingerprint();
+            assert_eq!(
+                after_rejected_window.shard_zero_root, before.shard_zero_root,
+                "rejected window changed the shard-0 trie root"
+            );
+            assert_eq!(
+                after_rejected_window.replica_roots, before.replica_roots,
+                "rejected window changed one or more replica trie roots"
+            );
+            assert_eq!(
+                after_rejected_window.channel_rows, before.channel_rows,
+                "rejected window changed channel rows on shard 0 or a replica"
+            );
+            let rejected_delta = driver.event_delta(&before, &after_rejected_window);
+            assert!(rejected_delta
+                .hub_event_types_by_source_shard
+                .iter()
+                .all(|(_, event_type)| *event_type != HubEventType::MergeFailure as i32));
+
+            let control_before = after_rejected_window;
+            for offset in 5..10 {
+                driver
+                    .commit(vec![], base_timestamp.saturating_add(offset))
+                    .await;
+            }
+            let control_after = driver.state_fingerprint();
+            assert_eq!(
+                control_after.shard_zero_root,
+                control_before.shard_zero_root
+            );
+            assert_eq!(control_after.replica_roots, control_before.replica_roots);
+            assert_eq!(control_after.channel_rows, control_before.channel_rows);
+            let control_delta = driver.event_delta(&control_before, &control_after);
+            assert_eq!(
+                rejected_delta, control_delta,
+                "a committed rejection contributed events beyond an empty five-tick control window"
+            );
+        }
+
+        async fn assert_store_rejection_without_state_or_fanout(
+            driver: &mut ScenarioDriver,
+            message: &proto::Message,
+            expected_code: &str,
+            expected_reason: &str,
+        ) {
+            let before = driver.state_fingerprint();
+            let error = driver.block_engine.simulate_message(message).unwrap_err();
+            assert!(
+                error.to_string().contains(expected_reason),
+                "unexpected store rejection: {error:?}"
+            );
+            assert_eq!(driver.state_fingerprint(), before);
+
+            let block = driver.commit_messages(vec![message.clone()]).await;
+            assert!(block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(message)
+            )));
+            let base_timestamp = message.data.as_ref().unwrap().timestamp;
+            for offset in 1..5 {
+                driver
+                    .commit(vec![], base_timestamp.saturating_add(offset))
+                    .await;
+            }
+            let after_duplicate_window = driver.state_fingerprint();
+            assert_eq!(
+                after_duplicate_window.shard_zero_root,
+                before.shard_zero_root
+            );
+            assert_eq!(after_duplicate_window.replica_roots, before.replica_roots);
+            assert_eq!(after_duplicate_window.channel_rows, before.channel_rows);
+
+            let shard_zero_events = HubEvent::get_events(
+                driver.block_engine.stores().db,
+                before.hub_event_cursors[0]
+                    .1
+                    .map(|event_id| event_id + 1)
+                    .unwrap_or(0),
+                None,
+                Some(PageOptions {
+                    page_size: Some(
+                        after_duplicate_window.hub_event_cursors[0].0
+                            - before.hub_event_cursors[0].0,
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .unwrap()
+            .events;
+            let merge_failures = shard_zero_events
+                .iter()
+                .filter(|event| event.r#type() == HubEventType::MergeFailure)
+                .collect::<Vec<_>>();
+            assert_eq!(merge_failures.len(), 1);
+            assert!(matches!(
+                merge_failures[0].body.as_ref(),
+                Some(hub_event::Body::MergeFailure(body))
+                    if body.message.as_ref() == Some(message)
+                        && body.code == expected_code
+                        && body.reason == expected_reason
+            ));
+
+            let mut duplicate_delta = driver.event_delta(&before, &after_duplicate_window);
+            let merge_failure_position = duplicate_delta
+                .hub_event_types_by_source_shard
+                .iter()
+                .position(|entry| *entry == (0, HubEventType::MergeFailure as i32))
+                .unwrap();
+            duplicate_delta
+                .hub_event_types_by_source_shard
+                .remove(merge_failure_position);
+            assert!(duplicate_delta
+                .hub_event_types_by_source_shard
+                .iter()
+                .all(|(_, event_type)| *event_type != HubEventType::MergeFailure as i32));
+
+            let control_before = after_duplicate_window;
+            for offset in 5..10 {
+                driver
+                    .commit(vec![], base_timestamp.saturating_add(offset))
+                    .await;
+            }
+            let control_after = driver.state_fingerprint();
+            assert_eq!(
+                control_after.shard_zero_root,
+                control_before.shard_zero_root
+            );
+            assert_eq!(control_after.replica_roots, control_before.replica_roots);
+            assert_eq!(control_after.channel_rows, control_before.channel_rows);
+            assert_eq!(
+                duplicate_delta,
+                driver.event_delta(&control_before, &control_after),
+                "store rejection contributed more than its one documented shard-0 MERGE_FAILURE"
+            );
+        }
+
+        async fn transfer_order_driver(
+            channel_key: &str,
+            owner_fid: u64,
+            new_owner_fid: u64,
+            register_block: u32,
+        ) -> (ScenarioDriver, Vec<u8>, Vec<u8>, u32) {
+            let mut driver = ScenarioDriver::new().await;
+            let old_owner_address = owner_address(0xC1);
+            let new_owner_address = owner_address(0xC2);
+            driver.register_user(owner_fid, old_owner_address.clone(), 1);
+            driver.register_user(new_owner_fid, new_owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+
+            let channel_id = channel_label(channel_key);
+            let timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            old_owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            register_block,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver
+                .commit_messages(vec![
+                    verification_contract_add(owner_fid, old_owner_address, timestamp + 1),
+                    channel_update(
+                        owner_fid,
+                        &channel_id,
+                        "before transfer",
+                        Some(MembershipMode::Open),
+                        timestamp + 2,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            (driver, channel_id, new_owner_address, timestamp + 3)
+        }
+
+        fn assert_member_collections(
+            reads: &ReadSnapshot,
+            channel_id: &[u8],
+            expected_members: &[(u64, proto::ChannelMemberState)],
+            expected_membership: Option<proto::ChannelMemberState>,
+        ) {
+            let member_rows = reads
+                .members
+                .members
+                .iter()
+                .map(|member| (member.fid, member.state))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                member_rows.len(),
+                reads.members.members.len(),
+                "member collection contains a duplicate fid"
+            );
+            assert_eq!(
+                member_rows,
+                expected_members
+                    .iter()
+                    .map(|(fid, state)| (*fid, *state as i32))
+                    .collect::<BTreeMap<_, _>>()
+            );
+            assert_eq!(reads.members.next_page_token, None);
+
+            match expected_membership {
+                Some(state) => {
+                    assert_eq!(reads.memberships.memberships.len(), 1);
+                    assert_eq!(reads.memberships.memberships[0].channel_id, channel_id);
+                    assert_eq!(reads.memberships.memberships[0].state, state as i32);
+                }
+                None => assert!(reads.memberships.memberships.is_empty()),
+            }
+            assert_eq!(reads.memberships.next_page_token, None);
+        }
+
+        fn assert_pin_and_moderation(
+            reads: &ReadSnapshot,
+            moderator_fid: u64,
+            pin_hash: &[u8],
+            moderated_hash: &[u8],
+        ) {
+            let pinned = reads.pin.pin.as_ref().expect("channel has a pin");
+            assert_eq!(pinned.cast_hash.as_slice(), pin_hash);
+            assert_eq!(pinned.author_fid, moderator_fid);
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.moderations.moderations[0].cast_hash, moderated_hash);
+            assert_eq!(
+                reads.moderations.moderations[0].action,
+                ChannelModerateAction::Hide as i32
+            );
+            assert_eq!(reads.moderations.moderations[0].author_fid, moderator_fid);
+            assert_eq!(reads.moderations.next_page_token, None);
+        }
+
+        #[tokio::test]
+        async fn s1_full_channel_lifecycle_keeps_replicas_events_and_six_reads_in_sync() {
+            const OWNER_FID: u64 = 7_201;
+            const NEW_OWNER_FID: u64 = 7_202;
+            const MODERATOR_FID: u64 = 7_203;
+            const MEMBER_FID: u64 = 7_204;
+            const LEAVER_FID: u64 = 7_205;
+
+            let mut driver = ScenarioDriver::new().await;
+            let old_owner_address = owner_address(0x81);
+            let new_owner_address = owner_address(0x82);
+            for (fid, address) in [
+                (OWNER_FID, old_owner_address.clone()),
+                (NEW_OWNER_FID, new_owner_address.clone()),
+                (MODERATOR_FID, owner_address(0x83)),
+                (MEMBER_FID, owner_address(0x84)),
+                (LEAVER_FID, owner_address(0x85)),
+            ] {
+                driver.register_user(fid, address, 1);
+            }
+            driver.sync_new_block_events().await;
+
+            let channel_key = "scenario-lifecycle";
+            let channel_id = channel_label(channel_key);
+            let mut timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            old_owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            100,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_member_collections(&reads, &channel_id, &[], None);
+            assert_eq!(reads.pin.pin, None);
+            assert!(reads.moderations.moderations.is_empty());
+            assert_eq!(reads.metadata.name, None);
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    OWNER_FID,
+                    old_owner_address.clone(),
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_member_collections(&reads, &channel_id, &[], None);
+            assert_eq!(reads.pin.pin, None);
+            assert!(reads.moderations.moderations.is_empty());
+            assert_eq!(reads.metadata.name, None);
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_update(
+                    OWNER_FID,
+                    &channel_id,
+                    "open",
+                    Some(MembershipMode::Open),
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.metadata.membership_mode, MembershipMode::Open as i32);
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_member_collections(&reads, &channel_id, &[], None);
+            assert_eq!(reads.pin.pin, None);
+            assert!(reads.moderations.moderations.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_member(
+                    MEMBER_FID,
+                    &channel_id,
+                    MEMBER_FID,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Member as i32);
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &[(MEMBER_FID, proto::ChannelMemberState::Member)],
+                Some(proto::ChannelMemberState::Member),
+            );
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.pin.pin, None);
+            assert!(reads.moderations.moderations.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        MODERATOR_FID,
+                        ChannelMemberAction::AddModerator,
+                        timestamp,
+                    ),
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        LEAVER_FID,
+                        ChannelMemberAction::AddMember,
+                        timestamp + 1,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Moderator as i32
+            );
+            let three_members = [
+                (MODERATOR_FID, proto::ChannelMemberState::Moderator),
+                (MEMBER_FID, proto::ChannelMemberState::Member),
+                (LEAVER_FID, proto::ChannelMemberState::Member),
+            ];
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &three_members,
+                Some(proto::ChannelMemberState::Moderator),
+            );
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.pin.pin, None);
+            assert!(reads.moderations.moderations.is_empty());
+
+            timestamp += 2;
+            let pin_hash = vec![0x91; 20];
+            let moderated_hash = vec![0x92; 20];
+            driver
+                .commit_messages(vec![
+                    channel_pin(MODERATOR_FID, &channel_id, pin_hash.clone(), timestamp),
+                    channel_moderate(
+                        MODERATOR_FID,
+                        &channel_id,
+                        moderated_hash.clone(),
+                        timestamp + 1,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Member as i32);
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &three_members,
+                Some(proto::ChannelMemberState::Member),
+            );
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            timestamp += 2;
+            driver
+                .commit_messages(vec![channel_member(
+                    MODERATOR_FID,
+                    &channel_id,
+                    MEMBER_FID,
+                    ChannelMemberAction::Ban,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Banned as i32);
+            let banned_members = [
+                (MODERATOR_FID, proto::ChannelMemberState::Moderator),
+                (MEMBER_FID, proto::ChannelMemberState::Banned),
+                (LEAVER_FID, proto::ChannelMemberState::Member),
+            ];
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &banned_members,
+                Some(proto::ChannelMemberState::Banned),
+            );
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    LEAVER_FID,
+                    ChannelMemberAction::RemoveMember,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, LEAVER_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Removed as i32
+            );
+            let removed_member_rows = [
+                (MODERATOR_FID, proto::ChannelMemberState::Moderator),
+                (MEMBER_FID, proto::ChannelMemberState::Banned),
+                (LEAVER_FID, proto::ChannelMemberState::Removed),
+            ];
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &removed_member_rows,
+                Some(proto::ChannelMemberState::Removed),
+            );
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            timestamp += 1;
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            "",
+                            channel_id.clone(),
+                            new_owner_address.clone(),
+                            0,
+                            ChannelRegisterEventType::Transfer,
+                            101,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver.assert_converged();
+            let parked_owner = get_channel_owner_response(&driver.service, channel_key).await;
+            assert_eq!(parked_owner.owner_address, new_owner_address);
+            assert_eq!(parked_owner.fid, 0);
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Moderator as i32
+            );
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &removed_member_rows,
+                Some(proto::ChannelMemberState::Moderator),
+            );
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            let frozen_messages = [
+                channel_update(OWNER_FID, &channel_id, "stale", None, timestamp + 1),
+                channel_pin(MODERATOR_FID, &channel_id, vec![0x93; 20], timestamp + 11),
+                channel_update(
+                    NEW_OWNER_FID,
+                    &channel_id,
+                    "unverified",
+                    None,
+                    timestamp + 21,
+                ),
+            ];
+            for message in &frozen_messages {
+                assert_rejected_without_side_effects(&mut driver, message, "channel is parked")
+                    .await;
+            }
+            timestamp += 31;
+            driver
+                .commit_messages(vec![channel_member(
+                    MODERATOR_FID,
+                    &channel_id,
+                    MODERATOR_FID,
+                    ChannelMemberAction::RemoveMember,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Removed as i32
+            );
+            let self_left_rows = [
+                (MODERATOR_FID, proto::ChannelMemberState::Removed),
+                (MEMBER_FID, proto::ChannelMemberState::Banned),
+                (LEAVER_FID, proto::ChannelMemberState::Removed),
+            ];
+            assert_member_collections(
+                &reads,
+                &channel_id,
+                &self_left_rows,
+                Some(proto::ChannelMemberState::Removed),
+            );
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    NEW_OWNER_FID,
+                    new_owner_address,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, NEW_OWNER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_member_collections(&reads, &channel_id, &self_left_rows, None);
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+
+            driver
+                .commit_messages(vec![channel_update(
+                    NEW_OWNER_FID,
+                    &channel_id,
+                    "managed by new owner",
+                    Some(MembershipMode::Approval),
+                    timestamp + 1,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, NEW_OWNER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_member_collections(&reads, &channel_id, &self_left_rows, None);
+            assert_pin_and_moderation(&reads, MODERATOR_FID, &pin_hash, &moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("managed by new owner"));
+            assert_eq!(
+                reads.metadata.membership_mode,
+                MembershipMode::Approval as i32
+            );
+        }
+
+        #[tokio::test]
+        async fn s3_mixed_blocks_without_lend_are_deterministic_across_authority_transitions() {
+            // LendStorage is excluded from this mix; its replay interactions are
+            // tracked separately.
+            const OWNER_FID: u64 = 7_401;
+            const REQUEST_FID: u64 = 7_402;
+            const NEW_OWNER_FID: u64 = 7_403;
+
+            let mut driver = ScenarioDriver::new().await;
+            let owner_custody = PrivateKeySigner::random();
+            let request_custody = PrivateKeySigner::random();
+            let new_owner_address = owner_address(0xB3);
+            let owner_address = owner_custody.address().as_slice().to_vec();
+            driver.register_user(OWNER_FID, owner_address.clone(), 1);
+            driver.register_user(
+                REQUEST_FID,
+                request_custody.address().as_slice().to_vec(),
+                1,
+            );
+            driver.register_user(NEW_OWNER_FID, new_owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+
+            let channel_key = "scenario-determinism-green";
+            let channel_id = channel_label(channel_key);
+            let mut timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            210,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+
+            timestamp += 1;
+            let mixed = vec![
+                verification_contract_add(OWNER_FID, owner_address.clone(), timestamp),
+                channel_update(
+                    OWNER_FID,
+                    &channel_id,
+                    "mixed",
+                    Some(MembershipMode::Open),
+                    timestamp + 1,
+                ),
+                channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    OWNER_FID,
+                    ChannelMemberAction::AddMember,
+                    timestamp + 2,
+                ),
+                channel_pin(OWNER_FID, &channel_id, vec![0xB4; 20], timestamp + 3),
+                channel_moderate(OWNER_FID, &channel_id, vec![0xB5; 20], timestamp + 4),
+                messages_factory::keys::create_key_add(
+                    OWNER_FID,
+                    &owner_custody,
+                    REQUEST_FID,
+                    &request_custody,
+                    &generate_signer(),
+                    vec![MessageType::CastAdd],
+                    3_600,
+                    1,
+                    timestamp + 1_000_000,
+                    Some(timestamp + 5),
+                ),
+            ];
+            let mixed_block = driver.commit_messages(mixed.clone()).await;
+            for message in &mixed {
+                assert_eq!(
+                    mixed_block
+                        .events
+                        .iter()
+                        .filter(|event| matches!(
+                            event.data.as_ref().and_then(|data| data.body.as_ref()),
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                                if body.message.as_ref() == Some(message)
+                        ))
+                        .count(),
+                    1,
+                    "mixed block must fan out exactly one event for {:?}",
+                    message.msg_type()
+                );
+                assert!(
+                    TrieKey::for_message(message).iter().all(|key| driver
+                        .block_engine
+                        .trie_key_exists(&merkle_trie::Context::new(), key)),
+                    "mixed message {:?} must land in the proposed and committed shard-0 root",
+                    message.msg_type()
+                );
+            }
+            driver.assert_converged();
+
+            timestamp += 6;
+            let remove = verification_remove(OWNER_FID, owner_address.clone(), timestamp);
+            let parked_update = channel_update(
+                OWNER_FID,
+                &channel_id,
+                "must not merge while parked",
+                None,
+                timestamp + 1,
+            );
+            let park_block = driver
+                .commit_messages(vec![remove.clone(), parked_update.clone()])
+                .await;
+            assert!(TrieKey::for_message(&remove).iter().all(|key| driver
+                .block_engine
+                .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(TrieKey::for_message(&parked_update)
+                .iter()
+                .all(|key| !driver
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(park_block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&parked_update)
+            )));
+            driver.assert_converged();
+
+            timestamp += 2;
+            let reverify = verification_contract_add(OWNER_FID, owner_address.clone(), timestamp);
+            let thawed_update = channel_update(
+                OWNER_FID,
+                &channel_id,
+                "thawed",
+                Some(MembershipMode::Approval),
+                timestamp + 1,
+            );
+            let thaw_block = driver
+                .commit_messages(vec![reverify.clone(), thawed_update.clone()])
+                .await;
+            for message in [&reverify, &thawed_update] {
+                assert_eq!(
+                    thaw_block
+                        .events
+                        .iter()
+                        .filter(|event| matches!(
+                            event.data.as_ref().and_then(|data| data.body.as_ref()),
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                                if body.message.as_ref() == Some(message)
+                        ))
+                        .count(),
+                    1
+                );
+            }
+            driver.assert_converged();
+
+            timestamp += 2;
+            let stale_owner_update =
+                channel_update(OWNER_FID, &channel_id, "stale owner", None, timestamp + 1);
+            let transfer = events_factory::create_channel_register_event(
+                "",
+                channel_id.clone(),
+                new_owner_address,
+                0,
+                ChannelRegisterEventType::Transfer,
+                211,
+                1,
+            );
+            let transfer_block = driver
+                .commit(
+                    vec![
+                        MempoolMessage::OnchainEvent(transfer),
+                        MempoolMessage::UserMessage(stale_owner_update.clone()),
+                    ],
+                    timestamp + 1,
+                )
+                .await;
+            let old_owner_txn = transfer_block
+                .transactions
+                .iter()
+                .position(|txn| txn.fid == OWNER_FID)
+                .unwrap();
+            let transfer_txn = transfer_block
+                .transactions
+                .iter()
+                .position(|txn| txn.fid == 0)
+                .unwrap();
+            let update_landed = TrieKey::for_message(&stale_owner_update).iter().all(|key| {
+                driver
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)
+            });
+            assert_eq!(
+                update_landed,
+                old_owner_txn < transfer_txn,
+                "the frozen transaction order must decide whether the old-owner action lands"
+            );
+            assert_eq!(
+                transfer_block.events.iter().any(|event| matches!(
+                    event.data.as_ref().and_then(|data| data.body.as_ref()),
+                    Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                        if body.message.as_ref() == Some(&stale_owner_update)
+                )),
+                update_landed
+            );
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, OWNER_FID).await;
+            assert_eq!(
+                reads.metadata.name.as_deref(),
+                Some(if update_landed {
+                    "stale owner"
+                } else {
+                    "thawed"
+                })
+            );
+
+            let next_block_old_owner =
+                channel_update(OWNER_FID, &channel_id, "next block", None, timestamp + 2);
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &next_block_old_owner,
+                "channel is parked",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn s3_transfer_transaction_orders_are_explicitly_bounded_by_the_next_block() {
+            // Production permits either HashMap-grouped cross-fid order. The test-only proposal
+            // entry point changes only that proposer choice, then runs the same transaction
+            // replay, root/event construction, validation, commit, and replica fan-out pipeline.
+            const TRANSFER_FIRST_OWNER: u64 = 7_501;
+            const TRANSFER_FIRST_NEW_OWNER: u64 = 7_502;
+            const ACTION_FIRST_OWNER: u64 = 7_511;
+            const ACTION_FIRST_NEW_OWNER: u64 = 7_512;
+
+            // Order A: transfer applies before the old-owner action. The new address is
+            // deliberately unverified, so the old owner is rejected as parked with no state,
+            // event-stream, row, or trie side effect.
+            let (mut transfer_first, channel_id, new_address, timestamp) = transfer_order_driver(
+                "scenario-transfer-first",
+                TRANSFER_FIRST_OWNER,
+                TRANSFER_FIRST_NEW_OWNER,
+                220,
+            )
+            .await;
+            let rejected = channel_update(
+                TRANSFER_FIRST_OWNER,
+                &channel_id,
+                "must stay parked",
+                None,
+                timestamp,
+            );
+            let before_transfer_first = transfer_first.state_fingerprint();
+            let transfer_first_block = transfer_first
+                .commit_with_transaction_order(
+                    vec![
+                        MempoolMessage::OnchainEvent(
+                            events_factory::create_channel_register_event(
+                                "",
+                                channel_id.clone(),
+                                new_address.clone(),
+                                0,
+                                ChannelRegisterEventType::Transfer,
+                                221,
+                                1,
+                            ),
+                        ),
+                        MempoolMessage::UserMessage(rejected.clone()),
+                    ],
+                    &[0, TRANSFER_FIRST_OWNER],
+                    timestamp,
+                )
+                .await;
+            assert!(transfer_first_block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&rejected)
+            )));
+            assert!(TrieKey::for_message(&rejected)
+                .iter()
+                .all(|key| !transfer_first
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)));
+            transfer_first.assert_converged();
+            let after_transfer_first = transfer_first.state_fingerprint();
+            assert_eq!(
+                after_transfer_first.channel_rows, before_transfer_first.channel_rows,
+                "transfer-first rejection changed a channel message row"
+            );
+            for (source_shard, db) in [
+                transfer_first.block_engine.stores().db,
+                transfer_first.replicas[0].db.clone(),
+                transfer_first.replicas[1].db.clone(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let appended = all_hub_events(db)
+                    .into_iter()
+                    .skip(before_transfer_first.hub_event_cursors[source_shard].0)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    appended.len(),
+                    after_transfer_first.hub_event_cursors[source_shard].0
+                        - before_transfer_first.hub_event_cursors[source_shard].0
+                );
+                assert!(appended.iter().all(|event| match event.body.as_ref() {
+                    Some(hub_event::Body::MergeMessageBody(body)) => {
+                        body.message.as_ref() != Some(&rejected)
+                    }
+                    Some(hub_event::Body::MergeFailure(body)) => {
+                        body.message.as_ref() != Some(&rejected)
+                    }
+                    _ => true,
+                }));
+            }
+            let owner =
+                get_channel_owner_response(&transfer_first.service, "scenario-transfer-first")
+                    .await;
+            assert_eq!(owner.owner_address, new_address);
+            assert_eq!(owner.fid, 0);
+            let parked_error = transfer_first
+                .block_engine
+                .simulate_message(&rejected)
+                .unwrap_err();
+            assert!(
+                parked_error.to_string().contains("channel is parked"),
+                "{parked_error:?}"
+            );
+            let next_block_rejected = channel_update(
+                TRANSFER_FIRST_OWNER,
+                &channel_id,
+                "still parked next block",
+                None,
+                timestamp + 1,
+            );
+            assert_rejected_without_side_effects(
+                &mut transfer_first,
+                &next_block_rejected,
+                "channel is parked",
+            )
+            .await;
+            let reads = transfer_first
+                .reads(&channel_id, TRANSFER_FIRST_OWNER)
+                .await;
+            assert_eq!(reads.metadata.name.as_deref(), Some("before transfer"));
+
+            // Order B: the still-authorized old-owner update applies first, then the transfer.
+            // Both commits pass proposal validation/root equality; the very next old-owner action
+            // is parked, bounding the proposer-order freedom to the transfer block.
+            let (mut action_first, channel_id, new_address, timestamp) = transfer_order_driver(
+                "scenario-action-first",
+                ACTION_FIRST_OWNER,
+                ACTION_FIRST_NEW_OWNER,
+                230,
+            )
+            .await;
+            let accepted = channel_update(
+                ACTION_FIRST_OWNER,
+                &channel_id,
+                "old owner landed first",
+                None,
+                timestamp,
+            );
+            let accepted_block = action_first
+                .commit_with_transaction_order(
+                    vec![
+                        MempoolMessage::UserMessage(accepted.clone()),
+                        MempoolMessage::OnchainEvent(
+                            events_factory::create_channel_register_event(
+                                "",
+                                channel_id.clone(),
+                                new_address.clone(),
+                                0,
+                                ChannelRegisterEventType::Transfer,
+                                231,
+                                1,
+                            ),
+                        ),
+                    ],
+                    &[ACTION_FIRST_OWNER, 0],
+                    timestamp,
+                )
+                .await;
+            assert!(TrieKey::for_message(&accepted)
+                .iter()
+                .all(|key| action_first
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(accepted_block.events.iter().any(|event| matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&accepted)
+            )));
+            action_first.assert_converged();
+            let owner =
+                get_channel_owner_response(&action_first.service, "scenario-action-first").await;
+            assert_eq!(owner.owner_address, new_address);
+            assert_eq!(owner.fid, 0);
+            let reads = action_first.reads(&channel_id, ACTION_FIRST_OWNER).await;
+            assert_eq!(
+                reads.metadata.name.as_deref(),
+                Some("old owner landed first")
+            );
+
+            let rejected = channel_update(
+                ACTION_FIRST_OWNER,
+                &channel_id,
+                "too late",
+                None,
+                timestamp + 1,
+            );
+            assert_rejected_without_side_effects(&mut action_first, &rejected, "channel is parked")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn s5_adversarial_authority_sequences_commit_without_ghost_state() {
+            const OWNER_FID: u64 = 7_601;
+            const MODERATOR_A: u64 = 7_602;
+            const MODERATOR_B: u64 = 7_603;
+            const TARGET_FID: u64 = 7_604;
+            const GHOST_FID: u64 = 7_605;
+
+            let mut driver = ScenarioDriver::new().await;
+            let owner_addr = owner_address(0xE1);
+            for fid in [OWNER_FID, MODERATOR_A, MODERATOR_B, TARGET_FID] {
+                driver.register_user(fid, owner_address((fid & 0xff) as u8), 1);
+            }
+            driver.sync_new_block_events().await;
+
+            let channel_key = "scenario-adversarial";
+            let channel_id = channel_label(channel_key);
+            let mut timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            owner_addr.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            300,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            let current_update = channel_update(
+                OWNER_FID,
+                &channel_id,
+                "open adversarial channel",
+                Some(MembershipMode::Open),
+                timestamp + 2,
+            );
+            driver
+                .commit_messages(vec![
+                    verification_contract_add(OWNER_FID, owner_addr.clone(), timestamp + 1),
+                    current_update.clone(),
+                ])
+                .await;
+
+            timestamp += 3;
+            driver
+                .commit_messages(vec![channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    MODERATOR_A,
+                    ChannelMemberAction::AddModerator,
+                    timestamp,
+                )])
+                .await;
+            driver
+                .commit_messages(vec![channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    MODERATOR_A,
+                    ChannelMemberAction::Ban,
+                    timestamp + 1,
+                )])
+                .await;
+            let laundering_attempt = channel_member(
+                OWNER_FID,
+                &channel_id,
+                MODERATOR_A,
+                ChannelMemberAction::RemoveModerator,
+                timestamp + 2,
+            );
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &laundering_attempt,
+                "channel member is banned",
+            )
+            .await;
+            driver
+                .commit_messages(vec![
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        MODERATOR_A,
+                        ChannelMemberAction::Unban,
+                        timestamp + 3,
+                    ),
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        MODERATOR_A,
+                        ChannelMemberAction::AddModerator,
+                        timestamp + 4,
+                    ),
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        MODERATOR_B,
+                        ChannelMemberAction::AddModerator,
+                        timestamp + 5,
+                    ),
+                ])
+                .await;
+
+            let demote_bypass = channel_member(
+                MODERATOR_A,
+                &channel_id,
+                MODERATOR_B,
+                ChannelMemberAction::RemoveMember,
+                timestamp + 6,
+            );
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &demote_bypass,
+                "invalid channel target state",
+            )
+            .await;
+
+            let slots_before_ghosts = ChannelMemberStore::slot_count(
+                &driver.block_engine.stores().channel_member_store,
+                &channel_id,
+                None,
+            )
+            .unwrap();
+            for (offset, action) in [
+                ChannelMemberAction::Unban,
+                ChannelMemberAction::RemoveMember,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let ghost = channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    GHOST_FID,
+                    action,
+                    timestamp + 7 + offset as u32,
+                );
+                assert_rejected_without_side_effects(
+                    &mut driver,
+                    &ghost,
+                    "invalid channel target state",
+                )
+                .await;
+                assert_eq!(
+                    ChannelMemberStore::slot_count(
+                        &driver.block_engine.stores().channel_member_store,
+                        &channel_id,
+                        None,
+                    )
+                    .unwrap(),
+                    slots_before_ghosts,
+                    "a rejected ghost action minted a permanent member slot"
+                );
+            }
+
+            driver
+                .commit_messages(vec![channel_member(
+                    MODERATOR_A,
+                    &channel_id,
+                    TARGET_FID,
+                    ChannelMemberAction::Ban,
+                    timestamp + 9,
+                )])
+                .await;
+            let banned_self_add = channel_member(
+                TARGET_FID,
+                &channel_id,
+                TARGET_FID,
+                ChannelMemberAction::AddMember,
+                timestamp + 10,
+            );
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &banned_self_add,
+                "channel member is banned",
+            )
+            .await;
+
+            let owner_ban = channel_member(
+                MODERATOR_A,
+                &channel_id,
+                OWNER_FID,
+                ChannelMemberAction::Ban,
+                timestamp + 11,
+            );
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &owner_ban,
+                "channel owner cannot be banned",
+            )
+            .await;
+
+            driver
+                .commit_messages(vec![verification_remove(
+                    OWNER_FID,
+                    owner_addr.clone(),
+                    timestamp + 12,
+                )])
+                .await;
+            let parked_owner = get_channel_owner_response(&driver.service, channel_key).await;
+            assert_eq!(parked_owner.owner_address, owner_addr);
+            assert_eq!(parked_owner.fid, 0);
+            let parked_owner_ban = channel_member(
+                MODERATOR_A,
+                &channel_id,
+                OWNER_FID,
+                ChannelMemberAction::Ban,
+                timestamp + 13,
+            );
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &parked_owner_ban,
+                "channel is parked",
+            )
+            .await;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    OWNER_FID,
+                    owner_addr,
+                    timestamp + 14,
+                )])
+                .await;
+
+            // Two moderators are already live. Reach nine, then submit the tenth and eleventh in
+            // one owner transaction so the cap observes the tenth's uncommitted counter update.
+            driver
+                .commit_messages(
+                    (0..7)
+                        .map(|index| {
+                            channel_member(
+                                OWNER_FID,
+                                &channel_id,
+                                7_700 + index,
+                                ChannelMemberAction::AddModerator,
+                                timestamp + 15 + index as u32,
+                            )
+                        })
+                        .collect(),
+                )
+                .await;
+            assert_eq!(
+                ChannelMemberStore::live_moderator_count(
+                    &driver.block_engine.stores().channel_member_store,
+                    &channel_id,
+                    None,
+                )
+                .unwrap(),
+                9
+            );
+            let tenth = channel_member(
+                OWNER_FID,
+                &channel_id,
+                7_800,
+                ChannelMemberAction::AddModerator,
+                timestamp + 22,
+            );
+            let eleventh = channel_member(
+                OWNER_FID,
+                &channel_id,
+                7_801,
+                ChannelMemberAction::AddModerator,
+                timestamp + 23,
+            );
+            let cap_block = driver
+                .commit_messages(vec![tenth.clone(), eleventh.clone()])
+                .await;
+            assert_eq!(
+                ChannelMemberStore::live_moderator_count(
+                    &driver.block_engine.stores().channel_member_store,
+                    &channel_id,
+                    None,
+                )
+                .unwrap(),
+                10
+            );
+            assert!(TrieKey::for_message(&tenth).iter().all(|key| driver
+                .block_engine
+                .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(TrieKey::for_message(&eleventh).iter().all(|key| !driver
+                .block_engine
+                .trie_key_exists(&merkle_trie::Context::new(), key)));
+            let tenth_event = cap_block
+                .events
+                .iter()
+                .find(|event| {
+                    matches!(
+                        event.data.as_ref().and_then(|data| data.body.as_ref()),
+                        Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                            if body.message.as_ref() == Some(&tenth)
+                    )
+                })
+                .unwrap()
+                .clone();
+            assert!(cap_block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&eleventh)
+            )));
+            driver.assert_converged();
+
+            assert_store_rejection_without_state_or_fanout(
+                &mut driver,
+                &current_update,
+                "bad_request.duplicate",
+                "message has already been merged",
+            )
+            .await;
+
+            // The same already-applied fan-out event is below max_seqnum+1. Direct ShardEngine
+            // replay freezes that decision into an empty-event proposal and leaves channel rows,
+            // trie roots, merge streams, and max seqnum untouched.
+            for replica in &mut driver.replicas {
+                let root_before = replica.trie_root_hash();
+                let rows_before = channel_rows(&replica.db);
+                let merge_events_before =
+                    ScenarioDriver::replicated_event_bodies(replica.db.clone());
+                let seqnum_before = replica.get_stores().block_event_store.max_seqnum().unwrap();
+                let shard_id = replica.shard_id();
+                let state_change = replica.propose_state_change(
+                    shard_id,
+                    vec![MempoolMessage::BlockEvent {
+                        for_shard: shard_id,
+                        message: tenth_event.clone(),
+                    }],
+                    None,
+                );
+                assert!(state_change.events.is_empty());
+                test_helper::validate_and_commit_state_change(replica, &state_change).await;
+                assert_eq!(replica.trie_root_hash(), root_before);
+                assert_eq!(channel_rows(&replica.db), rows_before);
+                assert_eq!(
+                    ScenarioDriver::replicated_event_bodies(replica.db.clone()),
+                    merge_events_before
+                );
+                assert_eq!(
+                    replica.get_stores().block_event_store.max_seqnum().unwrap(),
+                    seqnum_before
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn s6_member_and_moderation_caps_converge_with_paginated_by_fid_index() {
+            const OWNER_FID: u64 = 7_901;
+            const PAGE_FID: u64 = 7_902;
+            // Pin the production caps so a regression in either constant fails here. The
+            // boundary-rejection logic below (`count >= slot_cap` in `merge_slot`) is cap-value
+            // independent, so we exercise it against a shrunken shared cap instead of inserting
+            // the real 8k/16k rows — that shaves this test from ~80s to under a second in debug.
+            // The override collapses both stores to one value, hence MEMBER_CAP == MODERATE_CAP.
+            assert_eq!(CHANNEL_MEMBER_SLOT_CAP, 8_192);
+            assert_eq!(CHANNEL_MODERATE_SLOT_CAP, 16_384);
+            const SLOT_CAP: u32 = 24;
+            const MEMBER_CAP: u32 = SLOT_CAP;
+            const MODERATE_CAP: u32 = SLOT_CAP;
+            const SCENARIO_EXPIRY: u64 = u64::MAX;
+
+            let mut driver = ScenarioDriver::new_with_slot_cap(Some(SLOT_CAP)).await;
+            let owner_address = owner_address(0xF1);
+            driver.register_user(OWNER_FID, owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+
+            let member_key = "scenario-member-cap";
+            let moderate_key = "scenario-moderate-cap";
+            let member_channel = channel_label(member_key);
+            let moderate_channel = channel_label(moderate_key);
+            let timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![
+                        MempoolMessage::OnchainEvent(
+                            events_factory::create_channel_register_event(
+                                member_key,
+                                member_channel.clone(),
+                                owner_address.clone(),
+                                SCENARIO_EXPIRY,
+                                ChannelRegisterEventType::Register,
+                                400,
+                                1,
+                            ),
+                        ),
+                        MempoolMessage::OnchainEvent(
+                            events_factory::create_channel_register_event(
+                                moderate_key,
+                                moderate_channel.clone(),
+                                owner_address.clone(),
+                                SCENARIO_EXPIRY,
+                                ChannelRegisterEventType::Register,
+                                400,
+                                2,
+                            ),
+                        ),
+                    ],
+                    timestamp,
+                )
+                .await;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    OWNER_FID,
+                    owner_address.clone(),
+                    timestamp + 1,
+                )])
+                .await;
+
+            let member_seed = (0..MEMBER_CAP - 1)
+                .map(|index| {
+                    channel_member(
+                        OWNER_FID,
+                        &member_channel,
+                        100_000 + u64::from(index),
+                        ChannelMemberAction::AddMember,
+                        timestamp + 2,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for chunk in member_seed.chunks(2_048) {
+                driver.commit_messages_batched_replay(chunk.to_vec()).await;
+            }
+            for count in [
+                ChannelMemberStore::slot_count(
+                    &driver.block_engine.stores().channel_member_store,
+                    &member_channel,
+                    None,
+                )
+                .unwrap(),
+                ChannelMemberStore::slot_count(
+                    &driver.replicas[0].get_stores().channel_member_store,
+                    &member_channel,
+                    None,
+                )
+                .unwrap(),
+                ChannelMemberStore::slot_count(
+                    &driver.replicas[1].get_stores().channel_member_store,
+                    &member_channel,
+                    None,
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(count, MEMBER_CAP - 1);
+            }
+            let final_member = channel_member(
+                OWNER_FID,
+                &member_channel,
+                100_000 + u64::from(MEMBER_CAP - 1),
+                ChannelMemberAction::AddMember,
+                timestamp + 3,
+            );
+            driver.commit_messages(vec![final_member.clone()]).await;
+            driver.assert_converged();
+            let member_over_cap = channel_member(
+                OWNER_FID,
+                &member_channel,
+                100_000 + u64::from(MEMBER_CAP),
+                ChannelMemberAction::AddMember,
+                timestamp + 4,
+            );
+            assert_store_rejection_without_state_or_fanout(
+                &mut driver,
+                &member_over_cap,
+                "bad_request.validation_failure",
+                "channel slot cap exceeded",
+            )
+            .await;
+            assert_eq!(
+                ChannelMemberStore::slot_count(
+                    &driver.block_engine.stores().channel_member_store,
+                    &member_channel,
+                    None,
+                )
+                .unwrap(),
+                MEMBER_CAP
+            );
+
+            let cast_hash = |index: u32| {
+                let mut hash = vec![0xF2; 20];
+                hash[16..].copy_from_slice(&index.to_be_bytes());
+                hash
+            };
+            let moderate_seed = (0..MODERATE_CAP - 1)
+                .map(|index| {
+                    channel_moderate(
+                        OWNER_FID,
+                        &moderate_channel,
+                        cast_hash(index),
+                        timestamp + 5,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for chunk in moderate_seed.chunks(2_048) {
+                driver.commit_messages_batched_replay(chunk.to_vec()).await;
+            }
+            for count in [
+                ChannelModerateStore::slot_count(
+                    &driver.block_engine.stores().channel_moderate_store,
+                    &moderate_channel,
+                    None,
+                )
+                .unwrap(),
+                ChannelModerateStore::slot_count(
+                    &driver.replicas[0].get_stores().channel_moderate_store,
+                    &moderate_channel,
+                    None,
+                )
+                .unwrap(),
+                ChannelModerateStore::slot_count(
+                    &driver.replicas[1].get_stores().channel_moderate_store,
+                    &moderate_channel,
+                    None,
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(count, MODERATE_CAP - 1);
+            }
+            let final_moderation = channel_moderate(
+                OWNER_FID,
+                &moderate_channel,
+                cast_hash(MODERATE_CAP - 1),
+                timestamp + 6,
+            );
+            driver.commit_messages(vec![final_moderation.clone()]).await;
+            driver.assert_converged();
+            let moderate_over_cap = channel_moderate(
+                OWNER_FID,
+                &moderate_channel,
+                cast_hash(MODERATE_CAP),
+                timestamp + 7,
+            );
+            assert_store_rejection_without_state_or_fanout(
+                &mut driver,
+                &moderate_over_cap,
+                "bad_request.validation_failure",
+                "channel slot cap exceeded",
+            )
+            .await;
+            assert_eq!(
+                ChannelModerateStore::slot_count(
+                    &driver.block_engine.stores().channel_moderate_store,
+                    &moderate_channel,
+                    None,
+                )
+                .unwrap(),
+                MODERATE_CAP
+            );
+
+            // Exercise the gated by-fid index across enough channels to require several pages.
+            let page_channels = (0..65u32)
+                .map(|index| {
+                    let key = format!("scenario-page-{index:03}");
+                    (key.clone(), channel_label(&key), index)
+                })
+                .collect::<Vec<_>>();
+            driver
+                .commit(
+                    page_channels
+                        .iter()
+                        .map(|(key, channel_id, index)| {
+                            MempoolMessage::OnchainEvent(
+                                events_factory::create_channel_register_event(
+                                    key,
+                                    channel_id.clone(),
+                                    owner_address.clone(),
+                                    SCENARIO_EXPIRY,
+                                    ChannelRegisterEventType::Register,
+                                    401,
+                                    *index,
+                                ),
+                            )
+                        })
+                        .collect(),
+                    timestamp + 8,
+                )
+                .await;
+            driver
+                .commit_messages(
+                    page_channels
+                        .iter()
+                        .map(|(_, channel_id, _)| {
+                            channel_member(
+                                OWNER_FID,
+                                channel_id,
+                                PAGE_FID,
+                                ChannelMemberAction::AddMember,
+                                timestamp + 9,
+                            )
+                        })
+                        .collect(),
+                )
+                .await;
+            driver.assert_converged();
+
+            let block_stores = driver.block_engine.stores();
+            let replica_a = driver.replicas[0].get_stores();
+            let replica_b = driver.replicas[1].get_stores();
+            for store in [
+                &block_stores.channel_member_store,
+                &replica_a.channel_member_store,
+                &replica_b.channel_member_store,
+            ] {
+                let mut page_token = None;
+                let mut entries = Vec::new();
+                let mut page_count = 0;
+                let mut page_lengths = Vec::new();
+                loop {
+                    let page = ChannelMemberStore::memberships_by_fid(
+                        store,
+                        PAGE_FID,
+                        &PageOptions {
+                            page_size: Some(17),
+                            page_token,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    page_count += 1;
+                    page_lengths.push(page.entries.len());
+                    entries.extend(page.entries);
+                    let Some(next) = page.next_page_token else {
+                        break;
+                    };
+                    page_token = Some(next);
+                }
+                assert_eq!(page_count, 4);
+                assert_eq!(page_lengths, vec![17, 17, 17, 14]);
+                assert_eq!(entries.len(), page_channels.len());
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| entry.channel_id.clone())
+                        .collect::<HashSet<_>>(),
+                    page_channels
+                        .iter()
+                        .map(|(_, channel_id, _)| channel_id.clone())
+                        .collect::<HashSet<_>>()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn s7_malformed_pin_and_moderation_widths_never_reach_reads_or_replicas() {
+            const OWNER_FID: u64 = 7_990;
+
+            let mut driver = ScenarioDriver::new().await;
+            let owner_address = owner_address(0xF7);
+            driver.register_user(OWNER_FID, owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+            let channel_key = "scenario-widths";
+            let channel_id = channel_label(channel_key);
+            let timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            500,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    OWNER_FID,
+                    owner_address,
+                    timestamp + 1,
+                )])
+                .await;
+
+            let valid_pin_hash = vec![0x17; 20];
+            let valid_moderation_hash = vec![0x18; 20];
+            driver
+                .commit_messages(vec![
+                    channel_pin(
+                        OWNER_FID,
+                        &channel_id,
+                        valid_pin_hash.clone(),
+                        timestamp + 2,
+                    ),
+                    channel_moderate(
+                        OWNER_FID,
+                        &channel_id,
+                        valid_moderation_hash.clone(),
+                        timestamp + 3,
+                    ),
+                ])
+                .await;
+            let valid_reads = driver.reads(&channel_id, OWNER_FID).await;
+            let pinned = valid_reads.pin.pin.as_ref().expect("channel has a pin");
+            assert_eq!(pinned.cast_hash, valid_pin_hash);
+            assert_eq!(pinned.author_fid, OWNER_FID);
+            assert_eq!(valid_reads.moderations.moderations.len(), 1);
+            assert_eq!(
+                valid_reads.moderations.moderations[0].cast_hash,
+                valid_moderation_hash
+            );
+            assert_eq!(
+                valid_reads.moderations.moderations[0].action,
+                ChannelModerateAction::Hide as i32
+            );
+            assert_eq!(valid_reads.moderations.moderations[0].author_fid, OWNER_FID);
+
+            let short_pin = channel_pin(OWNER_FID, &channel_id, vec![0x27; 19], timestamp + 4);
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &short_pin,
+                "channel pin cast hash must be empty or 20 bytes",
+            )
+            .await;
+            let long_pin = channel_pin(OWNER_FID, &channel_id, vec![0x37; 21], timestamp + 14);
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &long_pin,
+                "channel pin cast hash must be empty or 20 bytes",
+            )
+            .await;
+            let short_moderation =
+                channel_moderate(OWNER_FID, &channel_id, vec![0x28; 19], timestamp + 24);
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &short_moderation,
+                "channel moderate cast hash must be 20 bytes",
+            )
+            .await;
+            let long_moderation =
+                channel_moderate(OWNER_FID, &channel_id, vec![0x38; 21], timestamp + 34);
+            assert_rejected_without_side_effects(
+                &mut driver,
+                &long_moderation,
+                "channel moderate cast hash must be 20 bytes",
+            )
+            .await;
+
+            // Empty is the intentional pin-width exception: it is a valid unpin sentinel.
+            driver
+                .commit_messages(vec![channel_pin(
+                    OWNER_FID,
+                    &channel_id,
+                    vec![],
+                    timestamp + 44,
+                )])
+                .await;
+
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, OWNER_FID).await;
+            assert!(reads.pin.pin.is_none());
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(
+                reads.moderations.moderations[0].cast_hash,
+                valid_moderation_hash
+            );
+            assert_eq!(
+                reads.moderations.moderations[0].action,
+                ChannelModerateAction::Hide as i32
+            );
+            assert_eq!(reads.moderations.moderations[0].author_fid, OWNER_FID);
+            for stores in [
+                driver.block_engine.stores().channel_moderate_store,
+                driver.replicas[0].get_stores().channel_moderate_store,
+                driver.replicas[1].get_stores().channel_moderate_store,
+            ] {
+                assert_eq!(
+                    ChannelModerateStore::slot_count(&stores, &channel_id, None).unwrap(),
+                    1
+                );
+            }
+            for stores in [
+                driver.block_engine.stores().channel_pin_store,
+                driver.replicas[0].get_stores().channel_pin_store,
+                driver.replicas[1].get_stores().channel_pin_store,
+            ] {
+                assert_eq!(
+                    ChannelPinStore::get_channel_pin(&stores, &channel_id, None)
+                        .unwrap()
+                        .unwrap()
+                        .cast_hash,
+                    Vec::<u8>::new()
+                );
+            }
+        }
     }
 
     // Registers `channel_key` to `owner_address` at a distinct chain position so
@@ -1134,12 +4843,14 @@ mod tests {
         register_channel_at(&block_engine, "rt_a2", address_a.clone(), expiry, 2);
         register_channel_at(&block_engine, "rt_b1", address_b.clone(), expiry, 3);
         register_channel_at(&block_engine, "rt_b2", address_b.clone(), expiry, 4);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_a.clone(), 10),
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_b.clone(), 20),
         );
 
@@ -1203,8 +4914,9 @@ mod tests {
         register_channel_at(&block_engine, "pa_1", address.clone(), expiry, 1);
         register_channel_at(&block_engine, "pa_2", address.clone(), expiry, 2);
         register_channel_at(&block_engine, "pa_3", address.clone(), expiry, 3);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -1288,8 +5000,9 @@ mod tests {
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "evm_owned", evm_address.clone(), expiry, 1);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, evm_address, 10),
         );
         // The Solana verification's 32-byte address must be filtered out before
@@ -1350,8 +5063,9 @@ mod tests {
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "eb_1", address.clone(), expiry, 1);
         register_channel_at(&block_engine, "eb_2", address.clone(), expiry, 2);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address, 10),
         );
 

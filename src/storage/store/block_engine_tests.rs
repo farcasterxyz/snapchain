@@ -9,7 +9,7 @@ mod tests {
     };
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        make_ts_hash, ChannelMemberState, ChannelMemberStore, ChannelUpdateStore,
+        make_ts_hash, ChannelMemberState, ChannelMemberStore, ChannelUpdateStore, DerivedIndexGate,
         HubEventStorageExt, IntoU8, MergeContext, StorageSlot, VerificationStore,
     };
     use crate::storage::store::block_engine::{
@@ -443,7 +443,13 @@ mod tests {
                 validate_channel_for_test(&engine, &grant, &mut txn).is_ok(),
                 "owner must be able to seed {action:?}"
             );
-            ChannelMemberStore::merge(&stores.channel_member_store, &grant, &mut txn).unwrap();
+            ChannelMemberStore::merge(
+                &stores.channel_member_store,
+                &grant,
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
         }
 
         let pin_body = |channel_id: Vec<u8>| {
@@ -573,7 +579,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            MessageValidationError::HubError(ref hub_error)
+            MessageValidationError::MessageValidationError(ValidationError::HubError(ref hub_error))
                 if hub_error.message == "channel id must be 32 bytes"
         ));
 
@@ -599,7 +605,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            MessageValidationError::HubError(ref hub_error)
+            MessageValidationError::MessageValidationError(ValidationError::HubError(ref hub_error))
                 if hub_error.message == "channel moderate cast hash must be 20 bytes"
         ));
 
@@ -630,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn same_block_verification_then_channel_action_commits_on_devnet() {
+    fn same_block_verification_then_channel_action_commits_and_fans_out_on_devnet() {
         let (mut engine, _tmpdir) = setup();
         let fid = 44;
         let owner_address = vec![0x44; 20];
@@ -687,17 +693,20 @@ mod tests {
         .expect("channel update must merge in the full propose/validate/commit pipeline");
         assert_eq!(state.body.name.as_deref(), Some("same block"));
         assert_eq!(state.membership_mode, MembershipMode::Open);
-        assert!(state_change.events.iter().all(|event| {
-            event
-                .data
-                .as_ref()
-                .and_then(|data| data.body.as_ref())
-                .and_then(|body| match body {
-                    block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref(),
-                    _ => None,
-                })
-                .is_none_or(|message| message.msg_type() != MessageType::ChannelUpdate)
-        }));
+        let channel_events = state_change
+            .events
+            .iter()
+            .filter_map(|event| {
+                let block_event_data::Body::MergeMessageEventBody(body) =
+                    event.data.as_ref()?.body.as_ref()?
+                else {
+                    return None;
+                };
+                let message = body.message.as_ref()?;
+                (message.msg_type() == MessageType::ChannelUpdate).then_some(message)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(channel_events, vec![&update]);
     }
 
     #[test]
@@ -1185,6 +1194,7 @@ mod tests {
                     timestamp + 1 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -1196,7 +1206,13 @@ mod tests {
             timestamp + 20,
         );
         assert!(validate_channel_for_test(&engine, &tenth, &mut txn).is_ok());
-        ChannelMemberStore::merge(&stores.channel_member_store, &tenth, &mut txn).unwrap();
+        ChannelMemberStore::merge(
+            &stores.channel_member_store,
+            &tenth,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         assert_eq!(
             ChannelMemberStore::live_moderator_count(
                 &stores.channel_member_store,
@@ -1285,6 +1301,7 @@ mod tests {
                     timestamp + mode as u32 + 1,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             let self_add = channel_member_message(
@@ -1311,6 +1328,7 @@ mod tests {
                 timestamp + 30,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelMemberStore::merge(
@@ -1323,6 +1341,7 @@ mod tests {
                 timestamp + 31,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -1794,6 +1813,303 @@ mod tests {
         let resurrect = verification_contract_add(quota_test_address(3000), timestamp + 3);
         commit_message(&mut engine, &resurrect, Validity::Valid);
         assert_eq!(verification_replica_counts(&engine), (1, 260));
+    }
+
+    #[test]
+    fn s2_row_cap_preserves_existing_owner_escape_but_blocks_new_owner_until_rent() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        let existing_address = vec![0xA1; 20];
+        let new_address = vec![0xB2; 20];
+        let existing_channel_id = channel_label("row-cap-existing-owner");
+        let new_channel_id = channel_label("row-cap-new-owner");
+        for (channel_key, channel_id, owner_address, log_index) in [
+            (
+                "row-cap-existing-owner",
+                existing_channel_id.clone(),
+                existing_address.clone(),
+                1,
+            ),
+            (
+                "row-cap-new-owner",
+                new_channel_id.clone(),
+                new_address.clone(),
+                2,
+            ),
+        ] {
+            commit_event(
+                &mut engine,
+                &events_factory::create_channel_register_event(
+                    channel_key,
+                    channel_id,
+                    owner_address,
+                    1_000,
+                    ChannelRegisterEventType::Register,
+                    70,
+                    log_index,
+                ),
+            );
+        }
+
+        let initial_add = verification_contract_add(existing_address.clone(), timestamp);
+        commit_message(&mut engine, &initial_add, Validity::Valid);
+        commit_message(
+            &mut engine,
+            &verification_remove(existing_address.clone(), timestamp + 1),
+            Validity::Valid,
+        );
+
+        // The existing owner's tombstone is the first permanent row. Fill the remaining
+        // tombstone allowance, then cycle five live adds back to tombstones so total rows reach
+        // max_messages(5) + tombstone_cap(256) while live_adds returns to zero.
+        let removes = (2000u16..2000 + 255)
+            .map(|index| verification_remove(quota_test_address(index), timestamp + 2))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            removes
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        let adds = (3000u16..3005)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp + 3))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            adds.iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        for index in 3000u16..3005 {
+            commit_message(
+                &mut engine,
+                &verification_remove(quota_test_address(index), timestamp + 4),
+                Validity::Valid,
+            );
+        }
+        assert_eq!(verification_replica_counts(&engine), (0, 261));
+
+        let existing_action = channel_update_message(
+            VERIFICATION_FID,
+            existing_channel_id.clone(),
+            "existing owner escaped",
+            Some(MembershipMode::Open),
+            timestamp + 5,
+        );
+        let parked_root = engine.trie_root_hash();
+        let parked_events = HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+            .unwrap()
+            .events;
+        let parked_counts = verification_replica_counts(&engine);
+        let parked_error = engine.simulate_message(&existing_action).unwrap_err();
+        assert!(matches!(
+            parked_error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel is parked"
+        ));
+        commit_message(&mut engine, &existing_action, Validity::Invalid);
+        assert_eq!(engine.trie_root_hash(), parked_root);
+        assert_eq!(verification_replica_counts(&engine), parked_counts);
+        assert_eq!(
+            HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            parked_events
+        );
+        assert!(ChannelUpdateStore::get_channel_update(
+            &engine.stores().channel_update_store,
+            &existing_channel_id,
+            None,
+        )
+        .unwrap()
+        .is_none());
+
+        // Re-adding this address is a supersede over its tombstone, not a row mint. It therefore
+        // remains the existing channel owner's escape hatch at the total-row boundary.
+        let resurrect = verification_contract_add(existing_address.clone(), timestamp + 6);
+        commit_message(&mut engine, &resurrect, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 260));
+
+        // The other row-neutral admission arm is add-over-add. It must also remain available at
+        // row_cap so a live owner can rotate the incumbent verification without minting a row.
+        let supersede = verification_contract_add(existing_address.clone(), timestamp + 7);
+        commit_message(&mut engine, &supersede, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 260));
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &engine.stores().verification_store,
+                VERIFICATION_FID,
+                &existing_address,
+                None,
+            )
+            .unwrap(),
+            Some(supersede)
+        );
+        commit_message(&mut engine, &existing_action, Validity::Valid);
+
+        let new_action = channel_update_message(
+            VERIFICATION_FID,
+            new_channel_id.clone(),
+            "new owner escaped",
+            Some(MembershipMode::Open),
+            timestamp + 8,
+        );
+        let parked_error = engine.simulate_message(&new_action).unwrap_err();
+        assert!(matches!(
+            parked_error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel is parked"
+        ));
+
+        let rejected_new_add = verification_contract_add(new_address.clone(), timestamp + 9);
+        let counts_before = verification_replica_counts(&engine);
+        let root_before = engine.trie_root_hash();
+        let events_before = HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+            .unwrap()
+            .events;
+        let existing_update_before = ChannelUpdateStore::get_channel_update(
+            &engine.stores().channel_update_store,
+            &existing_channel_id,
+            None,
+        )
+        .unwrap();
+        let new_update_before = ChannelUpdateStore::get_channel_update(
+            &engine.stores().channel_update_store,
+            &new_channel_id,
+            None,
+        )
+        .unwrap();
+        let member_counts_before = [
+            ChannelMemberStore::slot_count(
+                &engine.stores().channel_member_store,
+                &existing_channel_id,
+                None,
+            )
+            .unwrap(),
+            ChannelMemberStore::slot_count(
+                &engine.stores().channel_member_store,
+                &new_channel_id,
+                None,
+            )
+            .unwrap(),
+        ];
+
+        assert!(matches!(
+            engine.simulate_message(&rejected_new_add),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+        commit_message(&mut engine, &rejected_new_add, Validity::Invalid);
+        assert_eq!(verification_replica_counts(&engine), counts_before);
+        assert_eq!(engine.trie_root_hash(), root_before);
+        assert_eq!(
+            HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            events_before
+        );
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &engine.stores().verification_store,
+                VERIFICATION_FID,
+                &new_address,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            ChannelUpdateStore::get_channel_update(
+                &engine.stores().channel_update_store,
+                &existing_channel_id,
+                None,
+            )
+            .unwrap(),
+            existing_update_before
+        );
+        assert_eq!(
+            ChannelUpdateStore::get_channel_update(
+                &engine.stores().channel_update_store,
+                &new_channel_id,
+                None,
+            )
+            .unwrap(),
+            new_update_before
+        );
+        assert_eq!(
+            [
+                ChannelMemberStore::slot_count(
+                    &engine.stores().channel_member_store,
+                    &existing_channel_id,
+                    None,
+                )
+                .unwrap(),
+                ChannelMemberStore::slot_count(
+                    &engine.stores().channel_member_store,
+                    &new_channel_id,
+                    None,
+                )
+                .unwrap(),
+            ],
+            member_counts_before
+        );
+
+        let parked_root = engine.trie_root_hash();
+        let parked_events = HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+            .unwrap()
+            .events;
+        let parked_counts = verification_replica_counts(&engine);
+        commit_message(&mut engine, &new_action, Validity::Invalid);
+        assert_eq!(engine.trie_root_hash(), parked_root);
+        assert_eq!(verification_replica_counts(&engine), parked_counts);
+        assert_eq!(
+            HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            parked_events
+        );
+        assert!(ChannelUpdateStore::get_channel_update(
+            &engine.stores().channel_update_store,
+            &new_channel_id,
+            None,
+        )
+        .unwrap()
+        .is_none());
+
+        // One more storage unit increases both max_messages and row_cap. The never-before-seen
+        // address can now mint its row, resolve the owner, and unpark the second channel.
+        let extra_rent = events_factory::create_rent_event(
+            VERIFICATION_FID,
+            1,
+            StorageUnitType::UnitType2025,
+            false,
+            FarcasterNetwork::Devnet,
+        );
+        commit_event(&mut engine, &extra_rent);
+        commit_message(&mut engine, &rejected_new_add, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (2, 260));
+        commit_message(&mut engine, &new_action, Validity::Valid);
+        assert_eq!(
+            ChannelUpdateStore::get_channel_update(
+                &engine.stores().channel_update_store,
+                &new_channel_id,
+                None,
+            )
+            .unwrap()
+            .unwrap()
+            .body
+            .name
+            .as_deref(),
+            Some("new owner escaped")
+        );
     }
 
     #[test]
@@ -2532,6 +2848,265 @@ mod tests {
             .get_channel_owner(channel_key, None)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn s4_block_boundary_freezes_pre_v20_state_and_applies_embedded_timestamp_rules() {
+        // There is no network with a scheduled V19 -> V20 boundary yet: mainnet/testnet stop at
+        // V19 and devnet starts at V20. Use real pre-V20 and V20 pipelines on those networks,
+        // then drive the one cross-boundary verification floor with an explicit V20 validation.
+        let mainnet_options = || BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        };
+        let (mut with_rejected_channels, _with_tmp) = setup_with_options(mainnet_options());
+        let (mut never_v20, _never_tmp) = setup_with_options(mainnet_options());
+
+        // Commit an identical prefix to both engines. Reusing the exact event bytes is required:
+        // the factories randomize transaction hashes, which are part of the trie keys.
+        let prefix = vec![
+            events_factory::create_rent_event(
+                VERIFICATION_FID,
+                1,
+                StorageUnitType::UnitType2025,
+                false,
+                FarcasterNetwork::Mainnet,
+            ),
+            events_factory::create_id_register_event(
+                VERIFICATION_FID,
+                crate::proto::IdRegisterEventType::Register,
+                default_custody_address(),
+                None,
+            ),
+            events_factory::create_signer_event(
+                VERIFICATION_FID,
+                default_signer(),
+                crate::proto::SignerEventType::Add,
+                None,
+                None,
+            ),
+        ];
+        for event in &prefix {
+            commit_event(&mut with_rejected_channels, event);
+            commit_event(&mut never_v20, event);
+        }
+        assert_eq!(
+            with_rejected_channels.trie_root_hash(),
+            never_v20.trie_root_hash()
+        );
+
+        let pre_v20_channels = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .map(|(message_type, body)| {
+                messages_factory::create_message_with_data(
+                    VERIFICATION_FID,
+                    message_type,
+                    body,
+                    Some(0),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let pre_v20_channel_id = match pre_v20_channels[0]
+            .data
+            .as_ref()
+            .and_then(|data| data.body.as_ref())
+            .unwrap()
+        {
+            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id.clone(),
+            _ => unreachable!(),
+        };
+        let root_before = with_rejected_channels.trie_root_hash();
+        let events_before =
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
+        for pre_v20_channel in &pre_v20_channels {
+            let mut validation_txn = RocksDbTransactionBatch::new();
+            let validation_result = with_rejected_channels.validate_user_message(
+                pre_v20_channel,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_v20_channel.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V19,
+                &mut validation_txn,
+            );
+            assert!(
+                matches!(
+                    validation_result,
+                    Err(MessageValidationError::MessageValidationError(
+                        ValidationError::InvalidMessageType
+                    ))
+                ),
+                "unexpected pre-V20 {:?} result: {validation_result:?}",
+                pre_v20_channel.msg_type()
+            );
+            assert!(validation_txn.batch.is_empty());
+            let rejected_block = commit_message(
+                &mut with_rejected_channels,
+                pre_v20_channel,
+                Validity::Invalid,
+            );
+            assert!(
+                rejected_block.events.is_empty(),
+                "pre-V20 {:?} unexpectedly produced a BlockEvent",
+                pre_v20_channel.msg_type()
+            );
+        }
+        assert_eq!(with_rejected_channels.trie_root_hash(), root_before);
+        assert_eq!(
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None,)
+                .unwrap()
+                .events,
+            events_before
+        );
+        assert!(ChannelUpdateStore::get_channel_update(
+            &with_rejected_channels.stores().channel_update_store,
+            &pre_v20_channel_id,
+            None,
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            with_rejected_channels.trie_root_hash(),
+            never_v20.trie_root_hash(),
+            "a rejected pre-V20 channel attempt must match the same never-V20 prefix"
+        );
+        assert_eq!(
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None,)
+                .unwrap()
+                .events,
+            HubEvent::get_events(never_v20.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events
+        );
+
+        let pre_v20_verification = verification_add(messages_factory::farcaster_time(), None);
+        let mut pre_v20_verification_txn = RocksDbTransactionBatch::new();
+        assert!(matches!(
+            with_rejected_channels.validate_user_message(
+                &pre_v20_verification,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_v20_verification.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V19,
+                &mut pre_v20_verification_txn,
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+        assert!(pre_v20_verification_txn.batch.is_empty());
+        let verification_root_before = with_rejected_channels.trie_root_hash();
+        let verification_events_before =
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
+        let rejected_verification_block = commit_message(
+            &mut with_rejected_channels,
+            &pre_v20_verification,
+            Validity::Invalid,
+        );
+        assert_no_verification_block_events(&rejected_verification_block);
+        assert_eq!(
+            with_rejected_channels.trie_root_hash(),
+            verification_root_before
+        );
+        assert_eq!(
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            verification_events_before
+        );
+
+        let (mut v20_engine, _v20_tmp) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut v20_engine,
+        );
+        let owner_address = vec![0xD4; 20];
+        let v20_channel_id = channel_label("v20-boundary-channel");
+        commit_event(
+            &mut v20_engine,
+            &events_factory::create_channel_register_event(
+                "v20-boundary-channel",
+                v20_channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                80,
+                1,
+            ),
+        );
+        let now = messages_factory::farcaster_time();
+        commit_message(
+            &mut v20_engine,
+            &verification_contract_add(owner_address, now),
+            Validity::Valid,
+        );
+
+        // The message was signed in the pre-cutover timestamp regime. Unlike verifications, D9
+        // gives channel messages no embedded-timestamp floor, so the V20 block admits it.
+        let old_signed_channel = channel_update_message(
+            VERIFICATION_FID,
+            v20_channel_id.clone(),
+            "embedded timestamp is inert",
+            Some(MembershipMode::Open),
+            0,
+        );
+        let admitted_block = commit_message(&mut v20_engine, &old_signed_channel, Validity::Valid);
+        assert_eq!(
+            admitted_block.header.as_ref().unwrap().state_root,
+            v20_engine.trie_root_hash()
+        );
+        assert!(admitted_block.events.iter().any(|event| {
+            matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&old_signed_channel)
+            )
+        }));
+
+        let pre_cutover_verification = verification_add(0, None);
+        let verification_root = with_rejected_channels.trie_root_hash();
+        let verification_events =
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
+        let mut rejected_verification_txn = RocksDbTransactionBatch::new();
+        let error = with_rejected_channels
+            .validate_user_message(
+                &pre_cutover_verification,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(now as u64),
+                EngineVersion::V20,
+                &mut rejected_verification_txn,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::VerificationTimestampBeforeActivation
+        ));
+        assert_eq!(with_rejected_channels.trie_root_hash(), verification_root);
+        assert_eq!(
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None,)
+                .unwrap()
+                .events,
+            verification_events
+        );
+        assert!(rejected_verification_txn.batch.is_empty());
+
+        let resigned_verification = verification_add(now + 1, None);
+        commit_message(&mut v20_engine, &resigned_verification, Validity::Valid);
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &v20_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+                None,
+            )
+            .unwrap(),
+            Some(resigned_verification)
+        );
     }
 
     // --- Shard-0 fan-out of channel-register events -------------------------------------------

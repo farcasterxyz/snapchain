@@ -6,6 +6,7 @@ use crate::proto::{
     StorageUnitType,
 };
 use crate::storage::db::RocksDB;
+use crate::storage::store::account::StoreOptions;
 use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
@@ -31,6 +32,8 @@ pub fn default_signer() -> SigningKey {
 pub struct BlockEngineOptions {
     pub network: FarcasterNetwork,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
+    pub channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for BlockEngineOptions {
@@ -38,6 +41,7 @@ impl Default for BlockEngineOptions {
         BlockEngineOptions {
             network: FarcasterNetwork::Devnet,
             messages_request_tx: None,
+            channel_slot_cap_override: None,
         }
     }
 }
@@ -51,13 +55,17 @@ pub fn setup_with_options(engine_options: BlockEngineOptions) -> (BlockEngine, T
     let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
 
-    let block_engine = BlockEngine::new(
+    let block_engine = BlockEngine::new_with_opts(
         trie,
         statsd_client,
         db,
         100,
         engine_options.messages_request_tx,
         engine_options.network,
+        StoreOptions {
+            channel_slot_cap_override: engine_options.channel_slot_cap_override,
+            ..Default::default()
+        },
     );
 
     (block_engine, temp_dir)

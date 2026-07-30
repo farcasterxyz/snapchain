@@ -18,6 +18,7 @@ use crate::{
         trie::merkle_trie::{self, TrieKey},
     },
     utils::statsd_wrapper::StatsdClientWrapper,
+    version::version::EngineVersion,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -342,6 +343,7 @@ impl Replicator {
         shard_id: u32,
         fid: u64,
         user_message_type: proto::MessageType,
+        channel_messages_enabled: bool,
     ) -> Result<Arc<HashMap<Vec<u8>, CacheMessageEntry>>, ReplicationError> {
         let cache_key =
             MessageHashCacheKey::new_for_user_message(height, shard_id, fid, user_message_type);
@@ -358,19 +360,11 @@ impl Replicator {
 
         // Handle each store type directly
         let messages = match user_message_type {
-            // TODO(NEYN-10568): wire KeyAdd/KeyRemove into replication once shard 0 routing
-            // and the signer store land (NEYN-10580, NEYN-10573, NEYN-10574).
-            // Channel state lives only in shard 0's `BlockStores`, never in the per-fid `Stores`
-            // this lookup is driven by, so channel messages never enter its trie. (BlockEngine
-            // DOES merge them on shard 0 — the reason this arm is safe is the store split, not
-            // inertness.) Revisit when channel messages fan out to data shards.
+            // KeyAdd/KeyRemove remain unsupported until shard-0 routing and the signer store
+            // are both part of the replicated per-fid state.
             proto::MessageType::FrameAction
             | proto::MessageType::KeyAdd
             | proto::MessageType::KeyRemove
-            | proto::MessageType::ChannelUpdate
-            | proto::MessageType::ChannelMember
-            | proto::MessageType::ChannelPin
-            | proto::MessageType::ChannelModerate
             | proto::MessageType::None => {
                 return Err(ReplicationError::InvalidMessage(format!(
                     "Invalid message type for FID {}: {:?}",
@@ -465,6 +459,40 @@ impl Replicator {
                 messages.extend(borrows);
                 messages
             }
+            proto::MessageType::ChannelUpdate if channel_messages_enabled => {
+                stores
+                    .channel_update_store
+                    .get_adds_by_fid(fid, &page_options, filter)?
+                    .messages
+            }
+            proto::MessageType::ChannelMember if channel_messages_enabled => {
+                stores
+                    .channel_member_store
+                    .get_adds_by_fid(fid, &page_options, filter)?
+                    .messages
+            }
+            proto::MessageType::ChannelPin if channel_messages_enabled => {
+                stores
+                    .channel_pin_store
+                    .get_adds_by_fid(fid, &page_options, filter)?
+                    .messages
+            }
+            proto::MessageType::ChannelModerate if channel_messages_enabled => {
+                stores
+                    .channel_moderate_store
+                    .get_adds_by_fid(fid, &page_options, filter)?
+                    .messages
+            }
+            proto::MessageType::ChannelUpdate
+            | proto::MessageType::ChannelMember
+            | proto::MessageType::ChannelPin
+            | proto::MessageType::ChannelModerate => {
+                return Err(ReplicationError::ChannelMessagesInactive(
+                    shard_id,
+                    height,
+                    user_message_type,
+                ));
+            }
         };
 
         // Build a hashmap of message_hash -> message and put it in the cache
@@ -501,6 +529,12 @@ impl Replicator {
                 ));
             }
         };
+
+        let snapshot_timestamp = self.stores.get_timestamp(shard_id, height)?;
+        let channel_messages_enabled = EngineVersion::channel_messages_enabled_for_snapshot(
+            snapshot_timestamp,
+            self.network(),
+        );
 
         let mut trie = stores.trie.clone();
 
@@ -633,6 +667,7 @@ impl Replicator {
                                 message_type, e
                             ))
                         })?,
+                        channel_messages_enabled,
                     )?;
 
                     let cache_entry = cache.get(&hash).cloned();
@@ -787,5 +822,281 @@ impl Replicator {
         }
 
         open_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{
+        message_data::Body, ChannelMemberAction, ChannelModerateAction, ChannelPinBody,
+        ChannelUpdateBody,
+    };
+    use crate::storage::store::account::{
+        ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
+        ChannelModerationState, ChannelPinStore, ChannelUpdateStore, HubEventStorageExt,
+    };
+    use crate::storage::store::mempool_poller::MempoolMessage;
+    use crate::storage::store::test_helper;
+    use crate::utils::factory::{events_factory::create_merge_message_event, messages_factory};
+
+    const SHARD_ID: u32 = 1;
+    const SNAPSHOT_HEIGHT: u64 = 1;
+    const AUTHOR_FID: u64 = 8001;
+    const MEMBER_FID: u64 = 8002;
+
+    fn channel_id() -> Vec<u8> {
+        vec![0xD7; 32]
+    }
+
+    fn cast_hash() -> Vec<u8> {
+        vec![0xE7; 20]
+    }
+
+    fn channel_messages() -> Vec<proto::Message> {
+        let timestamp = messages_factory::farcaster_time();
+        vec![
+            messages_factory::create_message_with_data(
+                AUTHOR_FID,
+                MessageType::ChannelUpdate,
+                Body::ChannelUpdateBody(ChannelUpdateBody {
+                    channel_id: channel_id(),
+                    name: Some("replicated".to_string()),
+                    ..Default::default()
+                }),
+                Some(timestamp),
+                None,
+            ),
+            messages_factory::create_message_with_data(
+                AUTHOR_FID,
+                MessageType::ChannelMember,
+                Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id(),
+                    fid: MEMBER_FID,
+                    action: ChannelMemberAction::AddMember as i32,
+                }),
+                Some(timestamp + 1),
+                None,
+            ),
+            messages_factory::create_message_with_data(
+                AUTHOR_FID,
+                MessageType::ChannelPin,
+                Body::ChannelPinBody(ChannelPinBody {
+                    channel_id: channel_id(),
+                    cast_hash: cast_hash(),
+                }),
+                Some(timestamp + 2),
+                None,
+            ),
+            messages_factory::create_message_with_data(
+                AUTHOR_FID,
+                MessageType::ChannelModerate,
+                Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id: channel_id(),
+                    cast_hash: cast_hash(),
+                    action: ChannelModerateAction::Hide as i32,
+                }),
+                Some(timestamp + 3),
+                None,
+            ),
+        ]
+    }
+
+    async fn replay_messages(
+        engine: &mut crate::storage::store::engine::ShardEngine,
+        messages: &[proto::Message],
+    ) {
+        for (index, message) in messages.iter().enumerate() {
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::BlockEvent {
+                    for_shard: engine.shard_id(),
+                    message: create_merge_message_event(message.clone(), index as u64 + 1),
+                }],
+                None,
+            );
+            test_helper::validate_and_commit_state_change(engine, &state_change).await;
+        }
+    }
+
+    fn snapshot_replicator(
+        engine: &crate::storage::store::engine::ShardEngine,
+        network: proto::FarcasterNetwork,
+        timestamp: u64,
+    ) -> Replicator {
+        let statsd = test_helper::statsd_client();
+        let stores = Arc::new(ReplicationStores::new(
+            HashMap::from([(SHARD_ID, engine.get_stores().clone())]),
+            statsd.clone(),
+            network,
+        ));
+        stores
+            .open_snapshot(SHARD_ID, SNAPSHOT_HEIGHT, timestamp)
+            .unwrap();
+        Replicator::new(stores, statsd)
+    }
+
+    #[tokio::test]
+    async fn channel_messages_replicate_round_trip_from_v20_snapshot() {
+        let messages = channel_messages();
+        let (mut source, _source_tmp) = test_helper::new_engine().await;
+        replay_messages(&mut source, &messages).await;
+
+        let replicator = snapshot_replicator(
+            &source,
+            proto::FarcasterNetwork::Devnet,
+            messages_factory::farcaster_time() as u64,
+        );
+        let virtual_shards = messages
+            .iter()
+            .map(|message| TrieKey::for_message(message)[0][0])
+            .collect::<HashSet<_>>();
+        let mut exported = Vec::new();
+        for virtual_shard in virtual_shards {
+            exported.extend(
+                replicator
+                    .messages_for_trie_prefix(SHARD_ID, SNAPSHOT_HEIGHT, virtual_shard, None)
+                    .unwrap()
+                    .trie_messages
+                    .into_iter()
+                    .filter_map(|entry| match entry.trie_message {
+                        Some(TrieMessage::UserMessage(message))
+                            if matches!(
+                                message.msg_type(),
+                                MessageType::ChannelUpdate
+                                    | MessageType::ChannelMember
+                                    | MessageType::ChannelPin
+                                    | MessageType::ChannelModerate
+                            ) =>
+                        {
+                            Some(message)
+                        }
+                        _ => None,
+                    }),
+            );
+        }
+        exported.sort_by(|a, b| a.hash.cmp(&b.hash));
+        let mut expected = messages.clone();
+        expected.sort_by(|a, b| a.hash.cmp(&b.hash));
+        assert_eq!(exported, expected);
+
+        let (mut destination, _destination_tmp) = test_helper::new_engine().await;
+        for message in &exported {
+            destination
+                .commit_replicator_message_for_test(message, true)
+                .unwrap();
+        }
+
+        assert_eq!(source.trie_root_hash(), destination.trie_root_hash());
+        let stores = destination.get_stores();
+        assert_eq!(
+            ChannelUpdateStore::get_channel_update(
+                &stores.channel_update_store,
+                &channel_id(),
+                None,
+            )
+            .unwrap()
+            .unwrap()
+            .body
+            .name
+            .as_deref(),
+            Some("replicated")
+        );
+        assert_eq!(
+            ChannelMemberStore::member_state(
+                &stores.channel_member_store,
+                &channel_id(),
+                MEMBER_FID,
+                None,
+            )
+            .unwrap(),
+            Some(ChannelMemberState::Member)
+        );
+        let member_index_key =
+            ChannelMemberStoreDef::make_member_by_fid_key(MEMBER_FID, &channel_id()).unwrap();
+        assert_eq!(
+            source.get_stores().db.get(&member_index_key).unwrap(),
+            destination.get_stores().db.get(&member_index_key).unwrap()
+        );
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.channel_member_store,
+                MEMBER_FID,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
+        );
+        assert_eq!(
+            ChannelPinStore::get_channel_pin(&stores.channel_pin_store, &channel_id(), None)
+                .unwrap()
+                .unwrap()
+                .cast_hash,
+            cast_hash()
+        );
+        assert_eq!(
+            ChannelModerateStore::moderation_state(
+                &stores.channel_moderate_store,
+                &channel_id(),
+                &cast_hash(),
+                None,
+            )
+            .unwrap(),
+            Some(ChannelModerationState::Hidden)
+        );
+    }
+
+    #[tokio::test]
+    async fn s4_pre_v20_snapshot_rejects_channel_cache_reads_without_state_changes() {
+        let messages = channel_messages();
+        let (mut source, _source_tmp) = test_helper::new_engine().await;
+        replay_messages(&mut source, &messages[..1]).await;
+        let root_before = source.trie_root_hash();
+        let events_before =
+            proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
+        // Testnet's schedule tops out below the ChannelMessages activation, so no
+        // snapshot timestamp on this network can enable the feature. That — not the
+        // timestamp — is what makes this the pre-activation case; the value is 0 so it
+        // does not imply a boundary the schedule does not have. When testnet does get
+        // a V20 entry this test will fail loudly rather than silently stop testing the
+        // gate.
+        let replicator = snapshot_replicator(&source, proto::FarcasterNetwork::Testnet, 0);
+        assert!(!EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            proto::FarcasterNetwork::Testnet
+        ));
+        let virtual_shard = TrieKey::for_message(&messages[0])[0][0];
+        let error = replicator
+            .messages_for_trie_prefix(SHARD_ID, SNAPSHOT_HEIGHT, virtual_shard, None)
+            .unwrap_err();
+        // Must be the ACTIVATION gate, not the permanently-unsupported-type arm.
+        // Those shared one error variant, so deleting all four gated arms left this
+        // test green.
+        assert!(
+            matches!(
+                error,
+                ReplicationError::ChannelMessagesInactive(SHARD_ID, SNAPSHOT_HEIGHT, message_type)
+                    if message_type == messages[0].msg_type()
+            ),
+            "expected the ChannelMessages activation gate, got {error:?}"
+        );
+        assert_eq!(source.trie_root_hash(), root_before);
+        assert_eq!(
+            proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            events_before
+        );
+        assert!(ChannelUpdateStore::get_channel_update(
+            &source.get_stores().channel_update_store,
+            &channel_id(),
+            None,
+        )
+        .unwrap()
+        .is_some());
     }
 }

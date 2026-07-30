@@ -313,6 +313,48 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_channel_member(
+            &self,
+            _request: Request<ChannelMemberRequest>,
+        ) -> Result<Response<ChannelMemberResponse>, Status> {
+            Ok(Response::new(ChannelMemberResponse::default()))
+        }
+
+        async fn get_channel_members(
+            &self,
+            _request: Request<ChannelMembersRequest>,
+        ) -> Result<Response<ChannelMembersResponse>, Status> {
+            Ok(Response::new(ChannelMembersResponse::default()))
+        }
+
+        async fn get_channel_pin(
+            &self,
+            _request: Request<ChannelRequest>,
+        ) -> Result<Response<ChannelPinResponse>, Status> {
+            Ok(Response::new(ChannelPinResponse::default()))
+        }
+
+        async fn get_channel_moderations(
+            &self,
+            _request: Request<ChannelModerationsRequest>,
+        ) -> Result<Response<ChannelModerationsResponse>, Status> {
+            Ok(Response::new(ChannelModerationsResponse::default()))
+        }
+
+        async fn get_channel_metadata(
+            &self,
+            _request: Request<ChannelRequest>,
+        ) -> Result<Response<ChannelMetadataResponse>, Status> {
+            Ok(Response::new(ChannelMetadataResponse::default()))
+        }
+
+        async fn get_channel_memberships_by_fid(
+            &self,
+            _request: Request<ChannelMembershipsByFidRequest>,
+        ) -> Result<Response<ChannelMembershipsResponse>, Status> {
+            Ok(Response::new(ChannelMembershipsResponse::default()))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,
@@ -495,6 +537,238 @@ pub mod tests {
         );
         // The raw snake_case key must not leak onto the wire.
         assert!(json.get("owner_address").is_none());
+    }
+
+    #[test]
+    fn channel_message_read_response_json_shapes() {
+        use crate::network::http_server::{
+            CastingMode, ChannelMemberResponse, ChannelMemberState, ChannelMetadataResponse,
+            ChannelPin, ChannelPinResponse, MembershipMode,
+        };
+
+        let member = serde_json::to_value(ChannelMemberResponse {
+            state: ChannelMemberState::CHANNEL_MEMBER_STATE_MODERATOR,
+            last_action_ts: Some(42),
+        })
+        .unwrap();
+        assert_eq!(member["state"], "CHANNEL_MEMBER_STATE_MODERATOR");
+        assert_eq!(member["lastActionTs"], 42);
+
+        let pin = serde_json::to_value(ChannelPinResponse {
+            pin: Some(ChannelPin {
+                cast_hash: vec![0xAB; 20],
+                author_fid: 123,
+            }),
+        })
+        .unwrap();
+        assert_eq!(pin["pin"]["castHash"], format!("0x{}", "ab".repeat(20)));
+        assert_eq!(pin["pin"]["authorFid"], 123);
+
+        // No pin is one absent object, not two independently absent fields — a
+        // castHash without an authorFid is unrepresentable.
+        let unpinned = serde_json::to_value(ChannelPinResponse { pin: None }).unwrap();
+        assert_eq!(unpinned["pin"], serde_json::Value::Null);
+
+        let metadata = serde_json::to_value(ChannelMetadataResponse {
+            name: None,
+            description: None,
+            image_url: None,
+            header: None,
+            rules: None,
+            casting_mode: CastingMode::CASTING_MODE_MEMBERS_ONLY,
+            membership_mode: MembershipMode::MEMBERSHIP_MODE_APPROVAL,
+        })
+        .unwrap();
+        assert_eq!(metadata["castingMode"], "CASTING_MODE_MEMBERS_ONLY");
+        assert_eq!(metadata["membershipMode"], "MEMBERSHIP_MODE_APPROVAL");
+        // ChannelUpdate is a whole-replace fold, so an absent field means CLEARED.
+        // These must serialize as explicit null rather than being omitted, or a
+        // consumer merging the response into a stored model cannot tell a cleared
+        // description from one that never existed and keeps deleted metadata.
+        for field in ["name", "description", "imageUrl", "header", "rules"] {
+            assert_eq!(
+                metadata.get(field),
+                Some(&serde_json::Value::Null),
+                "{field} must serialize as null when cleared, not be omitted"
+            );
+        }
+
+        let populated = serde_json::to_value(ChannelMetadataResponse {
+            name: Some("Channel name".to_string()),
+            description: None,
+            image_url: None,
+            header: None,
+            rules: None,
+            casting_mode: CastingMode::CASTING_MODE_EVERYONE,
+            membership_mode: MembershipMode::MEMBERSHIP_MODE_OPEN,
+        })
+        .unwrap();
+        assert_eq!(populated["name"], "Channel name");
+        assert_eq!(populated["description"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn channel_page_tokens_survive_the_http_base64_round_trip() {
+        use crate::network::http_server::{ChannelMembersRequest, ChannelMembershipsByFidRequest};
+        use base64::prelude::*;
+
+        // A channel page token is a raw RocksDB key that reaches the client as base64
+        // and comes back through query-string deserialization. The store now REJECTS a
+        // token that does not start with the requested index's prefix, so a byte
+        // mangled in that round trip stops being "a slightly wrong page" and becomes a
+        // hard invalid_argument. Only the encode side had any coverage.
+        let channel_id_hex = format!("0x{}", "11".repeat(32));
+
+        // Percent-encode the base64 characters that are reserved in a query string.
+        let query_escape = |value: &str| {
+            value
+                .replace('%', "%25")
+                .replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D")
+        };
+
+        // A realistic member-slot key: RootPrefix::Channel, MemberSlot, 32-byte channel
+        // id, 4-byte fid, with byte values chosen so the base64 uses the `+` and `/`
+        // alphabet and needs padding.
+        let mut token = vec![24u8, 2];
+        token.extend_from_slice(&[0xFBu8; 32]);
+        token.extend_from_slice(&909u32.to_be_bytes());
+        let encoded = BASE64_STANDARD.encode(&token);
+        assert!(
+            encoded.contains('+') && encoded.contains('/') && encoded.ends_with('='),
+            "fixture must exercise the +, / and padding cases: {encoded}"
+        );
+
+        // Both spellings are accepted and folded together by `to_proto`, so both have
+        // to decode to the same bytes.
+        for field in ["page_token", "pageToken"] {
+            let parsed: ChannelMembersRequest = serde_qs::from_str(&format!(
+                "channelId={channel_id_hex}&{field}={}",
+                query_escape(&encoded)
+            ))
+            .unwrap();
+            assert_eq!(
+                parsed.page_token.or(parsed.pageToken).as_deref(),
+                Some(token.as_slice()),
+                "{field} must round-trip to the exact key bytes"
+            );
+        }
+
+        // A raw `+` in a query string arrives as a space, which is why the decoder
+        // restores it. Without that, every token containing `+` would come back
+        // corrupted — and now rejected outright by the prefix guard.
+        let space_mangled: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id_hex}&pageToken={}",
+            query_escape(&encoded.replace('+', " "))
+        ))
+        .unwrap();
+        assert_eq!(
+            space_mangled
+                .page_token
+                .or(space_mangled.pageToken)
+                .as_deref(),
+            Some(token.as_slice())
+        );
+
+        // Empty and absent both mean "first page". They must not become Some(vec![]),
+        // which the store treats as out-of-prefix and rejects.
+        for query in [
+            format!("channelId={channel_id_hex}&pageToken="),
+            format!("channelId={channel_id_hex}"),
+        ] {
+            let parsed: ChannelMembersRequest = serde_qs::from_str(&query).unwrap();
+            assert_eq!(parsed.page_token.or(parsed.pageToken), None, "{query}");
+        }
+
+        // Undecodable input fails deserialization rather than silently becoming None,
+        // which would page from the start of the index instead of reporting the error.
+        assert!(serde_qs::from_str::<ChannelMembersRequest>(&format!(
+            "channelId={channel_id_hex}&pageToken=%21%21not-base64%21%21"
+        ))
+        .is_err());
+
+        // Same contract on the fid-keyed read, whose tokens key a different index.
+        let memberships: ChannelMembershipsByFidRequest =
+            serde_qs::from_str(&format!("fid=909&pageToken={}", query_escape(&encoded))).unwrap();
+        assert_eq!(
+            memberships.page_token.or(memberships.pageToken).as_deref(),
+            Some(token.as_slice())
+        );
+    }
+
+    #[test]
+    fn channel_read_errors_separate_server_faults_from_caller_input() {
+        use crate::network::http_server::ErrorResponse;
+        use hyper::StatusCode;
+
+        // The channel reads sit on a brand-new, integrity-sensitive index, and
+        // `handle_request` maps every handler error to 400 unless told otherwise.
+        // Without this split an operator watching 4xx/5xx during a replica-corruption
+        // incident sees "channel slot points to a missing message" as client traffic.
+        for code in [
+            tonic::Code::Internal,
+            tonic::Code::DataLoss,
+            tonic::Code::Unknown,
+        ] {
+            let err = ErrorResponse::from_status(
+                &Status::new(code, "channel slot points to a missing message"),
+                "Failed to get channel members",
+            );
+            assert_eq!(
+                err.status,
+                Some(StatusCode::INTERNAL_SERVER_ERROR),
+                "{code:?} is a server fault"
+            );
+            assert_eq!(err.error, "Failed to get channel members");
+        }
+
+        // Caller-supplied input keeps 400: a foreign page token, a malformed
+        // channel_id, an unregistered channel.
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
+        ] {
+            let err = ErrorResponse::from_status(
+                &Status::new(code, "page token does not belong to this channel"),
+                "Failed to get channel members",
+            );
+            assert_eq!(err.status, None, "{code:?} is caller input");
+        }
+
+        // The status is transport-only and must never leak into the JSON body.
+        let body = serde_json::to_value(ErrorResponse::from_status(
+            &Status::internal("boom"),
+            "Failed to get channel pin",
+        ))
+        .unwrap();
+        assert!(body.get("status").is_none());
+        assert_eq!(body["error"], "Failed to get channel pin");
+    }
+
+    #[test]
+    fn channel_members_request_accepts_camel_and_snake_case_state_filter() {
+        use crate::network::http_server::{ChannelMemberState, ChannelMembersRequest};
+
+        let channel_id = format!("0x{}", "11".repeat(32));
+        let camel: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id}&stateFilter=CHANNEL_MEMBER_STATE_MODERATOR"
+        ))
+        .unwrap();
+        assert!(matches!(
+            camel.state_filter,
+            Some(ChannelMemberState::CHANNEL_MEMBER_STATE_MODERATOR)
+        ));
+
+        let snake: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id}&state_filter=CHANNEL_MEMBER_STATE_BANNED"
+        ))
+        .unwrap();
+        assert!(matches!(
+            snake.state_filter,
+            Some(ChannelMemberState::CHANNEL_MEMBER_STATE_BANNED)
+        ));
     }
 
     #[tokio::test]

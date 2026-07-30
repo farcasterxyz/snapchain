@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_data_shard_verification_admission_splits_at_v20() {
+    async fn s4_data_shard_verification_admission_splits_at_v20() {
         let pre_v20_block_time = pre_v20_testnet_time(0);
         let timestamp = pre_v20_block_time.to_u64() as u32;
         let verification_add = messages_factory::verifications::create_verification_add(
@@ -4289,7 +4289,7 @@ mod tests {
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             let add = verification_add(messages_factory::farcaster_time());
             engine
-                .commit_replicator_message_for_test(&add)
+                .commit_replicator_message_for_test(&add, false)
                 .expect("replicator must bypass direct admission");
             assert!(message_exists_in_trie(&mut engine, &add));
         }
@@ -4371,7 +4371,7 @@ mod tests {
 
             // 1. Pre-cutover: the data shard already holds the live-merged verification.
             engine
-                .commit_replicator_message_for_test(&add)
+                .commit_replicator_message_for_test(&add, false)
                 .expect("pre-cutover live merge must succeed");
             {
                 let stores = engine.get_stores();
@@ -4486,7 +4486,7 @@ mod tests {
             let timestamp = messages_factory::farcaster_time();
             let existing_add = verification_add(timestamp + 10);
             engine
-                .commit_replicator_message_for_test(&existing_add)
+                .commit_replicator_message_for_test(&existing_add, false)
                 .unwrap();
 
             let replayed_remove = verification_remove(timestamp);
@@ -4539,7 +4539,7 @@ mod tests {
             let timestamp = messages_factory::farcaster_time();
             let existing_remove = verification_remove(timestamp + 10);
             engine
-                .commit_replicator_message_for_test(&existing_remove)
+                .commit_replicator_message_for_test(&existing_remove, false)
                 .unwrap();
 
             let replayed_add = verification_add(timestamp);
@@ -4595,7 +4595,9 @@ mod tests {
             .await;
             let timestamp = messages_factory::farcaster_time();
             let add = verification_add(timestamp);
-            engine.commit_replicator_message_for_test(&add).unwrap();
+            engine
+                .commit_replicator_message_for_test(&add, false)
+                .unwrap();
 
             let checksummed =
                 alloy_primitives::Address::from_slice(&verification_address()).to_checksum(None);
@@ -4658,7 +4660,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             for message in &pre_activation_rows {
-                engine.commit_replicator_message_for_test(message).unwrap();
+                engine
+                    .commit_replicator_message_for_test(message, false)
+                    .unwrap();
             }
 
             let replayed_add = verification_add(timestamp + 10);
@@ -6382,6 +6386,132 @@ mod tests {
                 "art",
                 &verified_address(),
                 proto::ChannelOwnerChangeCause::VerificationRemove,
+            );
+        }
+    }
+
+    mod channel_message_replay_tests {
+        use super::*;
+        use crate::proto::{hub_event, ChannelMemberAction, Message, MessageType};
+        use crate::storage::store::account::{ChannelMemberState, ChannelMemberStore};
+
+        const FIRST_AUTHOR: u64 = 7001;
+        const SECOND_AUTHOR: u64 = 7002;
+        const TARGET_FID: u64 = 7003;
+
+        fn channel_id() -> Vec<u8> {
+            vec![0xC7; 32]
+        }
+
+        fn member_message(author: u64, action: ChannelMemberAction, timestamp: u32) -> Message {
+            messages_factory::create_message_with_data(
+                author,
+                MessageType::ChannelMember,
+                proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id(),
+                    fid: TARGET_FID,
+                    action: action as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn replay_message(
+            engine: &mut ShardEngine,
+            message: &Message,
+            seqnum: u64,
+        ) -> ShardStateChange {
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::BlockEvent {
+                    for_shard: engine.shard_id(),
+                    message: create_merge_message_event(message.clone(), seqnum),
+                }],
+                None,
+            );
+            test_helper::validate_and_commit_state_change(engine, &state_change).await;
+            state_change
+        }
+
+        fn merge_body_for<'a>(
+            state_change: &'a ShardStateChange,
+            message: &Message,
+        ) -> &'a proto::MergeMessageBody {
+            state_change
+                .events
+                .iter()
+                .find_map(|event| match event.body.as_ref() {
+                    Some(hub_event::Body::MergeMessageBody(body))
+                        if body.message.as_ref() == Some(message) =>
+                    {
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .expect("replayed channel message must emit a MergeMessage HubEvent")
+        }
+
+        #[tokio::test]
+        async fn cross_author_supersede_converges_replica_store_index_trie_and_event() {
+            let first = member_message(FIRST_AUTHOR, ChannelMemberAction::AddMember, 200);
+            // The later consensus item has an older embedded timestamp. Normal channel replay
+            // still replaces the slot because merge_slot follows replay order, not ts_hash LWW.
+            let second = member_message(SECOND_AUTHOR, ChannelMemberAction::Ban, 100);
+            let (mut replica_a, _tmp_a) = test_helper::new_engine().await;
+            let (mut replica_b, _tmp_b) = test_helper::new_engine().await;
+            let first_state = replay_message(&mut replica_a, &first, 1).await;
+            test_helper::validate_and_commit_state_change(&mut replica_b, &first_state).await;
+            let second_state = replay_message(&mut replica_a, &second, 2).await;
+            test_helper::validate_and_commit_state_change(&mut replica_b, &second_state).await;
+
+            assert_eq!(replica_a.trie_root_hash(), replica_b.trie_root_hash());
+            assert_eq!(second_state.new_state_root, replica_b.trie_root_hash());
+            assert_eq!(
+                HubEvent::get_events(replica_a.db.clone(), 0, None, None)
+                    .unwrap()
+                    .events,
+                HubEvent::get_events(replica_b.db.clone(), 0, None, None)
+                    .unwrap()
+                    .events,
+                "replica HubEvent streams must be byte-identical"
+            );
+
+            let slot_key = ChannelMemberStore::slot_key(&channel_id(), TARGET_FID).unwrap();
+            assert_eq!(
+                replica_a.db.get(&slot_key).unwrap(),
+                replica_b.db.get(&slot_key).unwrap(),
+                "replica slot pointers must be byte-identical"
+            );
+            for replica in [&mut replica_a, &mut replica_b] {
+                let stores = replica.get_stores();
+                assert_eq!(
+                    ChannelMemberStore::member_state(
+                        &stores.channel_member_store,
+                        &channel_id(),
+                        TARGET_FID,
+                        None,
+                    )
+                    .unwrap(),
+                    Some(ChannelMemberState::Banned)
+                );
+                assert_eq!(
+                    ChannelMemberStore::slot_count(
+                        &stores.channel_member_store,
+                        &channel_id(),
+                        None,
+                    )
+                    .unwrap(),
+                    1,
+                    "cross-author replacement must not mint a second slot"
+                );
+                assert!(!message_exists_in_trie(replica, &first));
+                assert!(message_exists_in_trie(replica, &second));
+            }
+
+            assert_eq!(
+                merge_body_for(&second_state, &second).deleted_messages,
+                vec![first.clone()]
             );
         }
     }

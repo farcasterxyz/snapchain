@@ -160,8 +160,13 @@ message ChannelOwnerRequest {
 }
 
 message ChannelOwnerResponse {
-  // 0 = registered but no verified owner found on this node's hosted shards
-  // ("parked"). Parking is computed at read time, never stored.
+  // 0 = the owner's verification has not landed on shard 0 yet. A normal state,
+  // not an error: the registration exists and owner_address below is known, but
+  // nothing binds it to an fid on shard 0. Resolved when the owner submits a
+  // post-activation verification of that address, which is REQUIRED even if they
+  // verified it before activation — that history is not backfilled. Never a
+  // signal that the channel is abandoned. See GetChannelOwner in rpc.proto.
+  // Computed at read time, never stored.
   uint64 fid = 1;
   // Raw 20-byte EVM address from the channel registry fold.
   bytes owner_address = 2;
@@ -200,6 +205,130 @@ message ChannelInfo {
 
 message ChannelsResponse {
   repeated ChannelInfo channels = 1;
+  optional bytes next_page_token = 2;
+}
+
+enum ChannelMemberState {
+  CHANNEL_MEMBER_STATE_NONE = 0;
+  CHANNEL_MEMBER_STATE_MEMBER = 1;
+  CHANNEL_MEMBER_STATE_MODERATOR = 2;
+  CHANNEL_MEMBER_STATE_REMOVED = 3;
+  CHANNEL_MEMBER_STATE_BANNED = 4;
+}
+
+message ChannelRequest {
+  bytes channel_id = 1;
+}
+
+message ChannelMemberRequest {
+  bytes channel_id = 1;
+  uint64 fid = 2;
+}
+
+// The two fields are paired: CHANNEL_MEMBER_STATE_NONE means the fid has no
+// membership row and `last_action_ts` is absent; any other state always carries
+// the timestamp of the ChannelMember message that produced it. The server never
+// emits the mixed combinations.
+//
+// Unlike ChannelPinResponse this is not nested, because it would not buy the same
+// guarantee — proto3 cannot exclude the zero variant from an enum, so a NONE
+// state inside a present wrapper would remain representable and the pairing would
+// still rest on this comment.
+message ChannelMemberResponse {
+  ChannelMemberState state = 1;
+  optional uint32 last_action_ts = 2;
+}
+
+message ChannelMembersRequest {
+  bytes channel_id = 1;
+  // Absent OR CHANNEL_MEMBER_STATE_NONE both mean "no filter" (return all states).
+  optional ChannelMemberState state_filter = 2;
+  optional uint32 page_size = 3;
+  optional bytes page_token = 4;
+  optional bool reverse = 5;
+}
+
+message ChannelMember {
+  uint64 fid = 1;
+  ChannelMemberState state = 2;
+}
+
+message ChannelMembersResponse {
+  repeated ChannelMember members = 1;
+  optional bytes next_page_token = 2;
+}
+
+// A pinned cast. Both fields are always populated together — a pin cannot exist
+// without the fid that set it.
+message ChannelPin {
+  bytes cast_hash = 1;
+  uint64 author_fid = 2;
+}
+
+// `pin` absent means the channel has no pin. That covers a channel that was never
+// pinned and one whose pin was cleared by an unpin (a ChannelPin message with an
+// empty cast_hash); the two are deliberately indistinguishable here.
+//
+// The pair is nested rather than two sibling optionals so a half-populated
+// response — a cast_hash with no author, or an author with no cast_hash — is not
+// representable on the wire.
+message ChannelPinResponse {
+  optional ChannelPin pin = 1;
+}
+
+message ChannelModerationsRequest {
+  bytes channel_id = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelModeration {
+  bytes cast_hash = 1;
+  ChannelModerateAction action = 2;
+  uint64 author_fid = 3;
+}
+
+message ChannelModerationsResponse {
+  repeated ChannelModeration moderations = 1;
+  optional bytes next_page_token = 2;
+}
+
+// The whole-replace fold of the single winning ChannelUpdate (see
+// ChannelUpdateBody). A field absent here reads as unset — it was omitted by the
+// latest update and is never inherited from the update that one superseded. Do
+// NOT treat an absent field as "unchanged": consumers that merge this response
+// into a stored model must clear the fields it omits, or deleted metadata lives
+// forever.
+//
+// casting_mode/membership_mode are the RESOLVED effective policy: for a registered
+// channel with no ChannelUpdate yet, the server returns the restrictive defaults
+// (MEMBERS_ONLY / APPROVAL), never the NONE=0 sentinel. Clients cannot distinguish
+// "never configured" from "explicitly set to the default" here — that is intentional.
+message ChannelMetadataResponse {
+  optional string name = 1;
+  optional string description = 2;
+  optional string image_url = 3;
+  optional string header = 4;
+  optional string rules = 5;
+  CastingMode casting_mode = 6;
+  MembershipMode membership_mode = 7;
+}
+
+message ChannelMembershipsByFidRequest {
+  uint64 fid = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelMembership {
+  bytes channel_id = 1;
+  ChannelMemberState state = 2;
+}
+
+message ChannelMembershipsResponse {
+  repeated ChannelMembership memberships = 1;
   optional bytes next_page_token = 2;
 }
 

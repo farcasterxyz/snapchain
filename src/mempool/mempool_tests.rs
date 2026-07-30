@@ -14,7 +14,7 @@ mod tests {
             StorageUnitType, Transaction,
         },
         storage::store::{
-            account::{make_ts_hash, ChannelModerateStore},
+            account::{make_ts_hash, ChannelModerateStore, DerivedIndexGate},
             block_engine::BlockEngine,
             block_engine_test_helpers,
             engine::ShardEngine,
@@ -166,17 +166,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_channel_messages_are_rejected_by_mempool_before_activation() {
-        let (_, _, _, mut mempool, _, _, _, _, _) =
+    async fn s4_mempool_wall_clock_rejects_channels_before_v20_and_admits_them_at_v20() {
+        let (_, _, _, mut pre_v20_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
+        let (_, _, _, mut v20_mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            // Timestamp zero is deliberately from the pre-cutover regime. Channel embedded
+            // timestamps are inert, so wall-clock admission changes only with the node version.
             let message =
-                messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let error = mempool
-                .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
+                messages_factory::create_message_with_data(1234, message_type, body, Some(0), None);
+            let error = pre_v20_mempool
+                .message_is_valid(0, &MempoolMessage::UserMessage(message.clone()), true)
                 .unwrap_err();
             assert_eq!(error.message, "channel messages not yet active");
+            assert!(v20_mempool
+                .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
+                .is_ok());
         }
     }
 
@@ -203,7 +210,13 @@ mod tests {
         let distinct_slot = moderate(0x33);
         let stores = block_engine.stores();
         let mut txn = crate::storage::db::RocksDbTransactionBatch::new();
-        ChannelModerateStore::merge(&stores.channel_moderate_store, &merged, &mut txn).unwrap();
+        ChannelModerateStore::merge(
+            &stores.channel_moderate_store,
+            &merged,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         stores.db.commit(txn).unwrap();
 
         assert!(mempool

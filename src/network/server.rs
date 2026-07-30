@@ -19,19 +19,22 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, ChannelInfo, ChannelOwnerRequest, ChannelOwnerResponse,
-    ChannelsByAddressRequest, ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest,
-    EventsRequest, EventsResponse, FidAddressTypeRequest, FidAddressTypeResponse, FidRequest,
-    FidTimestampRequest, FidsRequest, FidsResponse, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse, GetMeshViewRequest, Height,
-    HubEvent, IdRegistryEventByAddressRequest, LinkRequest, LinksByFidRequest,
-    LinksByTargetRequest, MeshTopology, MeshView, Message, MessageType, MessagesResponse,
-    OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
-    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
-    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
-    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
-    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
-    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    CastsByParentRequest, ChannelInfo, ChannelMember, ChannelMemberRequest, ChannelMemberResponse,
+    ChannelMembersRequest, ChannelMembersResponse, ChannelMembership,
+    ChannelMembershipsByFidRequest, ChannelMembershipsResponse, ChannelMetadataResponse,
+    ChannelModeration, ChannelModerationsRequest, ChannelModerationsResponse, ChannelOwnerRequest,
+    ChannelOwnerResponse, ChannelPin, ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest,
+    ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest, EventsRequest, EventsResponse,
+    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
+    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
+    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
+    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
+    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
+    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
+    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
+    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
+    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
+    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
@@ -39,16 +42,18 @@ use crate::storage::constants::RootPrefix;
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
+use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
-    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, OnchainEventStorageError,
-    ReactionStore, UserDataStore, VerificationStore,
+    list_gasless_keys_by_fid, CastStore, ChannelMemberState as StoredChannelMemberState,
+    ChannelMemberStore, ChannelModerateStore, ChannelPinStore, ChannelUpdateStore,
+    GaslessKeyRecord, LinkStore, OnchainEventStorageError, ReactionStore, UserDataStore,
+    VerificationStore, CHANNEL_ID_LENGTH,
 };
 use crate::storage::store::account::{
     get_channel_keys_by_owner_address, get_channel_keys_for_owner_addresses,
 };
-use crate::storage::store::account::{make_ts_hash, MessagesPage};
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
@@ -127,62 +132,6 @@ fn signer_store_error_to_status(err: HubError) -> Status {
     }
 }
 
-fn resolve_channel_owner_fid(
-    shard_stores: &HashMap<u32, Stores>,
-    owner_address: &[u8],
-) -> Result<Option<u64>, Status> {
-    let mut authoritative_candidates = Vec::new();
-
-    for stores in shard_stores.values() {
-        let candidates = VerificationStore::get_verifications_by_address(
-            &stores.verification_store,
-            owner_address,
-            None,
-        )
-        .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
-
-        // The by-address index yields best-effort candidates; re-validate each
-        // against the primary VerificationAdds and take the authoritative
-        // `ts_hash` from the surviving primary message, never the index value.
-        for (fid, _indexed_ts_hash) in candidates {
-            let Some(primary_add) = VerificationStore::get_verification_add(
-                &stores.verification_store,
-                fid,
-                owner_address,
-                None,
-            )
-            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
-            else {
-                continue;
-            };
-
-            let Some(data) = primary_add.data.as_ref() else {
-                // Unlike a missing primary add (a benign stale/orphan index entry),
-                // a surviving primary VerificationAdd with no `data` is a data-integrity
-                // anomaly: messages carry `data` by construction once merged. Skip it
-                // so one bad record can't fail the read, but log it so the anomaly is
-                // observable rather than silently under-reporting the owner as parked.
-                warn!(
-                    fid,
-                    owner_address = hex::encode(owner_address),
-                    "channel owner resolution skipped a VerificationAdd with no data",
-                );
-                continue;
-            };
-            let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
-                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
-
-            authoritative_candidates.push((fid, ts_hash));
-        }
-    }
-
-    Ok(
-        crate::storage::store::account::select_verification_address_winner(
-            authoritative_candidates,
-        ),
-    )
-}
-
 fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Status {
     match err {
         OnchainEventStorageError::HubError(hub_error)
@@ -191,6 +140,85 @@ fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Statu
             Status::invalid_argument(hub_error.to_string())
         }
         other => Status::internal(format!("Store error: {:?}", other)),
+    }
+}
+
+fn channel_member_state_to_proto(state: StoredChannelMemberState) -> proto::ChannelMemberState {
+    match state {
+        StoredChannelMemberState::Member => proto::ChannelMemberState::Member,
+        StoredChannelMemberState::Moderator => proto::ChannelMemberState::Moderator,
+        StoredChannelMemberState::Removed => proto::ChannelMemberState::Removed,
+        StoredChannelMemberState::Banned => proto::ChannelMemberState::Banned,
+    }
+}
+
+fn channel_member_state_from_proto(
+    state: proto::ChannelMemberState,
+) -> Option<StoredChannelMemberState> {
+    match state {
+        proto::ChannelMemberState::None => None,
+        proto::ChannelMemberState::Member => Some(StoredChannelMemberState::Member),
+        proto::ChannelMemberState::Moderator => Some(StoredChannelMemberState::Moderator),
+        proto::ChannelMemberState::Removed => Some(StoredChannelMemberState::Removed),
+        proto::ChannelMemberState::Banned => Some(StoredChannelMemberState::Banned),
+    }
+}
+
+fn channel_page_options(
+    page_size: Option<u32>,
+    page_token: Option<Vec<u8>>,
+    reverse: Option<bool>,
+) -> PageOptions {
+    PageOptions {
+        page_size: Some(
+            page_size
+                .map(|size| size as usize)
+                .unwrap_or(PAGE_SIZE_MAX)
+                .min(PAGE_SIZE_MAX),
+        ),
+        // `optional bytes` lets a client send an explicitly empty token, which
+        // generated clients do when they echo back an absent `next_page_token`.
+        // Treat it as "first page" the way `page_options` in rpc_extensions does,
+        // rather than letting it reach the store as an out-of-prefix cursor.
+        page_token: page_token.filter(|token| !token.is_empty()),
+        reverse: reverse.unwrap_or(false),
+    }
+}
+
+/// Rejects `page_size: 0` on the paginated channel reads.
+///
+/// Zero is the natural default an unset integer takes in generated clients, and
+/// serving it as an empty page with no `next_page_token` would assert "this
+/// channel has no members, enumeration complete" — indistinguishable from the
+/// truth. Callers wanting the server default must omit the field.
+fn require_nonzero_page_size(page_size: Option<u32>) -> Result<(), Status> {
+    if page_size == Some(0) {
+        return Err(Status::invalid_argument(
+            "page_size must be greater than zero; omit it for the server default",
+        ));
+    }
+    Ok(())
+}
+
+/// Translate a HubError raised by the channel stores into a gRPC `Status`.
+///
+/// Only `bad_request.invalid_param` is caller-supplied on these read paths — a
+/// page token that does not belong to the requested index, an out-of-range fid.
+/// Everything else is state this node stored and can no longer interpret, so it
+/// stays `internal`.
+///
+/// Deliberately narrower than a `bad_request` prefix match. `validation_failure`
+/// is reachable from a read (`member_state_for_message` and
+/// `moderation_state_for_message` raise it when a STORED body carries an action
+/// this binary cannot parse), and those are replica corruption, not bad input.
+/// Matching the prefix would report them as 4xx and hide them from anyone
+/// watching error rates — the same failure mode as the dangling slot pointer
+/// two lines below them, which is already treated as corruption.
+pub(crate) fn channel_store_error_to_status(err: HubError) -> Status {
+    if err.code == "bad_request.invalid_param" {
+        Status::invalid_argument(err.to_string())
+    } else {
+        Status::internal(format!("Store error: {err:?}"))
     }
 }
 
@@ -916,6 +944,35 @@ impl MyHubService {
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
         let shard_id = self.message_router.route_fid(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
+    }
+
+    /// Validates the width and registration of a caller-supplied channel id, and
+    /// returns the id as a fixed-width array.
+    ///
+    /// Returning the validated value rather than `()` is deliberate: the store keys
+    /// are built by concatenation and do not re-check width (see CHANNEL_ID_LENGTH),
+    /// so passing the raw request slice onward would leave width safety resting on
+    /// every handler remembering to call this first. Threading the array makes
+    /// "validated" and "used" the same value.
+    fn require_registered_channel(
+        &self,
+        channel_id: &[u8],
+    ) -> Result<[u8; CHANNEL_ID_LENGTH], Status> {
+        let channel_id: [u8; CHANNEL_ID_LENGTH] = channel_id
+            .try_into()
+            .map_err(|_| Status::invalid_argument("channel_id must be 32 bytes"))?;
+        let channel_key = self
+            .block_stores
+            .onchain_event_store
+            .get_channel_key_by_label(&channel_id, None)
+            .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+        self.block_stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+        Ok(channel_id)
     }
 
     /// Replays `message` against a read-only engine for `shard_id` and returns the
@@ -2752,7 +2809,12 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?
+        // 0 is a real answer, not a swallowed error: the owner's verification has
+        // not landed on shard 0 yet. See ChannelOwnerResponse.fid.
+        let fid = self
+            .block_stores
+            .resolve_channel_owner_fid(&channel_owner.owner_address, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .unwrap_or(0);
 
         Ok(Response::new(ChannelOwnerResponse {
@@ -2789,8 +2851,14 @@ impl HubService for MyHubService {
         )?;
 
         if !channels.is_empty() {
-            let fid =
-                resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?.unwrap_or(0);
+            // Same contract as GetChannelOwner: 0 means the owner's verification
+            // has not landed on shard 0 yet, and is stamped onto every channel in
+            // this page. See ChannelOwnerResponse.fid.
+            let fid = self
+                .block_stores
+                .resolve_channel_owner_fid(&req.owner_address, None)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+                .unwrap_or(0);
             for channel in &mut channels {
                 channel.fid = fid;
             }
@@ -2874,12 +2942,21 @@ impl HubService for MyHubService {
         }
         owner_addresses.sort();
 
-        // Keep only the addresses this fid currently wins under read-time LWW.
-        // This is what makes the invariant hold: a channel appears here iff
-        // GetChannelOwner resolves it to `req.fid`.
+        // Keep only the addresses this fid currently wins under the shard-0
+        // winner rule, so a channel appears here only if GetChannelOwner
+        // resolves it to `req.fid`. The converse does not quite hold: shard-0
+        // replica rows are permanent, but the home-shard rows enumerated above
+        // prune to the fid's local storage cap, so a winning verification the
+        // home shard has pruned keeps the owner resolvable without the channel
+        // being listed here.
         let mut winning_addresses = Vec::new();
         for owner_address in owner_addresses {
-            if resolve_channel_owner_fid(&self.shard_stores, &owner_address)? == Some(req.fid) {
+            if self
+                .block_stores
+                .resolve_channel_owner_fid(&owner_address, None)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+                == Some(req.fid)
+            {
                 winning_addresses.push(owner_address);
             }
         }
@@ -2897,6 +2974,187 @@ impl HubService for MyHubService {
         Ok(Response::new(ChannelsResponse {
             channels,
             next_page_token,
+        }))
+    }
+
+    async fn get_channel_member(
+        &self,
+        request: Request<ChannelMemberRequest>,
+    ) -> Result<Response<ChannelMemberResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        let member = ChannelMemberStore::member(
+            &self.block_stores.channel_member_store,
+            &channel_id,
+            req.fid,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(match member {
+            Some(member) => ChannelMemberResponse {
+                state: channel_member_state_to_proto(member.state) as i32,
+                last_action_ts: Some(member.last_action_ts),
+            },
+            None => ChannelMemberResponse {
+                state: proto::ChannelMemberState::None as i32,
+                last_action_ts: None,
+            },
+        }))
+    }
+
+    async fn get_channel_members(
+        &self,
+        request: Request<ChannelMembersRequest>,
+    ) -> Result<Response<ChannelMembersResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
+        require_nonzero_page_size(req.page_size)?;
+        let state_filter = req
+            .state_filter
+            .map(|value| {
+                proto::ChannelMemberState::try_from(value)
+                    .map_err(|_| Status::invalid_argument("invalid channel member state"))
+            })
+            .transpose()?
+            .and_then(channel_member_state_from_proto);
+        let page = ChannelMemberStore::members_by_channel(
+            &self.block_stores.channel_member_store,
+            &channel_id,
+            state_filter,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(channel_store_error_to_status)?;
+        Ok(Response::new(ChannelMembersResponse {
+            members: page
+                .entries
+                .into_iter()
+                .map(|member| ChannelMember {
+                    fid: member.fid,
+                    state: channel_member_state_to_proto(member.state) as i32,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn get_channel_pin(
+        &self,
+        request: Request<ChannelRequest>,
+    ) -> Result<Response<ChannelPinResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
+        let pin = ChannelPinStore::get_channel_pin_state(
+            &self.block_stores.channel_pin_store,
+            &channel_id,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        // An unpin (empty cast_hash, permitted by validate_channel_pin_body) and a
+        // channel that was never pinned intentionally read identically as "no pin".
+        Ok(Response::new(ChannelPinResponse {
+            pin: pin
+                .filter(|pin| !pin.body.cast_hash.is_empty())
+                .map(|pin| ChannelPin {
+                    cast_hash: pin.body.cast_hash,
+                    author_fid: pin.author_fid,
+                }),
+        }))
+    }
+
+    async fn get_channel_moderations(
+        &self,
+        request: Request<ChannelModerationsRequest>,
+    ) -> Result<Response<ChannelModerationsResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
+        require_nonzero_page_size(req.page_size)?;
+        let page = ChannelModerateStore::moderations_by_channel(
+            &self.block_stores.channel_moderate_store,
+            &channel_id,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(channel_store_error_to_status)?;
+        Ok(Response::new(ChannelModerationsResponse {
+            moderations: page
+                .entries
+                .into_iter()
+                .map(|moderation| ChannelModeration {
+                    cast_hash: moderation.cast_hash,
+                    action: moderation.action as i32,
+                    author_fid: moderation.author_fid,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn get_channel_metadata(
+        &self,
+        request: Request<ChannelRequest>,
+    ) -> Result<Response<ChannelMetadataResponse>, Status> {
+        let req = request.into_inner();
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
+        let update = ChannelUpdateStore::get_channel_update(
+            &self.block_stores.channel_update_store,
+            &channel_id,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(match update {
+            Some(update) => ChannelMetadataResponse {
+                name: update.body.name,
+                description: update.body.description,
+                image_url: update.body.image_url,
+                header: update.body.header,
+                rules: update.body.rules,
+                casting_mode: update.casting_mode as i32,
+                membership_mode: update.membership_mode as i32,
+            },
+            None => {
+                // Taken from the fold rather than restated, so this branch cannot
+                // drift from the policy admission applies to an unconfigured channel.
+                let (casting_mode, membership_mode) = ChannelUpdateStore::default_channel_modes();
+                ChannelMetadataResponse {
+                    name: None,
+                    description: None,
+                    image_url: None,
+                    header: None,
+                    rules: None,
+                    casting_mode: casting_mode as i32,
+                    membership_mode: membership_mode as i32,
+                }
+            }
+        }))
+    }
+
+    async fn get_channel_memberships_by_fid(
+        &self,
+        request: Request<ChannelMembershipsByFidRequest>,
+    ) -> Result<Response<ChannelMembershipsResponse>, Status> {
+        let req = request.into_inner();
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        require_nonzero_page_size(req.page_size)?;
+        let page = ChannelMemberStore::memberships_by_fid(
+            &self.block_stores.channel_member_store,
+            req.fid,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(channel_store_error_to_status)?;
+        Ok(Response::new(ChannelMembershipsResponse {
+            memberships: page
+                .entries
+                .into_iter()
+                .map(|membership| ChannelMembership {
+                    channel_id: membership.channel_id,
+                    state: channel_member_state_to_proto(membership.state) as i32,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
         }))
     }
 

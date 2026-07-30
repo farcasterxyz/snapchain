@@ -23,6 +23,7 @@ use crate::storage::{
     util::increment_vec_u8,
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::future;
 use prost::Message as _;
@@ -684,6 +685,7 @@ impl ReplicatorBootstrap {
         let store_opts = StoreOptions {
             conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
             save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
+            ..Default::default()
         };
 
         // Initialize the shared engine and trie that will be used by all the vts tasks working on this shard
@@ -857,6 +859,11 @@ impl ReplicatorBootstrap {
 
         // 1. Create the engine and trie objects
         let mut status = work_item.current_status;
+        let snapshot_timestamp = work_item.rpc_client_manager.get_metadata().timestamp;
+        let channel_messages_enabled = EngineVersion::channel_messages_enabled_for_snapshot(
+            snapshot_timestamp,
+            self.fc_network,
+        );
 
         loop {
             let mut last_fid = status.last_fid;
@@ -903,10 +910,11 @@ impl ReplicatorBootstrap {
                 trie_keys.insert(trie_key.clone());
                 let decoded_trie_key = TrieKey::decode(&trie_key)?;
 
-                match work_item
-                    .thread_engine
-                    .replay_replicator_message(&mut txn_batch, trie_message_entry)
-                {
+                match work_item.thread_engine.replay_replicator_message(
+                    &mut txn_batch,
+                    trie_message_entry,
+                    channel_messages_enabled,
+                ) {
                     Ok(m) => {
                         // For storage lend messages, we insert 2 keys per message
                         let generated_trie_keys = m.trie_keys;

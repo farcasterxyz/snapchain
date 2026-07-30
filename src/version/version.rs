@@ -247,6 +247,26 @@ impl EngineVersion {
         Self::version_for(&FarcasterTime::current(), network)
     }
 
+    /// Whether a replication snapshot taken at `snapshot_timestamp` (Farcaster
+    /// seconds) may carry channel rows.
+    ///
+    /// Both sides of replication have to answer this identically or a snapshot
+    /// straddling the boundary is served under one rule and replayed under
+    /// another: the server gates which rows it emits (`replicator.rs`, from
+    /// `ReplicationStores::get_timestamp`) and the bootstrap client gates whether
+    /// it will merge them (`bootstrap/replication/service.rs`, from
+    /// `ShardSnapshotMetadata.timestamp`). Those two timestamps share an origin —
+    /// the replicator's own snapshot metadata is what populates the wire field —
+    /// so keeping the derivation in one function is what makes the pair safe.
+    /// Do not re-inline it at either call site.
+    pub fn channel_messages_enabled_for_snapshot(
+        snapshot_timestamp: u64,
+        network: FarcasterNetwork,
+    ) -> bool {
+        Self::version_for(&FarcasterTime::new(snapshot_timestamp), network)
+            .is_enabled(ProtocolFeature::ChannelMessages)
+    }
+
     pub fn is_enabled(&self, feature: ProtocolFeature) -> bool {
         match feature {
             ProtocolFeature::SignerRevokeBug => {
@@ -290,41 +310,36 @@ impl EngineVersion {
             // are kept in one arm so they share the V20 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
             //
-            // VerificationsOnShardZero rides the same arm for a WEAKER reason, and the difference
-            // matters: it is bundled to share the single V20 rollout boundary, NOT because a
-            // present coupling forces it. Nothing reads the shard-0 verification replica today
-            // (every `verification_store` reader goes through `Stores`, never `BlockStores`).
-            // That is not the same as the feature being inert once V20 is live — a shard-0
-            // verification merge folds into the shard-0 trie like any other, so it moves the
-            // state root.
+            // VerificationsOnShardZero shares the V20 boundary because channel authority consumes
+            // the shard-0 verification set. Post-V20 verification admission routes to shard 0;
+            // accepted rows enter its trie, drive channel-owner resolution, and fan out in shard-0
+            // consensus order to every data shard. The admission timestamp floor deliberately
+            // excludes pre-V20 verification history, so authority begins from post-activation
+            // state rather than a backfill.
             //
-            // Note what this boundary implies for whatever eventually does read the replica.
-            // Verifications route to the fid's data shard (`route_message`), so in practice the
-            // replica stays empty — but that is a property of honest proposers building from
-            // routed mempools, not something replay enforces. And shard-0 admission deliberately
-            // rejects verifications whose embedded timestamp predates the feature (see
-            // `BlockEngine::validate_user_message`), so the replica never holds pre-V20 history.
-            // A consumer needing a fid's full verification set must read the fid shard; a
-            // consumer co-activating with this feature reads an empty store on day one. Revisit
-            // this bundling if a consumer needs history at first read.
+            // That makes RE-VERIFICATION A REQUIRED MIGRATION STEP, not an edge case: a channel
+            // owner who verified their address before V20 has no shard-0 row, so their channel
+            // resolves to owner fid 0 and rejects every permissioned write until they submit a
+            // fresh verification of the same address. It is documented on GetChannelOwner and
+            // ChannelOwnerResponse.fid because clients have to surface it. Anything that would
+            // change this — a backfill, or relaxing the floor — has to reckon with the
+            // tombstone-resurrection guard the floor exists to provide.
             //
-            // ChannelMessages now HAS a shard-0 consumer: `BlockEngine::validate_channel_message`
-            // admits the four channel types under this gate and `merge_channel_message` merges
-            // them into the four channel slot stores. It has no DATA-SHARD consumer — shard 0's
-            // BlockEvent allowlist still excludes channel types, so they never fan out and a
-            // fid's data shard never sees them. `ShardEngine` rejects direct channel admission
-            // and has no channel merge dispatch; its replay gate arm is deliberately
-            // gated-but-undispatchable until that fan-out lands.
+            // ChannelMessages has consumers on both sides of the fan-out. BlockEngine validates
+            // authority and merges the four slot stores on shard 0, then emits gated MergeMessage
+            // BlockEvents. Every data shard replays those events through the same StoreDefs using
+            // consensus-order slot replacement, updates its trie, emits its locally derived
+            // HubEvents, and exposes the rows to state-root-verified replication. Direct channel
+            // admission on a data shard remains rejected; replay and replication are its only
+            // writers.
             //
-            // The rule that got us here still binds anything added next: whatever widens this
-            // (data-shard dispatch, fan-out) must gate it on this feature in the SAME change.
-            // Nothing will remind you: `merge_message` ends in a catch-all arm, so new handling
-            // raises no exhaustiveness error, and no compiler check can demand a runtime gate.
-            // A type that can merge before its gate is a permanent replay divergence.
-            //
-            // Owner authority for channel messages resolves through the SHARD-0 verification
-            // replica, which the paragraph above notes is empty at activation. That coupling is
-            // load-bearing and unresolved — see `BlockStores::resolve_channel_owner_fid`.
+            // Keep every future widening of this topology gated in the same change that makes it
+            // reachable. The allowlist, replay dispatch, and replication cache each require an
+            // explicit ChannelMessages check; catch-all match arms and StoreType::None provide no
+            // compiler-enforced reminder. A type or index that mutates before its gate creates
+            // permanent replay divergence. Derived index writes are the one case that IS
+            // compiler-enforced: `DerivedIndexGate` is a required argument on all four channel
+            // merges, so a store that gains a gated index cannot silently skip it.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents
@@ -895,6 +910,43 @@ mod version_test {
                 version
             );
         }
+    }
+
+    #[test]
+    fn snapshot_channel_gate_tracks_the_activation_boundary_on_every_network() {
+        // Both sides of replication derive "may this snapshot carry channel rows?"
+        // from a snapshot timestamp — the server to decide which rows it emits, the
+        // bootstrap client to decide whether it will merge them. They now share this
+        // function, so this is the one place that behavior is pinned. Hardcoding
+        // either call site to a literal used to leave every test green while a
+        // post-activation bootstrap died on its first channel row.
+        for network in [
+            FarcasterNetwork::Mainnet,
+            FarcasterNetwork::Testnet,
+            FarcasterNetwork::Devnet,
+        ] {
+            for timestamp in [0u64, 1, 1_000_000, u32::MAX as u64] {
+                assert_eq!(
+                    EngineVersion::channel_messages_enabled_for_snapshot(timestamp, network),
+                    EngineVersion::version_for(&FarcasterTime::new(timestamp), network)
+                        .is_enabled(ProtocolFeature::ChannelMessages),
+                    "snapshot gate must equal the schedule's answer at {timestamp} on {network:?}"
+                );
+            }
+        }
+
+        // Devnet activates channel messages at genesis, so a devnet snapshot always
+        // carries them — the case the bootstrap tests actually exercise.
+        assert!(EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Devnet
+        ));
+        // Mainnet at timestamp 0 predates every activation, so a snapshot from before
+        // the boundary must not be treated as channel-bearing.
+        assert!(!EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Mainnet
+        ));
     }
 
     #[test]
