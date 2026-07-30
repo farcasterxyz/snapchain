@@ -431,8 +431,14 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     // decided state root. Direct ShardEngine admission rejects all four channel types. Therefore
     // authority and admission-only policy caps (notably the live-moderator cap) must not be
     // re-evaluated here: doing so would turn evaluator drift into a silently missing replica row.
-    // The permanent slot-count checks below are structural store invariants, not a second
-    // admission-policy evaluation.
+    //
+    // The slot-count checks below ARE the same caps shard 0 already applied, re-evaluated against
+    // this store's own counter — so they are subject to exactly that failure mode, and are kept
+    // only because the counter is a deterministic function of the identical ordered merge stream.
+    // If it ever drifts, `merge_slot` fails, `handle_block_event` propagates, and the caller in
+    // engine.rs logs "Error merging block event" and continues: the row is absent from this
+    // replica for good, with no re-drive. `block_event.replay_failed` is the only signal. Do not
+    // add further checks here on the reasoning that these ones are already present.
     let store_def = store.store_def();
     if !store_def.is_add_type(message) {
         return Err(HubError::validation_failure("invalid channel message type"));
