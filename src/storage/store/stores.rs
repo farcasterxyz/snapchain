@@ -611,6 +611,17 @@ impl Stores {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, StoresError> {
         let mut revoke_events = Vec::new();
+        // The four channel stores are DELIBERATELY absent from this list; do not add
+        // them "for completeness". These are a data shard's REPLICA of shard-0 channel
+        // state, written only by gated replay — this sweep is not their writer, and a
+        // deletion here would diverge the replica from shard 0 with nothing to
+        // reconcile it. Worse, the primary messages sit behind live slot pointers that
+        // a revocation would not clear: the read path hard-errors on a dangling slot
+        // rather than skipping it, so one revoked signer would turn GetChannelMembers
+        // into a permanent 500 for that entire channel. Whether a revoked signer's
+        // channel messages should be swept at all is a shard-0 question, and it would
+        // have to reach data shards as replay like every other channel mutation.
+        //
         // TODO: Dedup once we have a unified interface for stores
         revoke_events.extend(
             self.cast_store
