@@ -1599,6 +1599,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn channel_store_errors_only_blame_the_caller_for_caller_supplied_input() {
+        use crate::core::error::HubError;
+        use crate::network::server::channel_store_error_to_status;
+
+        // Caller input: a page token from another index, an fid that cannot key a
+        // member slot. These are the only errors on the read paths the caller can
+        // actually cause.
+        for err in [
+            HubError::invalid_parameter(
+                "page token does not belong to the requested channel index",
+            ),
+            HubError::invalid_parameter("channel member fid exceeds u32"),
+        ] {
+            assert_eq!(
+                channel_store_error_to_status(err.clone()).code(),
+                tonic::Code::InvalidArgument,
+                "{} is caller input",
+                err.code
+            );
+        }
+
+        // Everything else describes state this node stored and can no longer
+        // interpret. `validation_failure` is the trap: it shares the `bad_request`
+        // prefix with the codes above, but on a READ it is raised by
+        // member_state_for_message / moderation_state_for_message against a STORED
+        // body whose action this binary cannot parse. Reporting that as 4xx would
+        // hide replica corruption from anyone watching error rates.
+        for err in [
+            HubError::validation_failure("invalid channel moderate action"),
+            HubError::validation_failure("invalid channel member action"),
+            HubError::validation_failure("invalid ChannelMember body"),
+            HubError::invalid_internal_state("channel slot points to a missing message"),
+            HubError::invalid_internal_state("channel counter has invalid length"),
+            HubError::internal_db_error("rocksdb exploded"),
+        ] {
+            assert_eq!(
+                channel_store_error_to_status(err.clone()).code(),
+                tonic::Code::Internal,
+                "{} is a server fault, not caller input",
+                err.code
+            );
+        }
+    }
+
     #[tokio::test]
     async fn channel_read_rpcs_reject_malformed_requests_before_reading() {
         let (

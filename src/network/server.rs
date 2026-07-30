@@ -125,7 +125,7 @@ fn username_for_fname_recovery(message: &proto::Message) -> Option<String> {
 /// surface as `invalid_argument` rather than 500. Everything else is a true
 /// storage failure and stays as `internal`.
 fn signer_store_error_to_status(err: HubError) -> Status {
-    if err.code.starts_with("bad_request") {
+    if err.code == "bad_request.invalid_param" {
         Status::invalid_argument(err.to_string())
     } else {
         Status::internal(format!("Store error: {:?}", err))
@@ -201,12 +201,21 @@ fn require_nonzero_page_size(page_size: Option<u32>) -> Result<(), Status> {
 }
 
 /// Translate a HubError raised by the channel stores into a gRPC `Status`.
-/// `bad_request.*` codes are caller-supplied input — a page token that does not
-/// belong to the requested index, an out-of-range fid — so they surface as
-/// `invalid_argument`. Everything else (a dangling slot pointer, a malformed
-/// counter) is genuine replica corruption and stays `internal`.
-fn channel_store_error_to_status(err: HubError) -> Status {
-    if err.code.starts_with("bad_request") {
+///
+/// Only `bad_request.invalid_param` is caller-supplied on these read paths — a
+/// page token that does not belong to the requested index, an out-of-range fid.
+/// Everything else is state this node stored and can no longer interpret, so it
+/// stays `internal`.
+///
+/// Deliberately narrower than a `bad_request` prefix match. `validation_failure`
+/// is reachable from a read (`member_state_for_message` and
+/// `moderation_state_for_message` raise it when a STORED body carries an action
+/// this binary cannot parse), and those are replica corruption, not bad input.
+/// Matching the prefix would report them as 4xx and hide them from anyone
+/// watching error rates — the same failure mode as the dangling slot pointer
+/// two lines below them, which is already treated as corruption.
+pub(crate) fn channel_store_error_to_status(err: HubError) -> Status {
+    if err.code == "bad_request.invalid_param" {
         Status::invalid_argument(err.to_string())
     } else {
         Status::internal(format!("Store error: {err:?}"))
