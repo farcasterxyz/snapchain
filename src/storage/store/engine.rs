@@ -704,12 +704,25 @@ impl ShardEngine {
     /// Read from the replayed `BlockEvent` rather than from the emitted events, mirroring the
     /// live-merge site, which enrolls `msg.msg_type()` on a successful merge without inspecting
     /// what that merge emitted. Callers must only apply this on the dispatch's `Ok` arm.
+    fn replayed_message_type(block_event: &proto::BlockEvent) -> Option<MessageType> {
+        match block_event.data.as_ref()?.body.as_ref()? {
+            proto::block_event_data::Body::MergeMessageEventBody(body) => {
+                Some(body.message.as_ref()?.msg_type())
+            }
+            _ => None,
+        }
+    }
+
+    /// Message-type label for a replayed BlockEvent, for logs and metric tags.
+    /// A body that carries no message (or a malformed one) reports as `UNKNOWN`
+    /// rather than being attributed to a type it may not have.
+    fn replayed_message_type_label(block_event: &proto::BlockEvent) -> &'static str {
+        Self::replayed_message_type(block_event)
+            .map_or("UNKNOWN", |msg_type| msg_type.as_str_name())
+    }
+
     fn replayed_verification_prune_type(block_event: &proto::BlockEvent) -> Option<MessageType> {
-        let message = match block_event.data.as_ref()?.body.as_ref()? {
-            proto::block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref()?,
-            _ => return None,
-        };
-        match message.msg_type() {
+        match Self::replayed_message_type(block_event)? {
             msg_type @ (MessageType::VerificationAddEthAddress
             | MessageType::VerificationRemove) => Some(msg_type),
             _ => None,
@@ -1424,19 +1437,57 @@ impl ShardEngine {
                                 events.extend(hub_events)
                             }
                             Err(err) => {
-                                warn!(
+                                // A dropped replay is not recoverable: the seqnum has
+                                // already advanced, and nothing re-drives a decided
+                                // shard-0 event. If every node fails identically the
+                                // shard roots still agree, so consensus cannot flag the
+                                // resulting replica gap — this log and counter are the
+                                // only signal that a data shard is now missing a row
+                                // shard 0 holds. If the failure is node-local instead
+                                // (transient I/O, a corrupt counter on one host), the
+                                // skipped `update_trie` moves this shard's root and the
+                                // node fails validation against its peers, so the
+                                // structured fields below are what connect that mismatch
+                                // back to its cause.
+                                //
+                                // Control flow is deliberately unchanged. Whether a
+                                // replica that cannot apply a decided event should refuse
+                                // to commit rather than continue diverged is a separate,
+                                // consensus-sensitive decision: propagating here would
+                                // turn a deterministic replay bug into a chain halt.
+                                let msg_type = Self::replayed_message_type_label(block_event);
+                                self.metrics.count(
+                                    "block_event.replay_failed",
+                                    1,
+                                    vec![("msg_type", msg_type)],
+                                );
+                                error!(
+                                    seqnum = block_event.seqnum(),
+                                    block_timestamp = block_event.block_timestamp(),
+                                    msg_type,
                                     fid = snapchain_txn.fid,
-                                    "Error merging block event {}",
+                                    "Error merging block event; this shard's replica is now missing a row shard 0 holds: {}",
                                     err.to_string()
                                 );
                             }
                         }
                     } else {
-                        warn!(
+                        // Terminal for replay on this shard, not a single dropped row:
+                        // `last_block_event_seqnum` never advances past a gap, so every
+                        // later event fails this same check. The shard keeps serving
+                        // reads while its shard-0-derived state is frozen at this point,
+                        // which is why this is an error! with its own counter rather
+                        // than sharing the merge-failure signal above.
+                        self.metrics.count(
+                            "block_event.replay_out_of_order",
+                            1,
+                            vec![("msg_type", Self::replayed_message_type_label(block_event))],
+                        );
+                        error!(
                             seqnum = block_event.seqnum(),
                             last_block_event_seqnum,
                             fid = snapchain_txn.fid,
-                            "Error merging block event because it's not next"
+                            "Block event is not next in sequence; block event replay on this shard is stalled from here"
                         )
                     }
                 }
