@@ -110,27 +110,6 @@ mod serdehex {
     }
 }
 
-mod serdehexopt {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(value) => format!("0x{}", hex::encode(value)).serialize(s),
-            None => Option::<String>::None.serialize(s),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
-        let value = Option::<String>::deserialize(d)?;
-        value
-            .map(|value| {
-                let hex = value.strip_prefix("0x").unwrap_or(&value);
-                hex::decode(hex).map_err(serde::de::Error::custom)
-            })
-            .transpose()
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub data: MessageData,
