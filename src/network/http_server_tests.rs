@@ -608,6 +608,96 @@ pub mod tests {
     }
 
     #[test]
+    fn channel_page_tokens_survive_the_http_base64_round_trip() {
+        use crate::network::http_server::{ChannelMembersRequest, ChannelMembershipsByFidRequest};
+        use base64::prelude::*;
+
+        // A channel page token is a raw RocksDB key that reaches the client as base64
+        // and comes back through query-string deserialization. The store now REJECTS a
+        // token that does not start with the requested index's prefix, so a byte
+        // mangled in that round trip stops being "a slightly wrong page" and becomes a
+        // hard invalid_argument. Only the encode side had any coverage.
+        let channel_id_hex = format!("0x{}", "11".repeat(32));
+
+        // Percent-encode the base64 characters that are reserved in a query string.
+        let query_escape = |value: &str| {
+            value
+                .replace('%', "%25")
+                .replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D")
+        };
+
+        // A realistic member-slot key: RootPrefix::Channel, MemberSlot, 32-byte channel
+        // id, 4-byte fid, with byte values chosen so the base64 uses the `+` and `/`
+        // alphabet and needs padding.
+        let mut token = vec![24u8, 2];
+        token.extend_from_slice(&[0xFBu8; 32]);
+        token.extend_from_slice(&909u32.to_be_bytes());
+        let encoded = BASE64_STANDARD.encode(&token);
+        assert!(
+            encoded.contains('+') && encoded.contains('/') && encoded.ends_with('='),
+            "fixture must exercise the +, / and padding cases: {encoded}"
+        );
+
+        // Both spellings are accepted and folded together by `to_proto`, so both have
+        // to decode to the same bytes.
+        for field in ["page_token", "pageToken"] {
+            let parsed: ChannelMembersRequest = serde_qs::from_str(&format!(
+                "channelId={channel_id_hex}&{field}={}",
+                query_escape(&encoded)
+            ))
+            .unwrap();
+            assert_eq!(
+                parsed.page_token.or(parsed.pageToken).as_deref(),
+                Some(token.as_slice()),
+                "{field} must round-trip to the exact key bytes"
+            );
+        }
+
+        // A raw `+` in a query string arrives as a space, which is why the decoder
+        // restores it. Without that, every token containing `+` would come back
+        // corrupted — and now rejected outright by the prefix guard.
+        let space_mangled: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id_hex}&pageToken={}",
+            query_escape(&encoded.replace('+', " "))
+        ))
+        .unwrap();
+        assert_eq!(
+            space_mangled
+                .page_token
+                .or(space_mangled.pageToken)
+                .as_deref(),
+            Some(token.as_slice())
+        );
+
+        // Empty and absent both mean "first page". They must not become Some(vec![]),
+        // which the store treats as out-of-prefix and rejects.
+        for query in [
+            format!("channelId={channel_id_hex}&pageToken="),
+            format!("channelId={channel_id_hex}"),
+        ] {
+            let parsed: ChannelMembersRequest = serde_qs::from_str(&query).unwrap();
+            assert_eq!(parsed.page_token.or(parsed.pageToken), None, "{query}");
+        }
+
+        // Undecodable input fails deserialization rather than silently becoming None,
+        // which would page from the start of the index instead of reporting the error.
+        assert!(serde_qs::from_str::<ChannelMembersRequest>(&format!(
+            "channelId={channel_id_hex}&pageToken=%21%21not-base64%21%21"
+        ))
+        .is_err());
+
+        // Same contract on the fid-keyed read, whose tokens key a different index.
+        let memberships: ChannelMembershipsByFidRequest =
+            serde_qs::from_str(&format!("fid=909&pageToken={}", query_escape(&encoded))).unwrap();
+        assert_eq!(
+            memberships.page_token.or(memberships.pageToken).as_deref(),
+            Some(token.as_slice())
+        );
+    }
+
+    #[test]
     fn channel_read_errors_separate_server_faults_from_caller_input() {
         use crate::network::http_server::ErrorResponse;
         use hyper::StatusCode;
