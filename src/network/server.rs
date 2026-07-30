@@ -3103,15 +3103,20 @@ impl HubService for MyHubService {
                 casting_mode: update.casting_mode as i32,
                 membership_mode: update.membership_mode as i32,
             },
-            None => ChannelMetadataResponse {
-                name: None,
-                description: None,
-                image_url: None,
-                header: None,
-                rules: None,
-                casting_mode: proto::CastingMode::MembersOnly as i32,
-                membership_mode: proto::MembershipMode::Approval as i32,
-            },
+            None => {
+                // Taken from the fold rather than restated, so this branch cannot
+                // drift from the policy admission applies to an unconfigured channel.
+                let (casting_mode, membership_mode) = ChannelUpdateStore::default_channel_modes();
+                ChannelMetadataResponse {
+                    name: None,
+                    description: None,
+                    image_url: None,
+                    header: None,
+                    rules: None,
+                    casting_mode: casting_mode as i32,
+                    membership_mode: membership_mode as i32,
+                }
+            }
         }))
     }
 

@@ -1752,6 +1752,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unconfigured_channel_metadata_reports_the_restrictive_fold_defaults() {
+        // A registered channel with no ChannelUpdate must report the SAME effective
+        // policy that admission would apply to it. The fold side of that pairing was
+        // already pinned in channel_store_tests; this is the server side, which used
+        // to restate MembersOnly/Approval as literals. If the two ever disagreed, a
+        // channel would report different permissions before and after a cosmetic-only
+        // update that touched neither mode.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let channel_key = "unconfigured";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(0x53),
+            now_unix_seconds() + 3600,
+        );
+
+        let (expected_casting, expected_membership) = ChannelUpdateStore::default_channel_modes();
+        let unconfigured = service
+            .get_channel_metadata(Request::new(ChannelRequest {
+                channel_id: channel_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(unconfigured.name, None);
+        assert_eq!(unconfigured.description, None);
+        assert_eq!(unconfigured.image_url, None);
+        assert_eq!(unconfigured.header, None);
+        assert_eq!(unconfigured.rules, None);
+        assert_eq!(unconfigured.casting_mode, expected_casting as i32);
+        assert_eq!(unconfigured.membership_mode, expected_membership as i32);
+        assert_eq!(
+            unconfigured.casting_mode,
+            proto::CastingMode::MembersOnly as i32
+        );
+        assert_eq!(
+            unconfigured.membership_mode,
+            proto::MembershipMode::Approval as i32
+        );
+
+        // A cosmetic-only update that sets neither mode must land on exactly the same
+        // policy — this is the branch the "no update" defaults have to agree with.
+        merge_channel_message(
+            &block_engine,
+            &messages_factory::create_message_with_data(
+                500,
+                proto::MessageType::ChannelUpdate,
+                proto::message_data::Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                    channel_id: channel_id.clone(),
+                    name: Some("Name only".to_string()),
+                    ..Default::default()
+                }),
+                Some(40),
+                None,
+            ),
+        );
+        let cosmetic = service
+            .get_channel_metadata(Request::new(ChannelRequest { channel_id }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(cosmetic.name.as_deref(), Some("Name only"));
+        assert_eq!(cosmetic.casting_mode, unconfigured.casting_mode);
+        assert_eq!(cosmetic.membership_mode, unconfigured.membership_mode);
+    }
+
+    #[tokio::test]
     async fn channel_member_state_none_filter_returns_every_state() {
         // CHANNEL_MEMBER_STATE_NONE is the proto3 zero value, so it is exactly what a
         // client sends by leaving `state_filter` set to its default. It must mean "no

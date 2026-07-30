@@ -917,6 +917,17 @@ impl ChannelUpdateStore {
         channel_index_key(ChannelIndex::UpdateSlot, channel_id, &[])
     }
 
+    /// Effective modes for a registered channel that has no ChannelUpdate yet.
+    ///
+    /// Derived from `fold_channel_modes` rather than restated, so the read path's
+    /// "no update" branch cannot drift from the policy admission actually applies.
+    /// An unconfigured channel and one whose update omitted both modes must report
+    /// the same thing, because to the fold they ARE the same thing.
+    pub fn default_channel_modes() -> (CastingMode, MembershipMode) {
+        fold_channel_modes(&ChannelUpdateBody::default())
+            .expect("an empty channel update body folds to the restrictive defaults")
+    }
+
     pub fn get_channel_update(
         store: &Store<ChannelUpdateStoreDef>,
         channel_id: &[u8],
