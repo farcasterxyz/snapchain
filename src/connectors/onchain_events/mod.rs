@@ -1,6 +1,9 @@
 use crate::cfg::Config as AppConfig;
-use crate::proto::{ChannelRegisterBody, ChannelRegisterEventType, TierPurchaseBody};
+use crate::proto::{
+    ChannelRegisterBody, ChannelRegisterEventType, FarcasterNetwork, TierPurchaseBody,
+};
 use crate::storage::store::node_local_state;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, RootProvider};
@@ -66,20 +69,45 @@ sol!(
 );
 
 sol!(
-    /// Farcaster ChannelRegistrar on Base. Channel names are registered as
-    /// ERC-721 NFTs whose tokenId is `uint256(keccak256(channel name))`. The
-    /// connector consumes three of its events — `NameRegistered` (initial
-    /// registration), `NameRenewed` (expiry extension), and the ERC-721
-    /// `Transfer` (ownership change) — and emits each as an
-    /// `EVENT_TYPE_CHANNEL_REGISTER` onchain event. The mainnet address is
-    /// added as a constant once the contract deploys; until then it is only
-    /// watched when `override_channel_registrar_address` is set (see
-    /// `contracts()`).
+    /// Farcaster channel registry events. Channel names are registered as ERC-721
+    /// NFTs whose tokenId is `uint256(keccak256(channel name))`. The connector
+    /// consumes three events and emits each as an `EVENT_TYPE_CHANNEL_REGISTER`
+    /// onchain event — but they come from TWO contracts, which is why
+    /// `contracts()` watches two addresses:
+    ///
+    /// * `NameRegistered` (initial registration) and `NameRenewed` (expiry
+    ///   extension) are emitted by the **RegistrarController**, which is the
+    ///   address an operator configures. Only the controller's events carry the
+    ///   plaintext channel name.
+    /// * The ERC-721 `Transfer` (ownership change) is emitted by the
+    ///   **BaseRegistrar**, the token contract. It is derived from the controller
+    ///   at startup — see `Subscriber::resolve_channel_registrar_token`.
+    ///
+    /// Watching only one of the two silently drops the other's events: no error,
+    /// no metric, just an event type that never fires (NEYN-12914).
+    ///
+    /// The mainnet controller address is added as a constant once the contract
+    /// deploys; until then it is only watched when
+    /// `override_channel_registrar_address` is set (see `contracts()`).
     #[allow(missing_docs)]
     #[sol(rpc)]
     ChannelRegistrarAbi,
     "src/connectors/onchain_events/channel_registrar_abi.json"
 );
+
+sol! {
+    /// The one RegistrarController *call* the connector makes. The vendored ABI
+    /// JSON above carries events only, and `RegistrarController.base` — which
+    /// would hand us the ERC-721 directly — is `immutable` but not `public`, so
+    /// no getter for it exists. `rootNode()` is the way in: the deploy transfers
+    /// that ENS node to the BaseRegistrar, so the node's owner IS the token
+    /// contract.
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    contract ChannelRegistrarController {
+        function rootNode() view returns (bytes32);
+    }
+}
 
 sol! {
     /// SignedKeyRequest metadata structure as defined in the Farcaster contracts.
@@ -116,6 +144,16 @@ pub struct Config {
     pub stop_block_number: Option<u64>,
     pub override_tier_registry_address: Option<String>, // For testing
     pub override_channel_registrar_address: Option<String>, // For testing
+    /// The ENS registry used to derive the channel registry's ERC-721 from its
+    /// controller. Defaults to the canonical ENS registry address, which is what
+    /// the Sepolia channel-registry deployment sits under.
+    ///
+    /// Configurable rather than derived from `chain` because nothing guarantees
+    /// the registry address: it happens to match across Ethereum mainnet and
+    /// Sepolia as an artifact of ENS's deploy history, and the chain the channel
+    /// registry ends up on for mainnet is not settled. A wrong address here
+    /// fails loudly at startup, so an operator finds out immediately.
+    pub override_ens_registry_address: Option<String>,
 }
 
 impl Default for Config {
@@ -126,6 +164,7 @@ impl Default for Config {
             stop_block_number: None,
             override_tier_registry_address: None,
             override_channel_registrar_address: None,
+            override_ens_registry_address: None,
         };
     }
 }
@@ -164,6 +203,9 @@ pub enum SubscribeError {
 
     #[error("Invalid override contract address: {0}")]
     InvalidOverrideAddress(String),
+
+    #[error("Could not resolve the channel registry's ERC-721 from its controller: {0}")]
+    ChannelRegistrarTokenUnresolved(String),
 
     #[error("Log missing block hash")]
     LogMissingBlockHash,
@@ -356,7 +398,12 @@ pub enum ContractKind {
     StorageRegistry,
     KeyRegistry,
     IdRegistry,
-    ChannelRegistrar,
+    /// The RegistrarController: `NameRegistered` / `NameRenewed`, the only events
+    /// carrying the plaintext channel name. This is the address operators set.
+    ChannelRegistrarController,
+    /// The BaseRegistrar ERC-721: channel-ownership `Transfer`. Derived from the
+    /// controller rather than configured, so the two cannot drift apart.
+    ChannelRegistrarToken,
 }
 #[derive(Clone)]
 pub struct Contract {
@@ -399,7 +446,9 @@ impl Contract {
             ContractKind::StorageRegistry => "storage",
             ContractKind::KeyRegistry => "key",
             ContractKind::IdRegistry => "id",
-            ContractKind::ChannelRegistrar => "channel",
+            ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken => {
+                "channel"
+            }
         }
     }
 
@@ -447,7 +496,9 @@ impl Contract {
             // by fid (the connector always emits fid = 0 and resolution happens at
             // read time, via GetChannelOwner), so there is no per-fid retry filter.
             // Retry by block range.
-            ContractKind::ChannelRegistrar => vec![],
+            ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken => {
+                vec![]
+            }
         }
     }
 }
@@ -461,8 +512,22 @@ pub struct Subscriber {
     local_state_store: LocalStateStore,
     onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
     chain: node_local_state::Chain,
+    /// Only used to decide whether a channel-registry misconfiguration is fatal.
+    /// See `resolve_channel_registrar_token`.
+    network: FarcasterNetwork,
     override_tier_registry_address: Option<Address>,
     override_channel_registrar_address: Option<Address>,
+    /// The ENS registry the channel registry's root 2LD lives under. Resolved at
+    /// construction from config, defaulting to the canonical ENS address.
+    ens_registry_address: Address,
+    /// The BaseRegistrar ERC-721, resolved from the controller at the start of
+    /// `run()`. `None` until then, and permanently `None` when no channel
+    /// registrar is configured at all.
+    ///
+    /// Not config: deriving it is what guarantees the token contract belongs to
+    /// the same deployment as the controller. Two independently configured
+    /// addresses could name unrelated contracts with nothing to catch it.
+    channel_registrar_token: Option<Address>,
 }
 
 /// Parses an override contract address from config once, at construction, so a
@@ -478,6 +543,7 @@ impl Subscriber {
     pub fn new(
         config: &Config,
         chain: node_local_state::Chain,
+        network: FarcasterNetwork,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
@@ -499,6 +565,7 @@ impl Subscriber {
             statsd_client,
             onchain_events_request_rx,
             chain,
+            network,
             override_tier_registry_address: config
                 .override_tier_registry_address
                 .as_deref()
@@ -509,7 +576,71 @@ impl Subscriber {
                 .as_deref()
                 .map(parse_override_address)
                 .transpose()?,
+            ens_registry_address: config
+                .override_ens_registry_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?
+                .unwrap_or(ETH_L1_ENS_REGISTRY),
+            channel_registrar_token: None,
         })
+    }
+
+    /// Whether the engine is currently accepting channel-register events.
+    ///
+    /// Gates how loudly a failed registry resolution is reported: before
+    /// activation the events are rejected anyway, so an unresolvable registry is
+    /// a warning; after, it means silent data loss and is fatal.
+    fn channel_registrations_active(&self) -> bool {
+        EngineVersion::current(self.network).is_enabled(ProtocolFeature::ChannelRegistrations)
+    }
+
+    /// Derives the channel registry's ERC-721 from its controller.
+    ///
+    /// `RegistrarController.base` holds the address we want but is `immutable`
+    /// and not `public`, so there is no getter. The route in is the ENS registry:
+    /// deploying the registry transfers the root 2LD to the BaseRegistrar, so
+    ///
+    ///   `ENSRegistry.owner(controller.rootNode()) == BaseRegistrar`
+    ///
+    /// which the deployment doc verifies explicitly ("2LD handoff succeeded").
+    ///
+    /// Two RPC calls at startup, and a hard failure if either fails or the answer
+    /// is the zero address. Degrading to "watch the controller only" would put us
+    /// back in the exact silent state this exists to prevent — registrations
+    /// ingesting while every ownership transfer is dropped.
+    async fn resolve_channel_registrar_token(
+        &self,
+        controller: Address,
+    ) -> Result<Address, SubscribeError> {
+        let root_node = ChannelRegistrarController::new(controller, &self.provider)
+            .rootNode()
+            .call()
+            .await
+            .map_err(|err| {
+                SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                    "rootNode() on controller {controller}: {err}"
+                ))
+            })?;
+
+        let registry = self.ens_registry_address;
+        let token = ens::EnsRegistry::new(registry, &self.provider)
+            .owner(root_node)
+            .call()
+            .await
+            .map_err(|err| {
+                SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                    "owner({root_node}) on ENS registry {registry}: {err}"
+                ))
+            })?;
+
+        if token.is_zero() {
+            return Err(SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                "ENS registry {registry} reports no owner for root node {root_node}; \
+                 controller {controller} is not a live channel registry on this chain"
+            )));
+        }
+        Ok(token)
     }
 
     fn contracts(&self) -> Vec<Contract> {
@@ -527,14 +658,25 @@ impl Subscriber {
                         kind: ContractKind::TierRegistry,
                     },
                 }];
-                // The mainnet ChannelRegistrar address is added as a constant once the
-                // contract deploys. Until then the contract is only watched when the
-                // override is configured (tests + the testnet acceptance run), so the
+                // The mainnet controller address is added as a constant once the
+                // contract deploys. Until then it is only watched when the override
+                // is configured (tests + the testnet acceptance run), so the
                 // connector is a no-op on mainnet even after this code ships.
+                //
+                // BOTH addresses are pushed: the controller emits NameRegistered /
+                // NameRenewed, the token contract emits the ERC-721 Transfer. The
+                // token address is resolved in `run()`, so a `contracts()` call
+                // before that (none exist today) would watch the controller only.
                 if let Some(address) = self.override_channel_registrar_address {
                     contracts.push(Contract {
                         address,
-                        kind: ContractKind::ChannelRegistrar,
+                        kind: ContractKind::ChannelRegistrarController,
+                    });
+                }
+                if let Some(address) = self.channel_registrar_token {
+                    contracts.push(Contract {
+                        address,
+                        kind: ContractKind::ChannelRegistrarToken,
                     });
                 }
                 contracts
@@ -1281,7 +1423,9 @@ impl Subscriber {
 
         for contract in self.contracts() {
             match contract.kind {
-                ContractKind::TierRegistry | ContractKind::ChannelRegistrar => {
+                ContractKind::TierRegistry
+                | ContractKind::ChannelRegistrarController
+                | ContractKind::ChannelRegistrarToken => {
                     polled_contracts.push(contract);
                 }
                 _ => {
@@ -1460,6 +1604,55 @@ impl Subscriber {
     }
 
     pub async fn run(&mut self) -> Result<(), SubscribeError> {
+        // Before any filter is built: the channel registry emits from two
+        // contracts, and only one of them is configured. Resolving here rather
+        // than in `new()` because it costs two RPC calls, and `new()` is sync.
+        //
+        // A failure is only fatal once channel registrations are actually being
+        // consumed. Before `ChannelRegistrations` activates, the engine rejects
+        // channel-register events regardless, so an unreachable or misconfigured
+        // registry costs nothing and must not stop a node from booting — a
+        // half-configured registry on a pre-activation network is a normal state
+        // to be in while the registry is still being deployed. After activation
+        // the same failure means every ownership transfer is being dropped, which
+        // is the silent-loss case this whole change exists to prevent.
+        //
+        // Wall-clock gating is deliberate and safe here: this is node-local
+        // startup behavior, not a consensus decision. Nothing downstream re-derives
+        // it, and two nodes disagreeing about whether to boot has no effect on
+        // state. Contrast the follow index, which must gate on a message clock.
+        if let Some(controller) = self.override_channel_registrar_address {
+            match self.resolve_channel_registrar_token(controller).await {
+                Ok(token) => {
+                    info!(
+                        controller = controller.to_string(),
+                        token = token.to_string(),
+                        chain = self.chain.to_string(),
+                        "Resolved channel registry ERC-721 from its controller"
+                    );
+                    self.channel_registrar_token = Some(token);
+                }
+                Err(err) if !self.channel_registrations_active() => {
+                    // Deliberately loud despite being non-fatal: whoever is
+                    // standing up the registry needs to see this before the
+                    // activation boundary makes it fatal. Note the node is NOT
+                    // re-checked after activation while it keeps running — it
+                    // picks the failure up on its next restart.
+                    warn!(
+                        controller = controller.to_string(),
+                        chain = self.chain.to_string(),
+                        network = self.network.as_str_name(),
+                        "Could not resolve the channel registry ERC-721, continuing because \
+                         channel registrations are not active yet. Channel ownership transfers \
+                         will NOT be ingested. Error: {:#?}",
+                        err
+                    );
+                    self.count("onchain_events.channel_registrar_unresolved", 1, vec![]);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
         let latest_block_on_chain = self.latest_block_on_chain().await?;
         let latest_block_in_db = self.latest_block_in_db();
         info!(
@@ -1535,6 +1728,7 @@ impl Subscriber {
 #[cfg(test)]
 mod tests {
     use crate::connectors::onchain_events;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -1551,6 +1745,7 @@ mod tests {
                 stop_block_number: None,
                 override_tier_registry_address: None,
                 override_channel_registrar_address: None,
+                override_ens_registry_address: None,
             },
             ..Default::default()
         };
@@ -1696,5 +1891,182 @@ mod tests {
         // so the log is dropped (warn + metric) rather than minted — honoring the proto
         // invariant.
         assert!(ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&log_data).is_err());
+    }
+
+    /// Builds a Subscriber without touching the network. The RPC URL is never
+    /// dialled by the assertions below — they only exercise `contracts()`, which
+    /// is pure over the resolved addresses.
+    fn offline_subscriber(
+        chain: node_local_state::Chain,
+        controller: Option<Address>,
+        token: Option<Address>,
+    ) -> Subscriber {
+        offline_subscriber_on(chain, FarcasterNetwork::Devnet, controller, token)
+    }
+
+    fn offline_subscriber_on(
+        chain: node_local_state::Chain,
+        network: FarcasterNetwork,
+        controller: Option<Address>,
+        token: Option<Address>,
+    ) -> Subscriber {
+        let (mempool_tx, _mempool_rx) = mpsc::channel(1);
+        let (_tx, onchain_events_request_rx) = broadcast::channel(1);
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(crate::storage::db::RocksDB::new(
+            dir.path().join("test.db").to_str().unwrap(),
+        ));
+        db.open().unwrap();
+        Subscriber {
+            provider: RootProvider::new_http("http://127.0.0.1:1".parse().unwrap()),
+            mempool_tx,
+            start_block_number: None,
+            stop_block_number: None,
+            statsd_client: StatsdClientWrapper::new(
+                cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+                true,
+            ),
+            local_state_store: LocalStateStore::new(db),
+            onchain_events_request_rx,
+            chain,
+            network,
+            override_tier_registry_address: None,
+            override_channel_registrar_address: controller,
+            ens_registry_address: ETH_L1_ENS_REGISTRY,
+            channel_registrar_token: token,
+        }
+    }
+
+    /// The Sepolia deployment (`channel-registry/deployments/11155111.md`).
+    const SEPOLIA_CONTROLLER: Address = address!("0x90fc42187729ee3aebe48ce177e390fb67a565a8");
+    const SEPOLIA_BASE_REGISTRAR: Address = address!("0x7dd80c661ded9bfc8d4440224a0b39b345a91be4");
+
+    fn channel_addresses(subscriber: &Subscriber) -> Vec<Address> {
+        subscriber
+            .contracts()
+            .into_iter()
+            .filter(|contract| {
+                matches!(
+                    contract.kind,
+                    ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken
+                )
+            })
+            .map(|contract| contract.address)
+            .collect()
+    }
+
+    #[test]
+    fn watches_both_channel_registry_contracts_once_the_token_is_resolved() {
+        // The bug this fixes: one configured address, but NameRegistered/
+        // NameRenewed come from the controller while the ERC-721 Transfer comes
+        // from the BaseRegistrar. Watching one silently drops the other's events.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            Some(SEPOLIA_BASE_REGISTRAR),
+        );
+        assert_eq!(
+            channel_addresses(&subscriber),
+            vec![SEPOLIA_CONTROLLER, SEPOLIA_BASE_REGISTRAR]
+        );
+    }
+
+    #[test]
+    fn watches_the_controller_alone_before_resolution() {
+        // `contracts()` is pure, so it cannot resolve; `run()` does that first.
+        // This pins that the pre-resolution state is controller-only rather than
+        // panicking or dropping the controller too.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            None,
+        );
+        assert_eq!(channel_addresses(&subscriber), vec![SEPOLIA_CONTROLLER]);
+    }
+
+    #[test]
+    fn watches_no_channel_contracts_when_none_is_configured() {
+        // Mainnet today: no controller constant yet, so the connector stays a
+        // no-op even with this code shipped.
+        let subscriber = offline_subscriber(node_local_state::Chain::Base, None, None);
+        assert!(channel_addresses(&subscriber).is_empty());
+    }
+
+    #[test]
+    fn both_channel_contracts_report_the_same_metric_kind() {
+        // `event_kind` tags metrics. The split into two ContractKinds is an
+        // internal distinction and must not fork the "channel" metric series.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            Some(SEPOLIA_BASE_REGISTRAR),
+        );
+        for contract in subscriber.contracts() {
+            if matches!(
+                contract.kind,
+                ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken
+            ) {
+                assert_eq!(contract.event_kind(), "channel");
+            }
+        }
+    }
+
+    #[test]
+    fn the_base_registrar_emits_a_different_name_registered_than_the_controller() {
+        // Now that the token contract is watched, its logs reach `process_log`
+        // too. BaseRegistrar has its own `NameRegistered(uint256,address,uint256)`
+        // — if that collided with the controller's
+        // `NameRegistered(string,bytes32,address,uint256)` the decoder would
+        // mint channel registrations with a garbage channel_key. Different
+        // signature hashes are what make the unmatched-topic `_ => Ok(())` arm
+        // the correct outcome for it.
+        use alloy_primitives::keccak256;
+        let base_registrar_name_registered = keccak256(b"NameRegistered(uint256,address,uint256)");
+        assert_ne!(
+            base_registrar_name_registered,
+            ChannelRegistrarAbi::NameRegistered::SIGNATURE_HASH,
+        );
+        let base_registrar_name_renewed = keccak256(b"NameRenewed(uint256,uint256)");
+        assert_ne!(
+            base_registrar_name_renewed,
+            ChannelRegistrarAbi::NameRenewed::SIGNATURE_HASH,
+        );
+    }
+
+    #[test]
+    fn a_registry_misconfiguration_is_only_fatal_once_registrations_are_active() {
+        // Before ChannelRegistrations activates, the engine rejects
+        // channel-register events anyway, so an unresolvable registry costs
+        // nothing and must not stop a node from booting — the registry is still
+        // being deployed. After activation the same failure silently drops every
+        // ownership transfer, so it has to be fatal.
+        let devnet = offline_subscriber_on(
+            node_local_state::Chain::Base,
+            FarcasterNetwork::Devnet,
+            Some(SEPOLIA_CONTROLLER),
+            None,
+        );
+        assert!(
+            devnet.channel_registrations_active(),
+            "devnet activates channel registrations at genesis, so a bad registry is fatal there"
+        );
+
+        // Mainnet and testnet have no V20 entry scheduled yet. Asserted via
+        // `channel_registrations_active` rather than a pinned version so this
+        // starts reporting `true` — correctly — the moment V20 is scheduled,
+        // rather than failing.
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let subscriber = offline_subscriber_on(
+                node_local_state::Chain::Base,
+                network,
+                Some(SEPOLIA_CONTROLLER),
+                None,
+            );
+            assert_eq!(
+                subscriber.channel_registrations_active(),
+                EngineVersion::current(network).is_enabled(ProtocolFeature::ChannelRegistrations),
+                "{network:?} must track the schedule, not a hardcoded answer"
+            );
+        }
     }
 }
