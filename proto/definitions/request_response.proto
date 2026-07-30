@@ -267,6 +267,13 @@ message ChannelModerationsResponse {
   optional bytes next_page_token = 2;
 }
 
+// The whole-replace fold of the single winning ChannelUpdate (see
+// ChannelUpdateBody). A field absent here reads as unset — it was omitted by the
+// latest update and is never inherited from the update that one superseded. Do
+// NOT treat an absent field as "unchanged": consumers that merge this response
+// into a stored model must clear the fields it omits, or deleted metadata lives
+// forever.
+//
 // casting_mode/membership_mode are the RESOLVED effective policy: for a registered
 // channel with no ChannelUpdate yet, the server returns the restrictive defaults
 // (MEMBERS_ONLY / APPROVAL), never the NONE=0 sentinel. Clients cannot distinguish

@@ -1684,17 +1684,19 @@ pub struct ChannelModerationsResponse {
     pub next_page_token: Option<String>,
 }
 
+/// The five string fields deliberately do NOT use `skip_serializing_if`, unlike
+/// most response types here. ChannelUpdate is a whole-replace fold, so an absent
+/// field means the latest update cleared it — omitting it from the JSON would
+/// make a deliberately cleared description byte-identical to one that never
+/// existed, and any consumer doing `if let Some(v) = resp.name` would keep
+/// deleted metadata forever. Serializing explicit `null` makes the clear visible.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelMetadataResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "imageUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "imageUrl")]
     pub image_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
     #[serde(rename = "castingMode")]
     pub casting_mode: CastingMode,

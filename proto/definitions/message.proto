@@ -315,6 +315,12 @@ enum ChannelModerateAction {
   CHANNEL_MODERATE_ACTION_UNHIDE = 2;
 }
 
+// WHOLE-REPLACE, NOT MERGE-PATCH. The winning ChannelUpdate is the channel's
+// entire configuration: a field omitted here reads as unset, it is NOT inherited
+// from the update this one supersedes. Sending `{channel_id, name}` to rename a
+// channel therefore CLEARS its description, image_url, header, rules, and both
+// modes (which fold back to the restrictive defaults). Clients must send the
+// full desired state on every update, not just the fields they are changing.
 message ChannelUpdateBody {
   // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
   // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto

@@ -574,6 +574,30 @@ pub mod tests {
         .unwrap();
         assert_eq!(metadata["castingMode"], "CASTING_MODE_MEMBERS_ONLY");
         assert_eq!(metadata["membershipMode"], "MEMBERSHIP_MODE_APPROVAL");
+        // ChannelUpdate is a whole-replace fold, so an absent field means CLEARED.
+        // These must serialize as explicit null rather than being omitted, or a
+        // consumer merging the response into a stored model cannot tell a cleared
+        // description from one that never existed and keeps deleted metadata.
+        for field in ["name", "description", "imageUrl", "header", "rules"] {
+            assert_eq!(
+                metadata.get(field),
+                Some(&serde_json::Value::Null),
+                "{field} must serialize as null when cleared, not be omitted"
+            );
+        }
+
+        let populated = serde_json::to_value(ChannelMetadataResponse {
+            name: Some("Channel name".to_string()),
+            description: None,
+            image_url: None,
+            header: None,
+            rules: None,
+            casting_mode: CastingMode::CASTING_MODE_EVERYONE,
+            membership_mode: MembershipMode::MEMBERSHIP_MODE_OPEN,
+        })
+        .unwrap();
+        assert_eq!(populated["name"], "Channel name");
+        assert_eq!(populated["description"], serde_json::Value::Null);
     }
 
     #[test]
