@@ -277,9 +277,21 @@ enum CastingMode {
 /**
  * Protocol-relevant, unlike CastingMode: this gates whether an fid may add
  * itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
- * whose fid equals the sending message's fid). OPEN admits self-adds; APPROVAL
- * requires a moderator. Enforced at shard-0 admission wherever channel messages
- * are active (they are version-gated and inert on networks below that version).
+ * whose fid equals the sending message's fid).
+ *
+ * Under OPEN an fid may self-add, but only from no membership at all or from
+ * REMOVED: a banned fid stays banned, and one already MEMBER or MODERATOR is
+ * rejected rather than re-added. Under APPROVAL the add must come from the
+ * channel OWNER or a MODERATOR — an owner satisfies it directly and does not
+ * need a moderator role. Either mode still rejects an add whose target is
+ * banned.
+ *
+ * NONE is the proto3 zero value, not a third policy: an absent or explicitly
+ * zero mode folds to APPROVAL, so a cosmetic-only ChannelUpdate closes
+ * membership rather than opening it.
+ *
+ * Enforced at shard-0 admission wherever channel messages are active (they are
+ * version-gated and inert on networks below that version).
  */
 enum MembershipMode {
   MEMBERSHIP_MODE_NONE = 0;
