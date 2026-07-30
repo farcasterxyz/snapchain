@@ -1364,8 +1364,9 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(pin_response.cast_hash, Some(pin_hash));
-        assert_eq!(pin_response.author_fid, Some(501));
+        let pinned = pin_response.pin.expect("channel has a pin");
+        assert_eq!(pinned.cast_hash, pin_hash);
+        assert_eq!(pinned.author_fid, 501);
 
         let moderations = service
             .get_channel_moderations(Request::new(ChannelModerationsRequest {
@@ -2854,8 +2855,9 @@ mod tests {
             pin_hash: &[u8],
             moderated_hash: &[u8],
         ) {
-            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash));
-            assert_eq!(reads.pin.author_fid, Some(moderator_fid));
+            let pinned = reads.pin.pin.as_ref().expect("channel has a pin");
+            assert_eq!(pinned.cast_hash.as_slice(), pin_hash);
+            assert_eq!(pinned.author_fid, moderator_fid);
             assert_eq!(reads.moderations.moderations.len(), 1);
             assert_eq!(reads.moderations.moderations[0].cast_hash, moderated_hash);
             assert_eq!(
@@ -2911,7 +2913,7 @@ mod tests {
             let reads = driver.reads(&channel_id, MEMBER_FID).await;
             assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
             assert_member_collections(&reads, &channel_id, &[], None);
-            assert_eq!(reads.pin.cast_hash, None);
+            assert_eq!(reads.pin.pin, None);
             assert!(reads.moderations.moderations.is_empty());
             assert_eq!(reads.metadata.name, None);
 
@@ -2927,7 +2929,7 @@ mod tests {
             let reads = driver.reads(&channel_id, MEMBER_FID).await;
             assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
             assert_member_collections(&reads, &channel_id, &[], None);
-            assert_eq!(reads.pin.cast_hash, None);
+            assert_eq!(reads.pin.pin, None);
             assert!(reads.moderations.moderations.is_empty());
             assert_eq!(reads.metadata.name, None);
 
@@ -2947,7 +2949,7 @@ mod tests {
             assert_eq!(reads.metadata.membership_mode, MembershipMode::Open as i32);
             assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
             assert_member_collections(&reads, &channel_id, &[], None);
-            assert_eq!(reads.pin.cast_hash, None);
+            assert_eq!(reads.pin.pin, None);
             assert!(reads.moderations.moderations.is_empty());
 
             timestamp += 1;
@@ -2970,7 +2972,7 @@ mod tests {
                 Some(proto::ChannelMemberState::Member),
             );
             assert_eq!(reads.metadata.name.as_deref(), Some("open"));
-            assert_eq!(reads.pin.cast_hash, None);
+            assert_eq!(reads.pin.pin, None);
             assert!(reads.moderations.moderations.is_empty());
 
             timestamp += 1;
@@ -3010,7 +3012,7 @@ mod tests {
                 Some(proto::ChannelMemberState::Moderator),
             );
             assert_eq!(reads.metadata.name.as_deref(), Some("open"));
-            assert_eq!(reads.pin.cast_hash, None);
+            assert_eq!(reads.pin.pin, None);
             assert!(reads.moderations.moderations.is_empty());
 
             timestamp += 2;
@@ -4322,8 +4324,9 @@ mod tests {
                 ])
                 .await;
             let valid_reads = driver.reads(&channel_id, OWNER_FID).await;
-            assert_eq!(valid_reads.pin.cast_hash, Some(valid_pin_hash.clone()));
-            assert_eq!(valid_reads.pin.author_fid, Some(OWNER_FID));
+            let pinned = valid_reads.pin.pin.as_ref().expect("channel has a pin");
+            assert_eq!(pinned.cast_hash, valid_pin_hash);
+            assert_eq!(pinned.author_fid, OWNER_FID);
             assert_eq!(valid_reads.moderations.moderations.len(), 1);
             assert_eq!(
                 valid_reads.moderations.moderations[0].cast_hash,
@@ -4378,8 +4381,7 @@ mod tests {
 
             driver.assert_converged();
             let reads = driver.reads(&channel_id, OWNER_FID).await;
-            assert!(reads.pin.cast_hash.is_none());
-            assert!(reads.pin.author_fid.is_none());
+            assert!(reads.pin.pin.is_none());
             assert_eq!(reads.moderations.moderations.len(), 1);
             assert_eq!(
                 reads.moderations.moderations[0].cast_hash,

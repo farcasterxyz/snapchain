@@ -23,7 +23,7 @@ use crate::proto::{
     ChannelMembersRequest, ChannelMembersResponse, ChannelMembership,
     ChannelMembershipsByFidRequest, ChannelMembershipsResponse, ChannelMetadataResponse,
     ChannelModeration, ChannelModerationsRequest, ChannelModerationsResponse, ChannelOwnerRequest,
-    ChannelOwnerResponse, ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest,
+    ChannelOwnerResponse, ChannelPin, ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest,
     ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest, EventsRequest, EventsResponse,
     FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
     FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
@@ -3044,15 +3044,13 @@ impl HubService for MyHubService {
         .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
         // An unpin (empty cast_hash, permitted by validate_channel_pin_body) and a
         // channel that was never pinned intentionally read identically as "no pin".
-        Ok(Response::new(match pin {
-            Some(pin) if !pin.body.cast_hash.is_empty() => ChannelPinResponse {
-                cast_hash: Some(pin.body.cast_hash),
-                author_fid: Some(pin.author_fid),
-            },
-            _ => ChannelPinResponse {
-                cast_hash: None,
-                author_fid: None,
-            },
+        Ok(Response::new(ChannelPinResponse {
+            pin: pin
+                .filter(|pin| !pin.body.cast_hash.is_empty())
+                .map(|pin| ChannelPin {
+                    cast_hash: pin.body.cast_hash,
+                    author_fid: pin.author_fid,
+                }),
         }))
     }
 

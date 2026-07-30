@@ -1621,16 +1621,18 @@ pub struct ChannelMembersResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelPin {
+    #[serde(with = "serdehex", rename = "castHash")]
+    pub cast_hash: Vec<u8>,
+    #[serde(rename = "authorFid")]
+    pub author_fid: u64,
+}
+
+/// `pin: null` means the channel has no pin — never pinned, or pinned and then
+/// cleared. Nesting the pair keeps a half-populated pin unrepresentable.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelPinResponse {
-    #[serde(
-        default,
-        with = "serdehexopt",
-        rename = "castHash",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub cast_hash: Option<Vec<u8>>,
-    #[serde(rename = "authorFid", skip_serializing_if = "Option::is_none")]
-    pub author_fid: Option<u64>,
+    pub pin: Option<ChannelPin>,
 }
 
 #[allow(non_snake_case)]
@@ -4626,8 +4628,10 @@ where
             .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel pin"))?
             .into_inner();
         Ok(ChannelPinResponse {
-            cast_hash: response.cast_hash,
-            author_fid: response.author_fid,
+            pin: response.pin.map(|pin| ChannelPin {
+                cast_hash: pin.cast_hash,
+                author_fid: pin.author_fid,
+            }),
         })
     }
 

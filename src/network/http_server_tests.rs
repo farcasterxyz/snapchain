@@ -543,7 +543,7 @@ pub mod tests {
     fn channel_message_read_response_json_shapes() {
         use crate::network::http_server::{
             CastingMode, ChannelMemberResponse, ChannelMemberState, ChannelMetadataResponse,
-            ChannelPinResponse, MembershipMode,
+            ChannelPin, ChannelPinResponse, MembershipMode,
         };
 
         let member = serde_json::to_value(ChannelMemberResponse {
@@ -555,12 +555,19 @@ pub mod tests {
         assert_eq!(member["lastActionTs"], 42);
 
         let pin = serde_json::to_value(ChannelPinResponse {
-            cast_hash: Some(vec![0xAB; 20]),
-            author_fid: Some(123),
+            pin: Some(ChannelPin {
+                cast_hash: vec![0xAB; 20],
+                author_fid: 123,
+            }),
         })
         .unwrap();
-        assert_eq!(pin["castHash"], format!("0x{}", "ab".repeat(20)));
-        assert_eq!(pin["authorFid"], 123);
+        assert_eq!(pin["pin"]["castHash"], format!("0x{}", "ab".repeat(20)));
+        assert_eq!(pin["pin"]["authorFid"], 123);
+
+        // No pin is one absent object, not two independently absent fields — a
+        // castHash without an authorFid is unrepresentable.
+        let unpinned = serde_json::to_value(ChannelPinResponse { pin: None }).unwrap();
+        assert_eq!(unpinned["pin"], serde_json::Value::Null);
 
         let metadata = serde_json::to_value(ChannelMetadataResponse {
             name: None,

@@ -223,6 +223,15 @@ message ChannelMemberRequest {
   uint64 fid = 2;
 }
 
+// The two fields are paired: CHANNEL_MEMBER_STATE_NONE means the fid has no
+// membership row and `last_action_ts` is absent; any other state always carries
+// the timestamp of the ChannelMember message that produced it. The server never
+// emits the mixed combinations.
+//
+// Unlike ChannelPinResponse this is not nested, because it would not buy the same
+// guarantee — proto3 cannot exclude the zero variant from an enum, so a NONE
+// state inside a present wrapper would remain representable and the pairing would
+// still rest on this comment.
 message ChannelMemberResponse {
   ChannelMemberState state = 1;
   optional uint32 last_action_ts = 2;
@@ -247,9 +256,22 @@ message ChannelMembersResponse {
   optional bytes next_page_token = 2;
 }
 
+// A pinned cast. Both fields are always populated together — a pin cannot exist
+// without the fid that set it.
+message ChannelPin {
+  bytes cast_hash = 1;
+  uint64 author_fid = 2;
+}
+
+// `pin` absent means the channel has no pin. That covers a channel that was never
+// pinned and one whose pin was cleared by an unpin (a ChannelPin message with an
+// empty cast_hash); the two are deliberately indistinguishable here.
+//
+// The pair is nested rather than two sibling optionals so a half-populated
+// response — a cast_hash with no author, or an author with no cast_hash — is not
+// representable on the wire.
 message ChannelPinResponse {
-  optional bytes cast_hash = 1;
-  optional uint64 author_fid = 2;
+  optional ChannelPin pin = 1;
 }
 
 message ChannelModerationsRequest {
