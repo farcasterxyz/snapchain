@@ -4371,7 +4371,7 @@ mod tests {
 
             // 1. Pre-cutover: the data shard already holds the live-merged verification.
             engine
-                .commit_replicator_message_for_test(&add)
+                .commit_replicator_message_for_test(&add, false)
                 .expect("pre-cutover live merge must succeed");
             {
                 let stores = engine.get_stores();
