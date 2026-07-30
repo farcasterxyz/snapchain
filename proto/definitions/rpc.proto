@@ -91,6 +91,11 @@ service HubService {
   // fresh post-activation verification of the same address. Do not surface
   // fid 0 as "abandoned".
   //
+  // The ambiguity is accepted, not pending: no sentinel or extra field could
+  // resolve it, since the node has the same absent replica row in both cases.
+  // Distinguishing them would require reading pre-activation verification
+  // history that shard-0 admission deliberately excludes.
+  //
   // Expiry is returned as-is and may be in the past. The registry contract
   // emits no onchain event when a lapsed registration's grace period ends, so
   // this endpoint reports the last known registration (owner address + expiry)

@@ -1450,11 +1450,18 @@ impl ShardEngine {
                                 // structured fields below are what connect that mismatch
                                 // back to its cause.
                                 //
-                                // Control flow is deliberately unchanged. Whether a
-                                // replica that cannot apply a decided event should refuse
-                                // to commit rather than continue diverged is a separate,
-                                // consensus-sensitive decision: propagating here would
-                                // turn a deterministic replay bug into a chain halt.
+                                // Log-and-continue is the settled behavior here, not a
+                                // deferral. Propagating instead — a replica refusing to
+                                // commit an event it cannot apply — was considered and
+                                // rejected on two grounds. A deterministic failure fails
+                                // identically on every node, so propagating would halt the
+                                // chain rather than isolate one bad replica; and a
+                                // node-local failure already self-reports, because the
+                                // skipped `update_trie` diverges this node's root from its
+                                // peers'. Reaching this arm at all is expected to be
+                                // vanishingly rare, which is what makes an error-level
+                                // signal proportionate to it. Revisit only with evidence
+                                // that it fires in practice.
                                 let msg_type = Self::replayed_message_type_label(block_event);
                                 self.metrics.count(
                                     "block_event.replay_failed",
