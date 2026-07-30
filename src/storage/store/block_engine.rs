@@ -13,10 +13,10 @@ use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberState,
     ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef,
-    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8,
-    MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, StoreOptions, VerificationStore,
-    VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
+    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef,
+    DerivedIndexGate, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, StoreOptions,
+    VerificationStore, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -1207,23 +1207,28 @@ impl BlockEngine {
         // `dispatch` is minted only by the gated validation arm after type/body agreement. Merge
         // does not re-read a version or re-dispatch on the wire type, so those decisions are
         // structurally unable to disagree.
+        let gate = DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled);
         let event = match dispatch {
-            ChannelMergeDispatch::Update => {
-                ChannelUpdateStore::merge(&self.stores.channel_update_store, message, txn_batch)?
-            }
-            ChannelMergeDispatch::Member => ChannelMemberStore::merge_with_gated_by_fid_index(
+            ChannelMergeDispatch::Update => ChannelUpdateStore::merge(
+                &self.stores.channel_update_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
+            ChannelMergeDispatch::Member => ChannelMemberStore::merge(
                 &self.stores.channel_member_store,
                 message,
                 txn_batch,
-                channel_messages_enabled,
+                gate,
             )?,
             ChannelMergeDispatch::Pin => {
-                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
+                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch, gate)?
             }
             ChannelMergeDispatch::Moderate => ChannelModerateStore::merge(
                 &self.stores.channel_moderate_store,
                 message,
                 txn_batch,
+                gate,
             )?,
         };
         Ok(vec![event])

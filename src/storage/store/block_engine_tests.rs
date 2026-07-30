@@ -9,7 +9,7 @@ mod tests {
     };
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        make_ts_hash, ChannelMemberState, ChannelMemberStore, ChannelUpdateStore,
+        make_ts_hash, ChannelMemberState, ChannelMemberStore, ChannelUpdateStore, DerivedIndexGate,
         HubEventStorageExt, IntoU8, MergeContext, StorageSlot, VerificationStore,
     };
     use crate::storage::store::block_engine::{
@@ -443,7 +443,13 @@ mod tests {
                 validate_channel_for_test(&engine, &grant, &mut txn).is_ok(),
                 "owner must be able to seed {action:?}"
             );
-            ChannelMemberStore::merge(&stores.channel_member_store, &grant, &mut txn).unwrap();
+            ChannelMemberStore::merge(
+                &stores.channel_member_store,
+                &grant,
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
         }
 
         let pin_body = |channel_id: Vec<u8>| {
@@ -1188,6 +1194,7 @@ mod tests {
                     timestamp + 1 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -1199,7 +1206,13 @@ mod tests {
             timestamp + 20,
         );
         assert!(validate_channel_for_test(&engine, &tenth, &mut txn).is_ok());
-        ChannelMemberStore::merge(&stores.channel_member_store, &tenth, &mut txn).unwrap();
+        ChannelMemberStore::merge(
+            &stores.channel_member_store,
+            &tenth,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         assert_eq!(
             ChannelMemberStore::live_moderator_count(
                 &stores.channel_member_store,
@@ -1288,6 +1301,7 @@ mod tests {
                     timestamp + mode as u32 + 1,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             let self_add = channel_member_message(
@@ -1314,6 +1328,7 @@ mod tests {
                 timestamp + 30,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelMemberStore::merge(
@@ -1326,6 +1341,7 @@ mod tests {
                 timestamp + 31,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(

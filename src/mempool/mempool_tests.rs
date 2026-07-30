@@ -14,7 +14,7 @@ mod tests {
             StorageUnitType, Transaction,
         },
         storage::store::{
-            account::{make_ts_hash, ChannelModerateStore},
+            account::{make_ts_hash, ChannelModerateStore, DerivedIndexGate},
             block_engine::BlockEngine,
             block_engine_test_helpers,
             engine::ShardEngine,
@@ -210,7 +210,13 @@ mod tests {
         let distinct_slot = moderate(0x33);
         let stores = block_engine.stores();
         let mut txn = crate::storage::db::RocksDbTransactionBatch::new();
-        ChannelModerateStore::merge(&stores.channel_moderate_store, &merged, &mut txn).unwrap();
+        ChannelModerateStore::merge(
+            &stores.channel_moderate_store,
+            &merged,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         stores.db.commit(txn).unwrap();
 
         assert!(mempool

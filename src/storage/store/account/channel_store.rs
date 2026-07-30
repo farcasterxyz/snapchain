@@ -98,6 +98,42 @@ pub struct ChannelPage<T> {
     pub next_page_token: Option<Vec<u8>>,
 }
 
+/// Whether a merge may write the `ChannelMessages`-gated derived indices — today
+/// only the member by-fid index, which lives outside the trie.
+///
+/// This is a required argument on every channel merge rather than a default,
+/// because getting it wrong is invisible: a `Skip`ped merge still writes the slot,
+/// updates the trie, and produces a matching state root, but the row never appears
+/// in `memberships_by_fid`, so `GetChannelMembershipsByFid` reports "no memberships"
+/// with no error anywhere. The stores whose defs have no gated index today still
+/// take it, so adding one to them later is a compile error at each call site rather
+/// than a silent skip on the replay path (see the topology note in version.rs —
+/// catch-all match arms provide no compiler-enforced reminder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedIndexGate {
+    /// `ChannelMessages` is active for this merge's clock; write derived indices.
+    Write,
+    /// Feature inactive for this merge's clock; primary slot state only.
+    Skip,
+}
+
+impl DerivedIndexGate {
+    /// Lifts a caller's already-resolved `ChannelMessages` gate. Callers that hold
+    /// the boolean should use this rather than picking a variant by hand, so the
+    /// merge cannot disagree with the gate its own dispatch arm was chosen under.
+    pub fn when_channel_messages_enabled(channel_messages_enabled: bool) -> Self {
+        if channel_messages_enabled {
+            Self::Write
+        } else {
+            Self::Skip
+        }
+    }
+
+    fn writes_derived_indices(self) -> bool {
+        self == Self::Write
+    }
+}
+
 #[derive(Clone)]
 pub struct ChannelUpdateStoreDef {
     prune_size_limit: u32,
@@ -318,7 +354,7 @@ trait ChannelSlotStoreDef: StoreDef {
         &self,
         _txn: &mut RocksDbTransactionBatch,
         _message: &Message,
-        _channel_messages_enabled: bool,
+        _gate: DerivedIndexGate,
     ) -> Result<(), HubError> {
         Ok(())
     }
@@ -387,7 +423,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     store: &Store<T>,
     message: &Message,
     txn: &mut RocksDbTransactionBatch,
-    channel_messages_enabled: bool,
+    gate: DerivedIndexGate,
 ) -> Result<HubEvent, HubError> {
     // DATA-SHARD ADMISSION PROVENANCE: a channel message reaches this shared slot merge on a data
     // shard only as (1) a ChannelMessages-gated BlockEvent that shard 0 minted after its authority
@@ -488,7 +524,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     }
     let event =
         store.merge_add_with_conflicts(&ts_hash, message, &mut slot_txn, deleted_messages)?;
-    store_def.build_gated_secondary_indices(&mut slot_txn, message, channel_messages_enabled)?;
+    store_def.build_gated_secondary_indices(&mut slot_txn, message, gate)?;
     txn.merge(slot_txn);
     Ok(event)
 }
@@ -684,9 +720,9 @@ impl ChannelSlotStoreDef for ChannelMemberStoreDef {
         &self,
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
-        channel_messages_enabled: bool,
+        gate: DerivedIndexGate,
     ) -> Result<(), HubError> {
-        if !channel_messages_enabled {
+        if !gate.writes_derived_indices() {
             return Ok(());
         }
         let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
@@ -845,8 +881,9 @@ impl ChannelUpdateStore {
         store: &Store<ChannelUpdateStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn, false)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
@@ -881,17 +918,9 @@ impl ChannelMemberStore {
         store: &Store<ChannelMemberStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn, false)
-    }
-
-    pub fn merge_with_gated_by_fid_index(
-        store: &Store<ChannelMemberStoreDef>,
-        message: &Message,
-        txn: &mut RocksDbTransactionBatch,
-        channel_messages_enabled: bool,
-    ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn, channel_messages_enabled)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8], target_fid: u64) -> Result<Vec<u8>, HubError> {
@@ -1067,8 +1096,9 @@ impl ChannelPinStore {
         store: &Store<ChannelPinStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn, false)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
@@ -1110,8 +1140,9 @@ impl ChannelModerateStore {
         store: &Store<ChannelModerateStoreDef>,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: DerivedIndexGate,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn, false)
+        merge_slot(store, message, txn, gate)
     }
 
     pub fn slot_key(channel_id: &[u8], cast_hash: &[u8]) -> Vec<u8> {

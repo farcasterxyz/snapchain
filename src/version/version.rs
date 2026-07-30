@@ -306,10 +306,12 @@ impl EngineVersion {
             // writers.
             //
             // Keep every future widening of this topology gated in the same change that makes it
-            // reachable. The allowlist, replay dispatch, replication cache, and derived index
-            // writes each require an explicit ChannelMessages check; catch-all match arms and
-            // StoreType::None provide no compiler-enforced reminder. A type or index that mutates
-            // before its gate creates permanent replay divergence.
+            // reachable. The allowlist, replay dispatch, and replication cache each require an
+            // explicit ChannelMessages check; catch-all match arms and StoreType::None provide no
+            // compiler-enforced reminder. A type or index that mutates before its gate creates
+            // permanent replay divergence. Derived index writes are the one case that IS
+            // compiler-enforced: `DerivedIndexGate` is a required argument on all four channel
+            // merges, so a store that gains a gated index cannot silently skip it.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents

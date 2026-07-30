@@ -32,8 +32,9 @@ mod tests {
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
         make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
-        ChannelPinStore, ChannelUpdateStore, HubEventIdGenerator, HubEventStorageExt,
-        VerificationStoreDef, CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
+        ChannelPinStore, ChannelUpdateStore, DerivedIndexGate, HubEventIdGenerator,
+        HubEventStorageExt, VerificationStoreDef, CHANNEL_MEMBER_SLOT_CAP,
+        CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -152,26 +153,38 @@ mod tests {
         let mut txn = RocksDbTransactionBatch::new();
         match message.msg_type() {
             proto::MessageType::ChannelUpdate => {
-                ChannelUpdateStore::merge(&block_stores.channel_update_store, message, &mut txn)
-                    .unwrap();
+                ChannelUpdateStore::merge(
+                    &block_stores.channel_update_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
             }
             proto::MessageType::ChannelMember => {
-                ChannelMemberStore::merge_with_gated_by_fid_index(
+                ChannelMemberStore::merge(
                     &block_stores.channel_member_store,
                     message,
                     &mut txn,
-                    true,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap();
             }
             proto::MessageType::ChannelPin => {
-                ChannelPinStore::merge(&block_stores.channel_pin_store, message, &mut txn).unwrap();
+                ChannelPinStore::merge(
+                    &block_stores.channel_pin_store,
+                    message,
+                    &mut txn,
+                    DerivedIndexGate::Write,
+                )
+                .unwrap();
             }
             proto::MessageType::ChannelModerate => {
                 ChannelModerateStore::merge(
                     &block_stores.channel_moderate_store,
                     message,
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap();
             }

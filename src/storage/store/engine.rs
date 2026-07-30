@@ -20,8 +20,8 @@ use crate::proto::{
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     BlockEventStorageError, CastStore, ChannelMemberStore, ChannelModerateStore, ChannelPinStore,
-    ChannelUpdateStore, MergeContext, MessagesPage, StorageLendStore, StoreOptions,
-    VerificationStore,
+    ChannelUpdateStore, DerivedIndexGate, MergeContext, MessagesPage, StorageLendStore,
+    StoreOptions, VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -1866,26 +1866,29 @@ impl ShardEngine {
                     &self.stores.channel_update_store,
                     msg,
                     txn_batch,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
                 )?]
             }
             MessageType::ChannelMember if channel_messages_enabled => {
-                vec![ChannelMemberStore::merge_with_gated_by_fid_index(
+                vec![ChannelMemberStore::merge(
                     &self.stores.channel_member_store,
                     msg,
                     txn_batch,
-                    channel_messages_enabled,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
                 )?]
             }
             MessageType::ChannelPin if channel_messages_enabled => vec![ChannelPinStore::merge(
                 &self.stores.channel_pin_store,
                 msg,
                 txn_batch,
+                DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
             )?],
             MessageType::ChannelModerate if channel_messages_enabled => {
                 vec![ChannelModerateStore::merge(
                     &self.stores.channel_moderate_store,
                     msg,
                     txn_batch,
+                    DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled),
                 )?]
             }
             unhandled_type => {

@@ -10,7 +10,7 @@ mod tests {
     use crate::storage::store::account::{
         ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
         ChannelModerateStoreDef, ChannelModerationState, ChannelPinStore, ChannelPinStoreDef,
-        ChannelUpdateStore, ChannelUpdateStoreDef, Store, StoreEventHandler,
+        ChannelUpdateStore, ChannelUpdateStoreDef, DerivedIndexGate, Store, StoreEventHandler,
         CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP,
     };
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
@@ -192,7 +192,7 @@ mod tests {
         let active_channel = channel_id(0x20);
 
         let mut txn = RocksDbTransactionBatch::new();
-        ChannelMemberStore::merge_with_gated_by_fid_index(
+        ChannelMemberStore::merge(
             &stores.member,
             &member_message(
                 1,
@@ -202,7 +202,7 @@ mod tests {
                 1,
             ),
             &mut txn,
-            false,
+            DerivedIndexGate::Skip,
         )
         .unwrap();
         stores.db.commit(txn).unwrap();
@@ -220,7 +220,7 @@ mod tests {
         .is_empty());
 
         let mut txn = RocksDbTransactionBatch::new();
-        ChannelMemberStore::merge_with_gated_by_fid_index(
+        ChannelMemberStore::merge(
             &stores.member,
             &member_message(
                 2,
@@ -230,7 +230,7 @@ mod tests {
                 2,
             ),
             &mut txn,
-            true,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         stores.db.commit(txn).unwrap();
@@ -275,7 +275,7 @@ mod tests {
         let mut txn = RocksDbTransactionBatch::new();
 
         for (timestamp, fid) in [(1, 10), (2, 20)] {
-            ChannelMemberStore::merge_with_gated_by_fid_index(
+            ChannelMemberStore::merge(
                 &stores.member,
                 &member_message(
                     1,
@@ -285,12 +285,12 @@ mod tests {
                     timestamp,
                 ),
                 &mut txn,
-                true,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
         for (index, channel) in memberships_channels.iter().enumerate() {
-            ChannelMemberStore::merge_with_gated_by_fid_index(
+            ChannelMemberStore::merge(
                 &stores.member,
                 &member_message(
                     1,
@@ -300,7 +300,7 @@ mod tests {
                     index as u32 + 3,
                 ),
                 &mut txn,
-                true,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -315,6 +315,7 @@ mod tests {
                     index as u32 + 5,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -462,7 +463,7 @@ mod tests {
             (&lower_channel, 20, 2),
             (&higher_channel, 30, 3),
         ] {
-            ChannelMemberStore::merge_with_gated_by_fid_index(
+            ChannelMemberStore::merge(
                 &stores.member,
                 &member_message(
                     1,
@@ -472,7 +473,7 @@ mod tests {
                     timestamp,
                 ),
                 &mut txn,
-                true,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -487,6 +488,7 @@ mod tests {
                     index as u32 + 4,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -675,12 +677,22 @@ mod tests {
         );
 
         let mut txn = RocksDbTransactionBatch::new();
-        let incumbent_event =
-            ChannelUpdateStore::merge(&stores.update, &incumbent, &mut txn).unwrap();
+        let incumbent_event = ChannelUpdateStore::merge(
+            &stores.update,
+            &incumbent,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         trie.update_for_event(&ctx, &stores.db, &incumbent_event, &mut txn)
             .unwrap();
-        let replacement_event =
-            ChannelUpdateStore::merge(&stores.update, &replacement, &mut txn).unwrap();
+        let replacement_event = ChannelUpdateStore::merge(
+            &stores.update,
+            &replacement,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         trie.update_for_event(&ctx, &stores.db, &replacement_event, &mut txn)
             .unwrap();
         assert_eq!(deleted_messages(&replacement_event), &[incumbent.clone()]);
@@ -726,16 +738,29 @@ mod tests {
         let update_b = update_message(2, channel.clone(), 100, Some("b"), None, None, None);
         let update_a_again =
             update_message(1, channel.clone(), 50, Some("a-again"), None, None, None);
-        ChannelUpdateStore::merge(&stores.update, &update_a, &mut txn).unwrap();
+        ChannelUpdateStore::merge(&stores.update, &update_a, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelUpdateStore::merge(&stores.update, &update_b, &mut txn).unwrap()
+                &ChannelUpdateStore::merge(
+                    &stores.update,
+                    &update_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[update_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelUpdateStore::merge(&stores.update, &update_a_again, &mut txn).unwrap()
+                &ChannelUpdateStore::merge(
+                    &stores.update,
+                    &update_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[update_b]
         );
@@ -743,16 +768,29 @@ mod tests {
         let member_a = member_message(1, channel.clone(), 99, ChannelMemberAction::AddMember, 900);
         let member_b = member_message(2, channel.clone(), 99, ChannelMemberAction::Ban, 100);
         let member_a_again = member_message(1, channel.clone(), 99, ChannelMemberAction::Unban, 50);
-        ChannelMemberStore::merge(&stores.member, &member_a, &mut txn).unwrap();
+        ChannelMemberStore::merge(&stores.member, &member_a, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelMemberStore::merge(&stores.member, &member_b, &mut txn).unwrap()
+                &ChannelMemberStore::merge(
+                    &stores.member,
+                    &member_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[member_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelMemberStore::merge(&stores.member, &member_a_again, &mut txn).unwrap()
+                &ChannelMemberStore::merge(
+                    &stores.member,
+                    &member_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[member_b]
         );
@@ -760,13 +798,24 @@ mod tests {
         let pin_a = pin_message(1, channel.clone(), cast_hash(1), 900);
         let pin_b = pin_message(2, channel.clone(), cast_hash(2), 100);
         let pin_a_again = pin_message(1, channel.clone(), Vec::new(), 50);
-        ChannelPinStore::merge(&stores.pin, &pin_a, &mut txn).unwrap();
+        ChannelPinStore::merge(&stores.pin, &pin_a, &mut txn, DerivedIndexGate::Write).unwrap();
         assert_eq!(
-            deleted_messages(&ChannelPinStore::merge(&stores.pin, &pin_b, &mut txn).unwrap()),
+            deleted_messages(
+                &ChannelPinStore::merge(&stores.pin, &pin_b, &mut txn, DerivedIndexGate::Write)
+                    .unwrap()
+            ),
             &[pin_a]
         );
         assert_eq!(
-            deleted_messages(&ChannelPinStore::merge(&stores.pin, &pin_a_again, &mut txn).unwrap()),
+            deleted_messages(
+                &ChannelPinStore::merge(
+                    &stores.pin,
+                    &pin_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
+            ),
             &[pin_b]
         );
 
@@ -787,17 +836,34 @@ mod tests {
         );
         let moderate_a_again =
             moderate_message(1, channel, moderated_cast, ChannelModerateAction::Hide, 50);
-        ChannelModerateStore::merge(&stores.moderate, &moderate_a, &mut txn).unwrap();
+        ChannelModerateStore::merge(
+            &stores.moderate,
+            &moderate_a,
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
         assert_eq!(
             deleted_messages(
-                &ChannelModerateStore::merge(&stores.moderate, &moderate_b, &mut txn).unwrap()
+                &ChannelModerateStore::merge(
+                    &stores.moderate,
+                    &moderate_b,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[moderate_a]
         );
         assert_eq!(
             deleted_messages(
-                &ChannelModerateStore::merge(&stores.moderate, &moderate_a_again, &mut txn)
-                    .unwrap()
+                &ChannelModerateStore::merge(
+                    &stores.moderate,
+                    &moderate_a_again,
+                    &mut txn,
+                    DerivedIndexGate::Write
+                )
+                .unwrap()
             ),
             &[moderate_b]
         );
@@ -820,12 +886,14 @@ mod tests {
                 Some(MembershipMode::Open),
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelUpdateStore::merge(
             &stores.update,
             &update_message(1, channel.clone(), 2, Some("second"), None, None, None),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -869,6 +937,7 @@ mod tests {
                         &stores.member,
                         &member_message(1, channel.clone(), target_fid, prior_action, timestamp),
                         &mut txn,
+                        DerivedIndexGate::Write,
                     )
                     .unwrap();
                     timestamp += 1;
@@ -877,6 +946,7 @@ mod tests {
                     &stores.member,
                     &member_message(1, channel.clone(), target_fid, action, timestamp),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap();
                 timestamp += 1;
@@ -918,6 +988,7 @@ mod tests {
                 &stores.member,
                 &member_message(1, channel.clone(), target_fid, action, index as u32 + 1),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -942,12 +1013,14 @@ mod tests {
             &stores.pin,
             &pin_message(1, channel.clone(), cast_hash(8), 1),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         ChannelPinStore::merge(
             &stores.pin,
             &pin_message(1, channel.clone(), Vec::new(), 2),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -968,6 +1041,7 @@ mod tests {
                 3,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -990,6 +1064,7 @@ mod tests {
                 4,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
         assert_eq!(
@@ -1032,6 +1107,7 @@ mod tests {
                     target_fid as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -1049,7 +1125,9 @@ mod tests {
                 action,
                 CHANNEL_MEMBER_SLOT_CAP + index as u32 + 1,
             );
-            let error = ChannelMemberStore::merge(&stores.member, &mint, &mut txn).unwrap_err();
+            let error =
+                ChannelMemberStore::merge(&stores.member, &mint, &mut txn, DerivedIndexGate::Write)
+                    .unwrap_err();
             assert_eq!(error.message, "channel slot cap exceeded");
             assert_eq!(txn.batch, before, "failed {action:?} mint changed txn");
         }
@@ -1065,6 +1143,7 @@ mod tests {
                     CHANNEL_MEMBER_SLOT_CAP + 100 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -1097,6 +1176,7 @@ mod tests {
                     index + 1,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
         }
@@ -1114,7 +1194,13 @@ mod tests {
                 action,
                 CHANNEL_MODERATE_SLOT_CAP + index as u32 + 1,
             );
-            let error = ChannelModerateStore::merge(&stores.moderate, &mint, &mut txn).unwrap_err();
+            let error = ChannelModerateStore::merge(
+                &stores.moderate,
+                &mint,
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap_err();
             assert_eq!(error.message, "channel slot cap exceeded");
             assert_eq!(txn.batch, before, "failed {action:?} mint changed txn");
         }
@@ -1130,6 +1216,7 @@ mod tests {
                     CHANNEL_MODERATE_SLOT_CAP + 100 + index as u32,
                 ),
                 &mut txn,
+                DerivedIndexGate::Write,
             )
             .unwrap();
             assert_eq!(
@@ -1158,6 +1245,7 @@ mod tests {
                 1,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -1175,6 +1263,7 @@ mod tests {
                 2,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap_err();
         assert_eq!(error.message, "channel id must be 32 bytes");
@@ -1209,24 +1298,28 @@ mod tests {
                     &stores.update,
                     &update_message(1, bad.clone(), 1, Some("x"), None, None, None),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelMemberStore::merge(
                     &stores.member,
                     &member_message(1, bad.clone(), 9, ChannelMemberAction::AddMember, 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelPinStore::merge(
                     &stores.pin,
                     &pin_message(1, bad.clone(), cast_hash(1), 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
                 ChannelModerateStore::merge(
                     &stores.moderate,
                     &moderate_message(1, bad.clone(), cast_hash(1), ChannelModerateAction::Hide, 1),
                     &mut txn,
+                    DerivedIndexGate::Write,
                 )
                 .unwrap_err(),
             ] {
@@ -1245,6 +1338,7 @@ mod tests {
                 1,
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap_err();
         assert_eq!(error.message, "channel moderate cast hash must be 20 bytes");
@@ -1269,6 +1363,7 @@ mod tests {
                 Some(MembershipMode::None),
             ),
             &mut txn,
+            DerivedIndexGate::Write,
         )
         .unwrap();
 
@@ -1291,7 +1386,9 @@ mod tests {
             Body::ChannelUpdateBody(body) => body.casting_mode = Some(9999),
             _ => unreachable!(),
         }
-        let error = ChannelUpdateStore::merge(&stores.update, &poison, &mut txn).unwrap_err();
+        let error =
+            ChannelUpdateStore::merge(&stores.update, &poison, &mut txn, DerivedIndexGate::Write)
+                .unwrap_err();
         assert_eq!(error.message, "invalid channel casting mode");
         assert!(txn.batch.is_empty());
         assert!(
@@ -1307,9 +1404,12 @@ mod tests {
         let channel = channel_id(0x6C);
         let mut txn = RocksDbTransactionBatch::new();
         let message = update_message(1, channel, 1, Some("only"), None, None, None);
-        ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap();
+        ChannelUpdateStore::merge(&stores.update, &message, &mut txn, DerivedIndexGate::Write)
+            .unwrap();
         let before = txn.batch.clone();
-        let error = ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap_err();
+        let error =
+            ChannelUpdateStore::merge(&stores.update, &message, &mut txn, DerivedIndexGate::Write)
+                .unwrap_err();
         assert_eq!(error.message, "message has already been merged");
         assert_eq!(txn.batch, before, "duplicate re-merge mutated the txn");
     }
