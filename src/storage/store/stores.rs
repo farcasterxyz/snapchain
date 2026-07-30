@@ -54,6 +54,16 @@ pub struct Stores {
     pub reaction_store: Store<ReactionStoreDef>,
     pub user_data_store: Store<UserDataStoreDef>,
     pub verification_store: Store<VerificationStoreDef>,
+    // REPLICA, NOT AUTHORITY. These four are byte-identical in type and name to the
+    // fields on `BlockStores`, but they hold a data shard's copy of shard-0 channel
+    // state, written only by gated BlockEvent replay and replication — never by
+    // admission. Two consequences for readers:
+    //   - authority questions (who may moderate, is the channel parked) must be
+    //     answered from `BlockStores`; a data shard has no registry or verification
+    //     state to decide them with. Every channel read RPC goes to `block_stores`.
+    //   - a replica holds only what fanned out after activation. Rows merged on
+    //     shard 0 before this increment are not emitted retroactively, so absence
+    //     here is not evidence of absence on shard 0.
     pub channel_update_store: Store<ChannelUpdateStoreDef>,
     pub channel_member_store: Store<ChannelMemberStoreDef>,
     pub channel_pin_store: Store<ChannelPinStoreDef>,

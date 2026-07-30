@@ -334,6 +334,11 @@ pub struct BlockStores {
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub verification_store: Store<VerificationStoreDef>,
+    // AUTHORITY. These four are the only channel stores an admission decision may
+    // consult, and the only ones a read should serve from — the identically typed
+    // and named fields on `Stores` are per-data-shard replicas of them. Shard 0 is
+    // where the registry fold and the verification replica live, so it is the only
+    // place channel authority is computable.
     pub channel_update_store: Store<ChannelUpdateStoreDef>,
     pub channel_member_store: Store<ChannelMemberStoreDef>,
     pub channel_pin_store: Store<ChannelPinStoreDef>,
