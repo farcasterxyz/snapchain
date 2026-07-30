@@ -307,6 +307,21 @@ fn load_slot_message<T: ChannelSlotStoreDef + Clone>(
     let Some(pointer) = get_from_db_or_txn(&store.db(), txn, slot_key)? else {
         return Ok(None);
     };
+    message_for_slot_pointer(store, txn, &pointer).map(Some)
+}
+
+/// Resolves an already-read slot pointer to its primary message.
+///
+/// Split out from `load_slot_message` for the by-channel enumerators: their
+/// iterator callback is handed the pointer as the row's value, so going back
+/// through `load_slot_message` would re-fetch a key RocksDB just gave them —
+/// one avoidable point-get per row, on reads that scan up to a channel's whole
+/// slot cap when a state filter matches nothing.
+fn message_for_slot_pointer<T: ChannelSlotStoreDef + Clone>(
+    store: &Store<T>,
+    txn: &RocksDbTransactionBatch,
+    pointer: &[u8],
+) -> Result<Message, HubError> {
     if pointer.len() != 4 + TS_HASH_LENGTH {
         warn!(
             actual_length = pointer.len(),
@@ -317,10 +332,10 @@ fn load_slot_message<T: ChannelSlotStoreDef + Clone>(
             "channel slot pointer has invalid length",
         ));
     }
-    let fid = read_fid_key(&pointer, 0);
+    let fid = read_fid_key(pointer, 0);
     let ts_hash: [u8; TS_HASH_LENGTH] = pointer[4..].try_into().unwrap();
     match get_message(&store.db(), txn, fid, store.store_def().postfix(), &ts_hash)? {
-        Some(message) => Ok(Some(message)),
+        Some(message) => Ok(message),
         None => {
             warn!(fid, "Channel slot points to a missing message");
             Err(HubError::invalid_internal_state(
@@ -1021,6 +1036,7 @@ impl ChannelMemberStore {
     ) -> Result<ChannelPage<ChannelMemberEntry>, HubError> {
         let prefix = channel_index_key(ChannelIndex::MemberSlot, channel_id, &[]);
         require_page_token_in_prefix(&prefix, page_options)?;
+        let empty_txn = RocksDbTransactionBatch::new();
         let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
         let mut entries = Vec::new();
         let mut last_key = None;
@@ -1028,20 +1044,23 @@ impl ChannelMemberStore {
             Some(prefix.clone()),
             Some(increment_vec_u8(&prefix)),
             page_options,
-            |key, _| {
+            |key, pointer| {
                 if key.len() != prefix.len() + 4 {
                     return Err(HubError::invalid_internal_state(
                         "channel member slot key has invalid length",
                     ));
                 }
                 let fid = read_fid_key(key, prefix.len());
-                let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
-                    warn!(
-                        channel_id = hex::encode(channel_id),
-                        fid, "channel member slot is missing for an enumerated index key",
-                    );
-                    HubError::invalid_internal_state("channel member slot is missing")
-                })?;
+                // `pointer` is the row's own value, so this resolves the primary
+                // message without re-reading the slot key.
+                let message =
+                    message_for_slot_pointer(store, &empty_txn, pointer).map_err(|err| {
+                        warn!(
+                            channel_id = hex::encode(channel_id),
+                            fid, "channel member slot could not be resolved from its pointer",
+                        );
+                        err
+                    })?;
                 let state = member_state_for_message(&message)?;
                 if state_filter.is_none_or(|filter| filter == state) {
                     let last_action_ts = message
@@ -1226,6 +1245,7 @@ impl ChannelModerateStore {
     ) -> Result<ChannelPage<ChannelModerationEntry>, HubError> {
         let prefix = channel_index_key(ChannelIndex::ModerateSlot, channel_id, &[]);
         require_page_token_in_prefix(&prefix, page_options)?;
+        let empty_txn = RocksDbTransactionBatch::new();
         let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
         let mut entries = Vec::new();
         let mut last_key = None;
@@ -1233,19 +1253,22 @@ impl ChannelModerateStore {
             Some(prefix.clone()),
             Some(increment_vec_u8(&prefix)),
             page_options,
-            |key, _| {
+            |key, pointer| {
                 if key.len() != prefix.len() + CHANNEL_MODERATE_CAST_HASH_LENGTH {
                     return Err(HubError::invalid_internal_state(
                         "channel moderate slot key has invalid length",
                     ));
                 }
-                let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
-                    warn!(
-                        channel_id = hex::encode(channel_id),
-                        "channel moderate slot is missing for an enumerated index key",
-                    );
-                    HubError::invalid_internal_state("channel moderate slot is missing")
-                })?;
+                // `pointer` is the row's own value, so this resolves the primary
+                // message without re-reading the slot key.
+                let message =
+                    message_for_slot_pointer(store, &empty_txn, pointer).map_err(|err| {
+                        warn!(
+                            channel_id = hex::encode(channel_id),
+                            "channel moderate slot could not be resolved from its pointer",
+                        );
+                        err
+                    })?;
                 let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
                     Some(Body::ChannelModerateBody(body)) => body,
                     _ => return Err(invalid_body("ChannelModerate")),
