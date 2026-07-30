@@ -601,6 +601,56 @@ pub mod tests {
     }
 
     #[test]
+    fn channel_read_errors_separate_server_faults_from_caller_input() {
+        use crate::network::http_server::ErrorResponse;
+        use hyper::StatusCode;
+
+        // The channel reads sit on a brand-new, integrity-sensitive index, and
+        // `handle_request` maps every handler error to 400 unless told otherwise.
+        // Without this split an operator watching 4xx/5xx during a replica-corruption
+        // incident sees "channel slot points to a missing message" as client traffic.
+        for code in [
+            tonic::Code::Internal,
+            tonic::Code::DataLoss,
+            tonic::Code::Unknown,
+        ] {
+            let err = ErrorResponse::from_status(
+                &Status::new(code, "channel slot points to a missing message"),
+                "Failed to get channel members",
+            );
+            assert_eq!(
+                err.status,
+                Some(StatusCode::INTERNAL_SERVER_ERROR),
+                "{code:?} is a server fault"
+            );
+            assert_eq!(err.error, "Failed to get channel members");
+        }
+
+        // Caller-supplied input keeps 400: a foreign page token, a malformed
+        // channel_id, an unregistered channel.
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
+        ] {
+            let err = ErrorResponse::from_status(
+                &Status::new(code, "page token does not belong to this channel"),
+                "Failed to get channel members",
+            );
+            assert_eq!(err.status, None, "{code:?} is caller input");
+        }
+
+        // The status is transport-only and must never leak into the JSON body.
+        let body = serde_json::to_value(ErrorResponse::from_status(
+            &Status::internal("boom"),
+            "Failed to get channel pin",
+        ))
+        .unwrap();
+        assert!(body.get("status").is_none());
+        assert_eq!(body["error"], "Failed to get channel pin");
+    }
+
+    #[test]
     fn channel_members_request_accepts_camel_and_snake_case_state_filter() {
         use crate::network::http_server::{ChannelMemberState, ChannelMembersRequest};
 

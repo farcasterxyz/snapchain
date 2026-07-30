@@ -1514,6 +1514,7 @@ fn channel_member_state_from_proto(state: i32) -> Result<ChannelMemberState, Err
     match proto::ChannelMemberState::try_from(state).map_err(|_| ErrorResponse {
         error: "Invalid channel member state".to_string(),
         error_detail: Some(state.to_string()),
+        status: None,
     })? {
         proto::ChannelMemberState::None => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_NONE),
         proto::ChannelMemberState::Member => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_MEMBER),
@@ -1987,6 +1988,7 @@ impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
                 .map_err(|err| ErrorResponse {
                     error: "Invalid peer id".to_string(),
                     error_detail: Some(err.to_string()),
+                    status: None,
                 })?
                 .to_string(),
             snapchain_version: value.snapchain_version.clone(),
@@ -2096,6 +2098,36 @@ pub struct ValidationResult {
 pub struct ErrorResponse {
     pub error: String,
     pub error_detail: Option<String>,
+    /// Transport-only and never serialized into the body: the HTTP status
+    /// `handle_request` should return. `None` keeps the historical behavior of
+    /// 400 for every handler error.
+    ///
+    /// Set it when the failure is a server fault rather than caller input.
+    /// Flattening both into 400 means an operator watching 4xx/5xx rates sees
+    /// store corruption — a dangling slot pointer, a malformed counter — as
+    /// client-error-shaped traffic.
+    #[serde(skip)]
+    pub status: Option<StatusCode>,
+}
+
+impl ErrorResponse {
+    /// Maps a gRPC `Status` from an in-process service call to an HTTP error,
+    /// preserving the server/caller distinction the gRPC layer already drew.
+    /// Anything the service classified as `Internal`, `DataLoss`, or `Unknown` is
+    /// a server fault and becomes 500; everything else stays 400.
+    pub(crate) fn from_status(err: &tonic::Status, error: &str) -> Self {
+        let status = match err.code() {
+            tonic::Code::Internal | tonic::Code::DataLoss | tonic::Code::Unknown => {
+                Some(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            _ => None,
+        };
+        ErrorResponse {
+            error: error.to_string(),
+            error_detail: Some(err.to_string()),
+            status,
+        }
+    }
 }
 
 /// Build the in-process gRPC mesh request, forwarding the caller's
@@ -2160,6 +2192,7 @@ fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infalli
     let err = ErrorResponse {
         error: status.message().to_string(),
         error_detail: None,
+        status: None,
     };
     Response::builder()
         .status(code)
@@ -2258,6 +2291,7 @@ fn map_proto_cast_add_body_to_json_cast_add_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid cast type".to_string(),
                 error_detail: None,
+                status: None,
             })?,
     })
 }
@@ -2273,6 +2307,7 @@ fn map_proto_link_body_to_json_link_body(
                 Err(ErrorResponse {
                     error: "Invalid link target".to_string(),
                     error_detail: None,
+                    status: None,
                 })
             },
             |t| match t {
@@ -2299,6 +2334,7 @@ fn map_proto_reaction_body_to_json_reaction_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid reaction type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2330,6 +2366,7 @@ fn map_proto_user_data_body_to_json_user_data_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid user data type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2345,6 +2382,7 @@ fn map_proto_username_proof_body_to_json_username_proof_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid username proof type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2353,6 +2391,7 @@ fn map_proto_username_proof_body_to_json_username_proof_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid name".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .to_string(),
         owner: format!("0x{}", hex::encode(username_proof_body.owner)),
@@ -2385,6 +2424,7 @@ fn map_proto_verification_add_body_to_json_verification_add_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid protocol type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2404,6 +2444,7 @@ fn map_proto_verification_remove_body_to_json_verification_remove_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid protocol type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2472,6 +2513,7 @@ fn map_proto_casting_mode_to_json_casting_mode(
         match proto::CastingMode::try_from(casting_mode).map_err(|_| ErrorResponse {
             error: "Invalid casting mode".to_string(),
             error_detail: None,
+            status: None,
         })? {
             proto::CastingMode::None => CastingMode::CASTING_MODE_NONE,
             proto::CastingMode::Everyone => CastingMode::CASTING_MODE_EVERYONE,
@@ -2488,6 +2530,7 @@ fn map_proto_membership_mode_to_json_membership_mode(
         match proto::MembershipMode::try_from(membership_mode).map_err(|_| ErrorResponse {
             error: "Invalid membership mode".to_string(),
             error_detail: None,
+            status: None,
         })? {
             proto::MembershipMode::None => MembershipMode::MEMBERSHIP_MODE_NONE,
             proto::MembershipMode::Open => MembershipMode::MEMBERSHIP_MODE_OPEN,
@@ -2503,6 +2546,7 @@ fn map_proto_channel_member_action_to_json_channel_member_action(
         match proto::ChannelMemberAction::try_from(action).map_err(|_| ErrorResponse {
             error: "Invalid channel member action".to_string(),
             error_detail: None,
+            status: None,
         })? {
             proto::ChannelMemberAction::None => ChannelMemberAction::CHANNEL_MEMBER_ACTION_NONE,
             proto::ChannelMemberAction::AddMember => {
@@ -2530,6 +2574,7 @@ fn map_proto_channel_moderate_action_to_json_channel_moderate_action(
         match proto::ChannelModerateAction::try_from(action).map_err(|_| ErrorResponse {
             error: "Invalid channel moderate action".to_string(),
             error_detail: None,
+            status: None,
         })? {
             proto::ChannelModerateAction::None => {
                 ChannelModerateAction::CHANNEL_MODERATE_ACTION_NONE
@@ -2605,6 +2650,7 @@ fn map_proto_message_data_without_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid message type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2614,6 +2660,7 @@ fn map_proto_message_data_without_body(
             .map_err(|_| ErrorResponse {
                 error: "Invalid network".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -2648,6 +2695,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2656,6 +2704,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2684,6 +2733,7 @@ fn map_proto_message_data_to_json_message_data(
                 .map_err(|_| ErrorResponse {
                     error: "Invalid message type".to_string(),
                     error_detail: None,
+                    status: None,
                 })?
                 .as_str_name()
                 .to_owned(),
@@ -2692,6 +2742,7 @@ fn map_proto_message_data_to_json_message_data(
                 .map_err(|_| ErrorResponse {
                     error: "Invalid network".to_string(),
                     error_detail: None,
+                    status: None,
                 })?
                 .as_str_name()
                 .to_owned(),
@@ -2722,6 +2773,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2730,6 +2782,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2771,6 +2824,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2779,6 +2833,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2810,6 +2865,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2818,6 +2874,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2848,6 +2905,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2856,6 +2914,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2886,6 +2945,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2894,6 +2954,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2925,6 +2986,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2933,6 +2995,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2965,6 +3028,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -2973,6 +3037,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3005,6 +3070,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3013,6 +3079,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3043,6 +3110,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3051,6 +3119,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3081,6 +3150,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3089,6 +3159,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3119,6 +3190,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid message type".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3127,6 +3199,7 @@ fn map_proto_message_data_to_json_message_data(
                     .map_err(|_| ErrorResponse {
                         error: "Invalid network".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3199,6 +3272,7 @@ fn map_proto_message_data_to_json_message_data(
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
+            status: None,
         }),
     }
 }
@@ -3214,6 +3288,7 @@ fn map_proto_message_to_json_message(message: proto::Message) -> Result<Message,
                     .map_err(|_| ErrorResponse {
                         error: "Invalid hash scheme".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3222,6 +3297,7 @@ fn map_proto_message_to_json_message(message: proto::Message) -> Result<Message,
                     .map_err(|_| ErrorResponse {
                         error: "Invalid signature scheme".to_string(),
                         error_detail: None,
+                        status: None,
                     })?
                     .as_str_name()
                     .to_owned(),
@@ -3231,6 +3307,7 @@ fn map_proto_message_to_json_message(message: proto::Message) -> Result<Message,
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
+            status: None,
         }),
     }
 }
@@ -3513,6 +3590,7 @@ pub fn map_proto_hub_event_to_json_hub_event(
             .map_err(|_| ErrorResponse {
                 error: "Invalid hub event type".to_string(),
                 error_detail: None,
+                status: None,
             })?
             .as_str_name()
             .to_owned(),
@@ -3678,6 +3756,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get info".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto = response.into_inner();
         map_get_info_response_to_json_info_response(proto)
@@ -3693,6 +3772,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get fids".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto = response.into_inner();
 
@@ -3706,11 +3786,13 @@ where
         let fid = req.fid.parse::<u64>().map_err(|e| ErrorResponse {
             error: "Invalid fid".to_string(),
             error_detail: Some(e.to_string()),
+            status: None,
         })?;
 
         let hash = hex::decode(&req.hash.replace("0x", "")).map_err(|e| ErrorResponse {
             error: "Invalid hash".to_string(),
             error_detail: Some(e.to_string()),
+            status: None,
         })?;
 
         let service = &self.service;
@@ -3723,6 +3805,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get cast".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
 
         let message = response.into_inner();
@@ -3742,6 +3825,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get casts".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
 
         let response_body = response.into_inner();
@@ -3758,6 +3842,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get casts by mention".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -3776,6 +3861,7 @@ where
                         |e| ErrorResponse {
                             error: "Invalid request".to_string(),
                             error_detail: Some(e.to_string()),
+                            status: None,
                         },
                     )?,
                 },
@@ -3790,6 +3876,7 @@ where
                 error_detail: Some(
                     "fid and hash must be specified or url must be specified".to_string(),
                 ),
+                status: None,
             })
         }?;
 
@@ -3800,6 +3887,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get casts by mention".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
 
         let proto_resp = response.into_inner();
@@ -3813,6 +3901,7 @@ where
                 hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
                     error: "Invalid hash".to_string(),
                     error_detail: Some(e.to_string()),
+                    status: None,
                 })?
             } else {
                 Vec::new()
@@ -3828,6 +3917,7 @@ where
             return Err(ErrorResponse {
                 error: "target not specified".to_string(),
                 error_detail: None,
+                status: None,
             });
         };
         let grpc_req = tonic::Request::new(proto::ReactionRequest {
@@ -3841,6 +3931,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get reaction".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_msg = response.into_inner();
         map_proto_message_to_json_message(proto_msg)
@@ -3859,6 +3950,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get reactions by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -3873,6 +3965,7 @@ where
             hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
                 error: "Invalid hash".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?
         } else {
             Vec::new()
@@ -3892,6 +3985,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get reactions by cast".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
 
         let proto_resp = response.into_inner();
@@ -3911,6 +4005,7 @@ where
                 return Err(ErrorResponse {
                     error: hash.unwrap_err().to_string(),
                     error_detail: None,
+                    status: None,
                 });
             }
             reactions_by_target_request::Target::TargetCastId(proto::CastId {
@@ -3923,6 +4018,7 @@ where
             return Err(ErrorResponse {
                 error: "target not specified".to_string(),
                 error_detail: None,
+                status: None,
             });
         };
         let grpc_req = tonic::Request::new(req.to_proto(target));
@@ -3932,6 +4028,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get reactions by target".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -3946,6 +4043,7 @@ where
             return Err(ErrorResponse {
                 error: "target not specified".to_string(),
                 error_detail: None,
+                status: None,
             });
         };
         let grpc_req = tonic::Request::new(proto::LinkRequest {
@@ -3959,6 +4057,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get link".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_msg = response.into_inner();
         map_proto_message_to_json_message(proto_msg)
@@ -3977,6 +4076,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get links by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -3995,6 +4095,7 @@ where
             return Err(ErrorResponse {
                 error: "target not specified".to_string(),
                 error_detail: None,
+                status: None,
             });
         };
         let grpc_req = tonic::Request::new(req.to_proto(target));
@@ -4004,6 +4105,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get links by target fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -4019,6 +4121,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get user data by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -4037,6 +4140,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get storage limits".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let limits = response.into_inner();
         Ok(StorageLimitsResponse {
@@ -4102,6 +4206,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get username proof".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proof = response.into_inner();
         let proof_type = proof.r#type().as_str_name().to_owned();
@@ -4130,6 +4235,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get username proofs".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proof = response.into_inner();
         Ok(UsernameProofsResponse {
@@ -4161,6 +4267,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to validate message".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         return Ok(ValidationResult {
@@ -4186,6 +4293,7 @@ where
                     return Err(ErrorResponse {
                         error: "Invalid auth header".to_string(),
                         error_detail: Some(err.to_string()),
+                        status: None,
                     })
                 }
                 Ok(auth) => {
@@ -4202,6 +4310,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to submit message".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_message_to_json_message(proto_resp)
@@ -4223,6 +4332,7 @@ where
                     return Err(ErrorResponse {
                         error: "Invalid auth header".to_string(),
                         error_detail: Some(err.to_string()),
+                        status: None,
                     })
                 }
                 Ok(auth) => {
@@ -4239,6 +4349,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to submit bulk messages".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
 
         let proto_resp = response.into_inner();
@@ -4260,6 +4371,7 @@ where
                 None => Err(ErrorResponse {
                     error: "Invalid bulk message response from server".to_string(),
                     error_detail: None,
+                    status: None,
                 }),
             })
             .collect::<Result<Vec<BulkMessageResponse>, _>>()?;
@@ -4282,6 +4394,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get verifications by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
@@ -4300,6 +4413,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get on chain signers".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let onchain_event_response = response.into_inner();
         Ok(OnChainEventResponse {
@@ -4324,11 +4438,13 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get signer".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let inner = response.into_inner();
         let signer = inner.signer.ok_or_else(|| ErrorResponse {
             error: "Signer not found".to_string(),
             error_detail: None,
+            status: None,
         })?;
         Ok(SignerResponse {
             signer: map_proto_signer_to_json_signer(signer)?,
@@ -4348,6 +4464,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get signers by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let inner = response.into_inner();
         let signers = inner
@@ -4378,6 +4495,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get on chain events".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let onchain_event_response = response.into_inner();
         Ok(OnChainEventResponse {
@@ -4405,6 +4523,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get channel owner".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let channel_owner = response.into_inner();
         Ok(ChannelOwnerResponse {
@@ -4427,6 +4546,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get channels by address".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         Ok(response.into_inner().into())
     }
@@ -4444,6 +4564,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get channels by fid".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         Ok(response.into_inner().into())
     }
@@ -4457,10 +4578,7 @@ where
             .service
             .get_channel_member(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel member".to_string(),
-                error_detail: Some(e.to_string()),
-            })?
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel member"))?
             .into_inner();
         Ok(ChannelMemberResponse {
             state: channel_member_state_from_proto(response.state)?,
@@ -4477,10 +4595,7 @@ where
             .service
             .get_channel_members(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel members".to_string(),
-                error_detail: Some(e.to_string()),
-            })?
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel members"))?
             .into_inner();
         Ok(ChannelMembersResponse {
             members: response
@@ -4508,10 +4623,7 @@ where
             .service
             .get_channel_pin(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel pin".to_string(),
-                error_detail: Some(e.to_string()),
-            })?
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel pin"))?
             .into_inner();
         Ok(ChannelPinResponse {
             cast_hash: response.cast_hash,
@@ -4528,10 +4640,7 @@ where
             .service
             .get_channel_moderations(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel moderations".to_string(),
-                error_detail: Some(e.to_string()),
-            })?
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel moderations"))?
             .into_inner();
         Ok(ChannelModerationsResponse {
             moderations: response
@@ -4562,10 +4671,7 @@ where
             .service
             .get_channel_metadata(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel metadata".to_string(),
-                error_detail: Some(e.to_string()),
-            })?
+            .map_err(|e| ErrorResponse::from_status(&e, "Failed to get channel metadata"))?
             .into_inner();
         Ok(ChannelMetadataResponse {
             name: response.name,
@@ -4589,9 +4695,8 @@ where
             .service
             .get_channel_memberships_by_fid(tonic::Request::new(req.to_proto()))
             .await
-            .map_err(|e| ErrorResponse {
-                error: "Failed to get channel memberships by fid".to_string(),
-                error_detail: Some(e.to_string()),
+            .map_err(|e| {
+                ErrorResponse::from_status(&e, "Failed to get channel memberships by fid")
             })?
             .into_inner();
         Ok(ChannelMembershipsResponse {
@@ -4621,6 +4726,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get events".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let events_response = response.into_inner();
         Ok(EventsResponse {
@@ -4642,6 +4748,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get event".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         Ok(map_proto_hub_event_to_json_hub_event(
             response.into_inner(),
@@ -4659,6 +4766,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get id registry event".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let onchain = response.into_inner();
         map_proto_on_chain_event_to_json_on_chain_event(onchain)
@@ -4677,6 +4785,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get fid address type".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         let proto_resp = response.into_inner();
         Ok(FidAddressTypeResponse {
@@ -4698,6 +4807,7 @@ where
             .map_err(|e| ErrorResponse {
                 error: "Failed to get connected peers".to_string(),
                 error_detail: Some(e.to_string()),
+                status: None,
             })?;
         Ok(GetConnectedPeersResponse::try_from(response.into_inner())?)
     }
@@ -5214,7 +5324,9 @@ where
                 .body(Full::new(Bytes::from(serde_json::to_vec(&resp).unwrap())).boxed())
                 .unwrap()),
             Err(err) => Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
+                // Handlers that can tell a server fault from caller input say so
+                // via `ErrorResponse::status`; everything else keeps 400.
+                .status(err.status.unwrap_or(StatusCode::BAD_REQUEST))
                 .header("content-type", "application/json")
                 .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
                 .unwrap()),
