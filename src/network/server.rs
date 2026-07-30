@@ -125,7 +125,7 @@ fn username_for_fname_recovery(message: &proto::Message) -> Option<String> {
 /// surface as `invalid_argument` rather than 500. Everything else is a true
 /// storage failure and stays as `internal`.
 fn signer_store_error_to_status(err: HubError) -> Status {
-    if err.code == "bad_request.invalid_param" {
+    if err.code.starts_with("bad_request") {
         Status::invalid_argument(err.to_string())
     } else {
         Status::internal(format!("Store error: {:?}", err))
