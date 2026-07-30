@@ -445,6 +445,210 @@ mod tests {
     }
 
     #[test]
+    fn out_of_prefix_page_tokens_are_rejected_instead_of_widening_the_scan() {
+        // A page token is a raw RocksDB key that REPLACES the prefix as the scan's
+        // lower bound, and the enumerators identify a row by key length alone —
+        // lengths every channel shares. So a token minted for a lower-sorting
+        // channel would otherwise return that channel's rows under the requested
+        // channel id. An empty token is the same defect from the front of the
+        // keyspace. Both must fail as caller error, not as a store fault.
+        let stores = test_stores();
+        let lower_channel = channel_id(0x10);
+        let higher_channel = channel_id(0x20);
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (channel, fid, timestamp) in [
+            (&lower_channel, 10, 1),
+            (&lower_channel, 20, 2),
+            (&higher_channel, 30, 3),
+        ] {
+            ChannelMemberStore::merge_with_gated_by_fid_index(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                ),
+                &mut txn,
+                true,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in [cast_hash(1), cast_hash(2)].iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    lower_channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 4,
+                ),
+                &mut txn,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        // Mint a real token inside the lower channel, then aim it at the higher one.
+        let lower_first = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &lower_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(lower_first.entries[0].fid, 10);
+        let foreign_member_token = lower_first.next_page_token.clone().unwrap();
+
+        let leaked = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &higher_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: Some(foreign_member_token.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(leaked.code, "bad_request.invalid_param");
+
+        // Same token in reverse: there it lands on the upper bound, so an
+        // unguarded scan runs past the requested channel instead of before it.
+        let leaked_reversed = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &higher_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: Some(foreign_member_token),
+                reverse: true,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(leaked_reversed.code, "bad_request.invalid_param");
+
+        let lower_moderations = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &lower_channel,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let foreign_moderate_token = lower_moderations.next_page_token.unwrap();
+        assert_eq!(
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &higher_channel,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(foreign_moderate_token),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .code,
+            "bad_request.invalid_param"
+        );
+
+        // memberships_by_fid is keyed by fid, so the foreign cursor is another fid's.
+        let fid_ten_page = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            10,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fid_ten_page.entries[0].channel_id, lower_channel);
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                30,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: fid_ten_page.next_page_token,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .code,
+            "bad_request.invalid_param"
+        );
+
+        // An empty token never reaches the store from the RPC layer, which maps it
+        // to None. Reject it here too rather than scanning from key zero.
+        for empty_token_result in [
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &higher_channel,
+                None,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &lower_channel,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                30,
+                &PageOptions {
+                    page_size: Some(10),
+                    page_token: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .map(|page| page.entries.len()),
+        ] {
+            assert_eq!(
+                empty_token_result.unwrap_err().code,
+                "bad_request.invalid_param"
+            );
+        }
+
+        // A token that does belong to the requested prefix still pages normally.
+        let higher_page = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &lower_channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                page_token: lower_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            higher_page
+                .entries
+                .iter()
+                .map(|entry| entry.fid)
+                .collect::<Vec<_>>(),
+            vec![20]
+        );
+    }
+
+    #[test]
     fn cross_author_same_block_supersede_keeps_store_index_trie_and_event_in_agreement() {
         let stores = test_stores();
         let mut trie = MerkleTrie::new().unwrap();

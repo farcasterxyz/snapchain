@@ -176,8 +176,25 @@ fn channel_page_options(
                 .unwrap_or(PAGE_SIZE_MAX)
                 .min(PAGE_SIZE_MAX),
         ),
-        page_token,
+        // `optional bytes` lets a client send an explicitly empty token, which
+        // generated clients do when they echo back an absent `next_page_token`.
+        // Treat it as "first page" the way `page_options` in rpc_extensions does,
+        // rather than letting it reach the store as an out-of-prefix cursor.
+        page_token: page_token.filter(|token| !token.is_empty()),
         reverse: reverse.unwrap_or(false),
+    }
+}
+
+/// Translate a HubError raised by the channel stores into a gRPC `Status`.
+/// `bad_request.*` codes are caller-supplied input — a page token that does not
+/// belong to the requested index, an out-of-range fid — so they surface as
+/// `invalid_argument`. Everything else (a dangling slot pointer, a malformed
+/// counter) is genuine replica corruption and stays `internal`.
+fn channel_store_error_to_status(err: HubError) -> Status {
+    if err.code.starts_with("bad_request") {
+        Status::invalid_argument(err.to_string())
+    } else {
+        Status::internal(format!("Store error: {err:?}"))
     }
 }
 
@@ -2974,7 +2991,7 @@ impl HubService for MyHubService {
             state_filter,
             &channel_page_options(req.page_size, req.page_token, req.reverse),
         )
-        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        .map_err(channel_store_error_to_status)?;
         Ok(Response::new(ChannelMembersResponse {
             members: page
                 .entries
@@ -3031,7 +3048,7 @@ impl HubService for MyHubService {
             &req.channel_id,
             &channel_page_options(req.page_size, req.page_token, req.reverse),
         )
-        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        .map_err(channel_store_error_to_status)?;
         Ok(Response::new(ChannelModerationsResponse {
             moderations: page
                 .entries
@@ -3099,7 +3116,7 @@ impl HubService for MyHubService {
             req.fid,
             &channel_page_options(req.page_size, req.page_token, req.reverse),
         )
-        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        .map_err(channel_store_error_to_status)?;
         Ok(Response::new(ChannelMembershipsResponse {
             memberships: page
                 .entries

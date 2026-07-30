@@ -215,6 +215,26 @@ fn channel_index_key(index: ChannelIndex, channel_id: &[u8], suffix: &[u8]) -> V
     key
 }
 
+/// Rejects a `page_token` that does not sit inside `prefix`.
+///
+/// `RocksDB::get_iterator_options` uses the token as the scan's lower bound
+/// (or, when reversed, its upper bound) *instead of* the prefix, so a token from
+/// outside the prefix widens the range rather than narrowing it. The three
+/// enumerators below identify a row by key length alone, and every channel's
+/// slot keys share a length — so without this check a token minted for one
+/// channel would return a different channel's rows under the requested channel
+/// id. An empty token is out-of-prefix by the same test: it makes the scan start
+/// at the front of the column family. Callers that mean "first page" must pass
+/// `None`; the RPC layer normalizes an empty token to `None` before it gets here.
+fn require_page_token_in_prefix(prefix: &[u8], page_options: &PageOptions) -> Result<(), HubError> {
+    match &page_options.page_token {
+        Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
+            "page token does not belong to the requested channel index",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn read_counter(db: &RocksDB, txn: &RocksDbTransactionBatch, key: &[u8]) -> Result<u32, HubError> {
     match get_from_db_or_txn(db, txn, key)? {
         None => Ok(0),
@@ -924,6 +944,7 @@ impl ChannelMemberStore {
         page_options: &PageOptions,
     ) -> Result<ChannelPage<ChannelMemberEntry>, HubError> {
         let prefix = channel_index_key(ChannelIndex::MemberSlot, channel_id, &[]);
+        require_page_token_in_prefix(&prefix, page_options)?;
         let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
         let mut entries = Vec::new();
         let mut last_key = None;
@@ -979,6 +1000,7 @@ impl ChannelMemberStore {
         page_options: &PageOptions,
     ) -> Result<ChannelPage<ChannelMembershipEntry>, HubError> {
         let prefix = ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &[])?;
+        require_page_token_in_prefix(&prefix, page_options)?;
         let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
         let mut entries = Vec::new();
         let mut last_key = None;
@@ -1125,6 +1147,7 @@ impl ChannelModerateStore {
         page_options: &PageOptions,
     ) -> Result<ChannelPage<ChannelModerationEntry>, HubError> {
         let prefix = channel_index_key(ChannelIndex::ModerateSlot, channel_id, &[]);
+        require_page_token_in_prefix(&prefix, page_options)?;
         let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
         let mut entries = Vec::new();
         let mut last_key = None;

@@ -1402,6 +1402,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_read_page_tokens_are_scoped_to_their_own_channel() {
+        // `page_token` is `optional bytes` on the wire and reaches RocksDB as a raw
+        // scan bound, so a caller controls where the scan STARTS. Two shapes have to
+        // be handled at the RPC edge: an empty token (what generated clients send
+        // when echoing an absent `next_page_token`) must mean "first page", and a
+        // token minted for another channel must be refused as caller error rather
+        // than returning that channel's members under the requested channel id.
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+
+        let mut labels = [
+            channel_label("token-scope-a"),
+            channel_label("token-scope-b"),
+        ];
+        labels.sort();
+        let [lower_channel, higher_channel] = labels;
+        // Registered directly rather than through `merge_channel_registration`, which
+        // pins block/log index and so cannot register two channels in one test.
+        for (log_index, (channel_key, address_byte)) in
+            [("token-scope-a", 0x61), ("token-scope-b", 0x62)]
+                .into_iter()
+                .enumerate()
+        {
+            merge_channel_event(
+                &block_engine,
+                events_factory::create_channel_register_event(
+                    channel_key,
+                    channel_label(channel_key),
+                    owner_address(address_byte),
+                    now_unix_seconds() + 3600,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    log_index as u32 + 1,
+                ),
+            );
+        }
+
+        // Two members in the lower channel so its first page yields a live cursor,
+        // and one in the higher channel so a leak is distinguishable from an error.
+        let mut timestamp = 20;
+        for (channel, fid) in [
+            (&lower_channel, 601),
+            (&lower_channel, 602),
+            (&higher_channel, 603),
+        ] {
+            merge_channel_message(
+                &block_engine,
+                &messages_factory::create_message_with_data(
+                    500,
+                    proto::MessageType::ChannelMember,
+                    proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                        channel_id: channel.clone(),
+                        fid,
+                        action: proto::ChannelMemberAction::AddMember as i32,
+                    }),
+                    Some(timestamp),
+                    None,
+                ),
+            );
+            timestamp += 1;
+        }
+
+        let lower_first = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel.clone(),
+                state_filter: None,
+                page_size: Some(1),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(lower_first.members.len(), 1);
+        assert_eq!(lower_first.members[0].fid, 601);
+        let foreign_token = lower_first.next_page_token.clone().unwrap();
+
+        // Without prefix scoping this returns fid 602 — a member of the lower
+        // channel — alongside the higher channel's own 603.
+        let leaked = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: higher_channel.clone(),
+                state_filter: None,
+                page_size: Some(10),
+                page_token: Some(foreign_token.clone()),
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(leaked.code(), tonic::Code::InvalidArgument);
+
+        let leaked_memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 603,
+                page_size: Some(10),
+                page_token: Some(foreign_token),
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(leaked_memberships.code(), tonic::Code::InvalidArgument);
+
+        // An empty token is "first page", not an error and not an internal fault.
+        let empty_token_members = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel.clone(),
+                state_filter: None,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            empty_token_members
+                .members
+                .iter()
+                .map(|member| member.fid)
+                .collect::<Vec<_>>(),
+            vec![601, 602]
+        );
+
+        let empty_token_memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 603,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            empty_token_memberships
+                .memberships
+                .iter()
+                .map(|membership| membership.channel_id.clone())
+                .collect::<Vec<_>>(),
+            vec![higher_channel.clone()]
+        );
+
+        let empty_token_moderations = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: higher_channel,
+                page_size: Some(10),
+                page_token: Some(Vec::new()),
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(empty_token_moderations.moderations.is_empty());
+
+        // A token that does belong to the requested channel still pages normally.
+        let lower_second = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: lower_channel,
+                state_filter: None,
+                page_size: Some(10),
+                page_token: lower_first.next_page_token,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            lower_second
+                .members
+                .iter()
+                .map(|member| member.fid)
+                .collect::<Vec<_>>(),
+            vec![602]
+        );
+    }
+
+    #[tokio::test]
     async fn channel_fanout_end_to_end_keeps_shard_zero_replicas_and_reads_in_sync() {
         let (
             _stores,
