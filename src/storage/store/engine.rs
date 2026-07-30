@@ -3246,7 +3246,7 @@ mod prune_arm_tests {
 }
 
 #[cfg(test)]
-mod channel_message_inertness_tests {
+mod channel_message_shard_engine_boundary_tests {
     use super::MessageValidationError;
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
@@ -3258,8 +3258,10 @@ mod channel_message_inertness_tests {
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Routing sends channel messages to shard 0, but ShardEngine still rejects them if they are
-    /// injected directly. Its merge dispatch remains absent until data-shard replay lands.
+    /// Routing sends channel messages to shard 0, and ShardEngine rejects all four types if they
+    /// are injected directly. Data-shard replay landing does not widen this: `merge_message` now
+    /// has channel arms, but they are reachable only from gated BlockEvent replay and
+    /// replication, never from a mempool user message.
     #[tokio::test]
     async fn s4_channel_messages_are_rejected_by_shard_engine_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
@@ -3323,19 +3325,28 @@ mod channel_message_inertness_tests {
         );
     }
 
+    /// The four channel arms in `merge_message` carry an `if channel_messages_enabled` guard, so
+    /// with the gate off they fall through to the catch-all and reject. That guard — not the
+    /// absence of dispatch — is what keeps replay from running before its feature is active.
     #[tokio::test]
-    async fn channel_messages_have_no_shard_engine_merge_dispatch() {
+    async fn channel_merge_dispatch_falls_through_when_the_feature_gate_is_off() {
         let (engine, _tmpdir) = test_helper::new_engine().await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new(), false);
+            let mut txn = RocksDbTransactionBatch::new();
+            let result = engine.merge_message(&message, &mut txn, false);
             assert!(matches!(
                 result,
                 Err(MessageValidationError::InvalidMessageType(value))
                     if value == message_type as i32
             ));
+            assert!(
+                txn.batch.is_empty(),
+                "{:?} must not stage any write when the gate is off",
+                message_type
+            );
         }
     }
 
