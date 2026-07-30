@@ -317,6 +317,14 @@ impl EngineVersion {
             // excludes pre-V20 verification history, so authority begins from post-activation
             // state rather than a backfill.
             //
+            // That makes RE-VERIFICATION A REQUIRED MIGRATION STEP, not an edge case: a channel
+            // owner who verified their address before V20 has no shard-0 row, so their channel
+            // resolves to owner fid 0 and rejects every permissioned write until they submit a
+            // fresh verification of the same address. It is documented on GetChannelOwner and
+            // ChannelOwnerResponse.fid because clients have to surface it. Anything that would
+            // change this — a backfill, or relaxing the floor — has to reckon with the
+            // tombstone-resurrection guard the floor exists to provide.
+            //
             // ChannelMessages has consumers on both sides of the fan-out. BlockEngine validates
             // authority and merges the four slot stores on shard 0, then emits gated MergeMessage
             // BlockEvents. Every data shard replays those events through the same StoreDefs using

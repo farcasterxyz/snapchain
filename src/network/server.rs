@@ -2800,10 +2800,8 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        // 0 is a real answer, not a fallback: no shard-0 verification maps this
-        // address to an fid. It covers an unclaimed channel and an owner whose
-        // verification predates the shard-0 admission floor equally, because both
-        // are the same absent replica row here. See ChannelOwnerResponse.fid.
+        // 0 is a real answer, not a swallowed error: the owner's verification has
+        // not landed on shard 0 yet. See ChannelOwnerResponse.fid.
         let fid = self
             .block_stores
             .resolve_channel_owner_fid(&channel_owner.owner_address, None)
@@ -2844,6 +2842,9 @@ impl HubService for MyHubService {
         )?;
 
         if !channels.is_empty() {
+            // Same contract as GetChannelOwner: 0 means the owner's verification
+            // has not landed on shard 0 yet, and is stamped onto every channel in
+            // this page. See ChannelOwnerResponse.fid.
             let fid = self
                 .block_stores
                 .resolve_channel_owner_fid(&req.owner_address, None)

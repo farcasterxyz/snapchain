@@ -77,24 +77,24 @@ service HubService {
   // verifications that exist only in pre-activation data-shard history do not
   // participate. This read is not consensus.
   //
-  // An fid of 0 means only that no shard-0 verification maps the owner address
-  // to an fid. That has two causes a client MUST NOT conflate, and which the
-  // node itself cannot distinguish — both present identically as an absent
-  // replica row:
-  //   - the channel is genuinely unclaimed: nobody has verified the paying
-  //     address ("parked"), so no fid can be authorized to manage it; or
-  //   - the owner DID verify the address, but only before activation. The
-  //     shard-0 admission timestamp floor deliberately excludes that history,
-  //     so the row is not in the replica and the channel reads as parked
-  //     despite having a real owner.
-  // In the second case the channel becomes manageable once the owner submits a
-  // fresh post-activation verification of the same address. Do not surface
-  // fid 0 as "abandoned".
+  // An fid of 0 means the owner's verification has not landed on shard 0 yet.
+  // It is a normal, expected state — not an error and not a lookup failure. The
+  // registration exists and the owner address is known; nothing binds that
+  // address to an fid on shard 0 yet, so there is no one to authorize.
   //
-  // The ambiguity is accepted, not pending: no sentinel or extra field could
-  // resolve it, since the node has the same absent replica row in both cases.
-  // Distinguishing them would require reading pre-activation verification
-  // history that shard-0 admission deliberately excludes.
+  // Two situations produce it: the address was never verified, or it was
+  // verified only before activation, which the shard-0 admission timestamp
+  // floor deliberately excludes. The node cannot tell them apart — both are the
+  // same absent replica row — and does not need to, because the remedy is the
+  // same either way. Surface fid 0 as "not yet", never as "abandoned".
+  //
+  // RE-VERIFICATION IS REQUIRED. There is no backfill of pre-activation
+  // verification history into the shard-0 replica, so an owner who verified
+  // their address before activation MUST submit a fresh verification of the
+  // same address afterwards for their channel to become manageable. Until they
+  // do, every permissioned write on the channel is rejected exactly as if it
+  // were unclaimed. Clients should present fid 0 as an actionable "verify your
+  // address to manage this channel" state rather than an error.
   //
   // Expiry is returned as-is and may be in the past. The registry contract
   // emits no onchain event when a lapsed registration's grace period ends, so
