@@ -761,6 +761,27 @@ impl ChannelSlotStoreDef for ChannelPinStoreDef {
         pin_slot_suffix(message)
     }
 
+    fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
+        // Unlike the moderate slot, the pin key is `channel_id` alone — cast_hash is
+        // payload, not key material — so an off-width hash cannot corrupt the
+        // keyspace. Enforced anyway to match `validate_channel_pin_body`, because the
+        // paths that skip stateless validation (snapshot bootstrap, replication
+        // replay) reach this merge directly, and `GetChannelPin` echoes the bytes it
+        // finds. Empty is legal: that is an unpin.
+        match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelPinBody(body))
+                if body.cast_hash.is_empty()
+                    || body.cast_hash.len() == CHANNEL_MODERATE_CAST_HASH_LENGTH =>
+            {
+                Ok(())
+            }
+            Some(Body::ChannelPinBody(_)) => Err(HubError::validation_failure(
+                "channel pin cast hash must be empty or 20 bytes",
+            )),
+            _ => Err(invalid_body("ChannelPin")),
+        }
+    }
+
     fn slot_cap(&self) -> Option<u32> {
         self.slot_cap
     }

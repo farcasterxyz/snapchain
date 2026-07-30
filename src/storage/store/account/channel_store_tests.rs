@@ -1084,6 +1084,51 @@ mod tests {
     }
 
     #[test]
+    fn pin_slot_merge_enforces_the_cast_hash_width_itself() {
+        // Snapshot bootstrap and replication replay reach merge_slot without running
+        // the stateless body validators, so the store has to hold the same width rule
+        // as `validate_channel_pin_body` rather than trusting its callers.
+        let stores = test_stores();
+        let channel = channel_id(0x66);
+
+        for bad_hash in [vec![0xAB; 19], vec![0xAB; 21], vec![0xAB; 32]] {
+            let mut txn = RocksDbTransactionBatch::new();
+            let error = ChannelPinStore::merge(
+                &stores.pin,
+                &pin_message(1, channel.clone(), bad_hash.clone(), 1),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "bad_request.validation_failure");
+            assert!(
+                txn.batch.is_empty(),
+                "a rejected pin of width {} must stage no write",
+                bad_hash.len()
+            );
+        }
+
+        // 20 bytes pins; empty is an unpin, not a malformed hash.
+        for good_hash in [cast_hash(3), Vec::new()] {
+            let mut txn = RocksDbTransactionBatch::new();
+            ChannelPinStore::merge(
+                &stores.pin,
+                &pin_message(1, channel.clone(), good_hash.clone(), 2),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+            assert_eq!(
+                ChannelPinStore::get_channel_pin(&stores.pin, &channel, Some(&txn))
+                    .unwrap()
+                    .unwrap()
+                    .cast_hash,
+                good_hash
+            );
+        }
+    }
+
+    #[test]
     fn member_cap_boundary_checks_every_action_on_mint_and_overwrite() {
         let stores = test_stores();
         let channel = channel_id(7);
