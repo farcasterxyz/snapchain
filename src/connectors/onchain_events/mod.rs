@@ -1,6 +1,9 @@
 use crate::cfg::Config as AppConfig;
-use crate::proto::{ChannelRegisterBody, ChannelRegisterEventType, TierPurchaseBody};
+use crate::proto::{
+    ChannelRegisterBody, ChannelRegisterEventType, FarcasterNetwork, TierPurchaseBody,
+};
 use crate::storage::store::node_local_state;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, RootProvider};
@@ -509,6 +512,9 @@ pub struct Subscriber {
     local_state_store: LocalStateStore,
     onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
     chain: node_local_state::Chain,
+    /// Only used to decide whether a channel-registry misconfiguration is fatal.
+    /// See `resolve_channel_registrar_token`.
+    network: FarcasterNetwork,
     override_tier_registry_address: Option<Address>,
     override_channel_registrar_address: Option<Address>,
     /// The ENS registry the channel registry's root 2LD lives under. Resolved at
@@ -537,6 +543,7 @@ impl Subscriber {
     pub fn new(
         config: &Config,
         chain: node_local_state::Chain,
+        network: FarcasterNetwork,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
@@ -558,6 +565,7 @@ impl Subscriber {
             statsd_client,
             onchain_events_request_rx,
             chain,
+            network,
             override_tier_registry_address: config
                 .override_tier_registry_address
                 .as_deref()
@@ -576,6 +584,15 @@ impl Subscriber {
                 .unwrap_or(ETH_L1_ENS_REGISTRY),
             channel_registrar_token: None,
         })
+    }
+
+    /// Whether the engine is currently accepting channel-register events.
+    ///
+    /// Gates how loudly a failed registry resolution is reported: before
+    /// activation the events are rejected anyway, so an unresolvable registry is
+    /// a warning; after, it means silent data loss and is fatal.
+    fn channel_registrations_active(&self) -> bool {
+        EngineVersion::current(self.network).is_enabled(ProtocolFeature::ChannelRegistrations)
     }
 
     /// Derives the channel registry's ERC-721 from its controller.
@@ -1590,15 +1607,50 @@ impl Subscriber {
         // Before any filter is built: the channel registry emits from two
         // contracts, and only one of them is configured. Resolving here rather
         // than in `new()` because it costs two RPC calls, and `new()` is sync.
+        //
+        // A failure is only fatal once channel registrations are actually being
+        // consumed. Before `ChannelRegistrations` activates, the engine rejects
+        // channel-register events regardless, so an unreachable or misconfigured
+        // registry costs nothing and must not stop a node from booting — a
+        // half-configured registry on a pre-activation network is a normal state
+        // to be in while the registry is still being deployed. After activation
+        // the same failure means every ownership transfer is being dropped, which
+        // is the silent-loss case this whole change exists to prevent.
+        //
+        // Wall-clock gating is deliberate and safe here: this is node-local
+        // startup behavior, not a consensus decision. Nothing downstream re-derives
+        // it, and two nodes disagreeing about whether to boot has no effect on
+        // state. Contrast the follow index, which must gate on a message clock.
         if let Some(controller) = self.override_channel_registrar_address {
-            let token = self.resolve_channel_registrar_token(controller).await?;
-            info!(
-                controller = controller.to_string(),
-                token = token.to_string(),
-                chain = self.chain.to_string(),
-                "Resolved channel registry ERC-721 from its controller"
-            );
-            self.channel_registrar_token = Some(token);
+            match self.resolve_channel_registrar_token(controller).await {
+                Ok(token) => {
+                    info!(
+                        controller = controller.to_string(),
+                        token = token.to_string(),
+                        chain = self.chain.to_string(),
+                        "Resolved channel registry ERC-721 from its controller"
+                    );
+                    self.channel_registrar_token = Some(token);
+                }
+                Err(err) if !self.channel_registrations_active() => {
+                    // Deliberately loud despite being non-fatal: whoever is
+                    // standing up the registry needs to see this before the
+                    // activation boundary makes it fatal. Note the node is NOT
+                    // re-checked after activation while it keeps running — it
+                    // picks the failure up on its next restart.
+                    warn!(
+                        controller = controller.to_string(),
+                        chain = self.chain.to_string(),
+                        network = self.network.as_str_name(),
+                        "Could not resolve the channel registry ERC-721, continuing because \
+                         channel registrations are not active yet. Channel ownership transfers \
+                         will NOT be ingested. Error: {:#?}",
+                        err
+                    );
+                    self.count("onchain_events.channel_registrar_unresolved", 1, vec![]);
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         let latest_block_on_chain = self.latest_block_on_chain().await?;
@@ -1849,6 +1901,15 @@ mod tests {
         controller: Option<Address>,
         token: Option<Address>,
     ) -> Subscriber {
+        offline_subscriber_on(chain, FarcasterNetwork::Devnet, controller, token)
+    }
+
+    fn offline_subscriber_on(
+        chain: node_local_state::Chain,
+        network: FarcasterNetwork,
+        controller: Option<Address>,
+        token: Option<Address>,
+    ) -> Subscriber {
         let (mempool_tx, _mempool_rx) = mpsc::channel(1);
         let (_tx, onchain_events_request_rx) = broadcast::channel(1);
         let dir = tempfile::TempDir::new().unwrap();
@@ -1868,6 +1929,7 @@ mod tests {
             local_state_store: LocalStateStore::new(db),
             onchain_events_request_rx,
             chain,
+            network,
             override_tier_registry_address: None,
             override_channel_registrar_address: controller,
             ens_registry_address: ETH_L1_ENS_REGISTRY,
@@ -1969,5 +2031,42 @@ mod tests {
             base_registrar_name_renewed,
             ChannelRegistrarAbi::NameRenewed::SIGNATURE_HASH,
         );
+    }
+
+    #[test]
+    fn a_registry_misconfiguration_is_only_fatal_once_registrations_are_active() {
+        // Before ChannelRegistrations activates, the engine rejects
+        // channel-register events anyway, so an unresolvable registry costs
+        // nothing and must not stop a node from booting — the registry is still
+        // being deployed. After activation the same failure silently drops every
+        // ownership transfer, so it has to be fatal.
+        let devnet = offline_subscriber_on(
+            node_local_state::Chain::Base,
+            FarcasterNetwork::Devnet,
+            Some(SEPOLIA_CONTROLLER),
+            None,
+        );
+        assert!(
+            devnet.channel_registrations_active(),
+            "devnet activates channel registrations at genesis, so a bad registry is fatal there"
+        );
+
+        // Mainnet and testnet have no V20 entry scheduled yet. Asserted via
+        // `channel_registrations_active` rather than a pinned version so this
+        // starts reporting `true` — correctly — the moment V20 is scheduled,
+        // rather than failing.
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let subscriber = offline_subscriber_on(
+                node_local_state::Chain::Base,
+                network,
+                Some(SEPOLIA_CONTROLLER),
+                None,
+            );
+            assert_eq!(
+                subscriber.channel_registrations_active(),
+                EngineVersion::current(network).is_enabled(ProtocolFeature::ChannelRegistrations),
+                "{network:?} must track the schedule, not a hardcoded answer"
+            );
+        }
     }
 }

@@ -724,6 +724,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.onchain_events,
                     node_local_state::Chain::Optimism,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
@@ -745,6 +746,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.base_onchain_events,
                     node_local_state::Chain::Base,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
