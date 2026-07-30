@@ -446,6 +446,146 @@ mod tests {
     }
 
     #[test]
+    fn channel_reads_page_in_reverse_with_the_same_token_contract() {
+        // `reverse` is plumbed from the request through `channel_page_options` into
+        // every one of these reads, and the two directions use ASYMMETRIC bounds in
+        // `get_iterator_options`: forward sets `lower_bound = token ++ [0]`, reverse
+        // sets `upper_bound = token` exactly. All three enumerators return the raw
+        // last key as their token, which is correct for both — but only because of
+        // that asymmetry, so it needs pinning rather than assuming.
+        let stores = test_stores();
+        let channel = channel_id(0x50);
+        let membership_channels = [channel_id(0x70), channel_id(0x71)];
+        let membership_fid = 90;
+        let moderated = [cast_hash(11), cast_hash(12)];
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (index, fid) in [40u64, 41, 42].into_iter().enumerate() {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 1,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, membership_channel) in membership_channels.iter().enumerate() {
+            ChannelMemberStore::merge(
+                &stores.member,
+                &member_message(
+                    1,
+                    membership_channel.clone(),
+                    membership_fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 10,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in moderated.iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 20,
+                ),
+                &mut txn,
+                DerivedIndexGate::Write,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        let reverse_page = |page_token: Option<Vec<u8>>| PageOptions {
+            page_size: Some(1),
+            page_token,
+            reverse: true,
+        };
+
+        // Members descend by fid, and every row is visited exactly once.
+        let mut seen_fids = Vec::new();
+        let mut token = None;
+        for _ in 0..3 {
+            let page = ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &reverse_page(token),
+            )
+            .unwrap();
+            assert_eq!(page.entries.len(), 1);
+            seen_fids.push(page.entries[0].fid);
+            token = page.next_page_token;
+        }
+        assert_eq!(seen_fids, vec![42, 41, 40]);
+        // Forward over the same rows is the exact mirror, so neither direction is
+        // silently dropping or repeating the boundary row.
+        let forward = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &channel,
+            None,
+            &PageOptions {
+                page_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        seen_fids.reverse();
+        assert_eq!(
+            forward
+                .entries
+                .iter()
+                .map(|entry| entry.fid)
+                .collect::<Vec<_>>(),
+            seen_fids
+        );
+
+        let moderations = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &channel,
+            &reverse_page(None),
+        )
+        .unwrap();
+        assert_eq!(moderations.entries[0].cast_hash, moderated[1]);
+        let moderations_next = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &channel,
+            &reverse_page(moderations.next_page_token),
+        )
+        .unwrap();
+        assert_eq!(moderations_next.entries[0].cast_hash, moderated[0]);
+
+        let memberships = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            membership_fid,
+            &reverse_page(None),
+        )
+        .unwrap();
+        assert_eq!(memberships.entries[0].channel_id, membership_channels[1]);
+        let memberships_next = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            membership_fid,
+            &reverse_page(memberships.next_page_token),
+        )
+        .unwrap();
+        assert_eq!(
+            memberships_next.entries[0].channel_id,
+            membership_channels[0]
+        );
+    }
+
+    #[test]
     fn out_of_prefix_page_tokens_are_rejected_instead_of_widening_the_scan() {
         // A page token is a raw RocksDB key that REPLACES the prefix as the scan's
         // lower bound, and the enumerators identify a row by key length alone —
