@@ -2789,6 +2789,10 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
+        // 0 is a real answer, not a fallback: no shard-0 verification maps this
+        // address to an fid. It covers an unclaimed channel and an owner whose
+        // verification predates the shard-0 admission floor equally, because both
+        // are the same absent replica row here. See ChannelOwnerResponse.fid.
         let fid = self
             .block_stores
             .resolve_channel_owner_fid(&channel_owner.owner_address, None)

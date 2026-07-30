@@ -75,9 +75,21 @@ service HubService {
   // shard-0 verification replica. The owner is the winning verifier of the
   // address in that replica (greatest ts_hash, ties to the lower fid);
   // verifications that exist only in pre-activation data-shard history do not
-  // participate. An fid of 0 means the channel is registered
-  // but no verified owner is present in shard-0 consensus state ("parked").
-  // This read is not consensus.
+  // participate. This read is not consensus.
+  //
+  // An fid of 0 means only that no shard-0 verification maps the owner address
+  // to an fid. That has two causes a client MUST NOT conflate, and which the
+  // node itself cannot distinguish — both present identically as an absent
+  // replica row:
+  //   - the channel is genuinely unclaimed: nobody has verified the paying
+  //     address ("parked"), so no fid can be authorized to manage it; or
+  //   - the owner DID verify the address, but only before activation. The
+  //     shard-0 admission timestamp floor deliberately excludes that history,
+  //     so the row is not in the replica and the channel reads as parked
+  //     despite having a real owner.
+  // In the second case the channel becomes manageable once the owner submits a
+  // fresh post-activation verification of the same address. Do not surface
+  // fid 0 as "abandoned".
   //
   // Expiry is returned as-is and may be in the past. The registry contract
   // emits no onchain event when a lapsed registration's grace period ends, so

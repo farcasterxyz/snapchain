@@ -160,8 +160,11 @@ message ChannelOwnerRequest {
 }
 
 message ChannelOwnerResponse {
-  // 0 = registered but no verified owner in shard-0 consensus state
-  // ("parked"). Parking is computed at read time, never stored.
+  // 0 = registered, but no shard-0 verification maps the owner address to an
+  // fid. Covers BOTH a genuinely unclaimed channel and an owner whose
+  // verification predates activation and so is absent from the shard-0 replica
+  // — indistinguishable here, and not a signal that the channel is abandoned.
+  // See GetChannelOwner in rpc.proto. Computed at read time, never stored.
   uint64 fid = 1;
   // Raw 20-byte EVM address from the channel registry fold.
   bytes owner_address = 2;
