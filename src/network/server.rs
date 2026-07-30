@@ -937,14 +937,25 @@ impl MyHubService {
         self.get_stores_for_shard(shard_id)
     }
 
-    fn require_registered_channel(&self, channel_id: &[u8]) -> Result<(), Status> {
-        if channel_id.len() != CHANNEL_ID_LENGTH {
-            return Err(Status::invalid_argument("channel_id must be 32 bytes"));
-        }
+    /// Validates the width and registration of a caller-supplied channel id, and
+    /// returns the id as a fixed-width array.
+    ///
+    /// Returning the validated value rather than `()` is deliberate: the store keys
+    /// are built by concatenation and do not re-check width (see CHANNEL_ID_LENGTH),
+    /// so passing the raw request slice onward would leave width safety resting on
+    /// every handler remembering to call this first. Threading the array makes
+    /// "validated" and "used" the same value.
+    fn require_registered_channel(
+        &self,
+        channel_id: &[u8],
+    ) -> Result<[u8; CHANNEL_ID_LENGTH], Status> {
+        let channel_id: [u8; CHANNEL_ID_LENGTH] = channel_id
+            .try_into()
+            .map_err(|_| Status::invalid_argument("channel_id must be 32 bytes"))?;
         let channel_key = self
             .block_stores
             .onchain_event_store
-            .get_channel_key_by_label(channel_id, None)
+            .get_channel_key_by_label(&channel_id, None)
             .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
         self.block_stores
@@ -952,7 +963,7 @@ impl MyHubService {
             .get_channel_owner(&channel_key, None)
             .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
-        Ok(())
+        Ok(channel_id)
     }
 
     /// Replays `message` against a read-only engine for `shard_id` and returns the
@@ -2961,13 +2972,13 @@ impl HubService for MyHubService {
         request: Request<ChannelMemberRequest>,
     ) -> Result<Response<ChannelMemberResponse>, Status> {
         let req = request.into_inner();
-        self.require_registered_channel(&req.channel_id)?;
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
         if req.fid == 0 || u32::try_from(req.fid).is_err() {
             return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
         }
         let member = ChannelMemberStore::member(
             &self.block_stores.channel_member_store,
-            &req.channel_id,
+            &channel_id,
             req.fid,
             None,
         )
@@ -2989,7 +3000,7 @@ impl HubService for MyHubService {
         request: Request<ChannelMembersRequest>,
     ) -> Result<Response<ChannelMembersResponse>, Status> {
         let req = request.into_inner();
-        self.require_registered_channel(&req.channel_id)?;
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
         require_nonzero_page_size(req.page_size)?;
         let state_filter = req
             .state_filter
@@ -3001,7 +3012,7 @@ impl HubService for MyHubService {
             .and_then(channel_member_state_from_proto);
         let page = ChannelMemberStore::members_by_channel(
             &self.block_stores.channel_member_store,
-            &req.channel_id,
+            &channel_id,
             state_filter,
             &channel_page_options(req.page_size, req.page_token, req.reverse),
         )
@@ -3024,10 +3035,10 @@ impl HubService for MyHubService {
         request: Request<ChannelRequest>,
     ) -> Result<Response<ChannelPinResponse>, Status> {
         let req = request.into_inner();
-        self.require_registered_channel(&req.channel_id)?;
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
         let pin = ChannelPinStore::get_channel_pin_state(
             &self.block_stores.channel_pin_store,
-            &req.channel_id,
+            &channel_id,
             None,
         )
         .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
@@ -3050,11 +3061,11 @@ impl HubService for MyHubService {
         request: Request<ChannelModerationsRequest>,
     ) -> Result<Response<ChannelModerationsResponse>, Status> {
         let req = request.into_inner();
-        self.require_registered_channel(&req.channel_id)?;
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
         require_nonzero_page_size(req.page_size)?;
         let page = ChannelModerateStore::moderations_by_channel(
             &self.block_stores.channel_moderate_store,
-            &req.channel_id,
+            &channel_id,
             &channel_page_options(req.page_size, req.page_token, req.reverse),
         )
         .map_err(channel_store_error_to_status)?;
@@ -3077,10 +3088,10 @@ impl HubService for MyHubService {
         request: Request<ChannelRequest>,
     ) -> Result<Response<ChannelMetadataResponse>, Status> {
         let req = request.into_inner();
-        self.require_registered_channel(&req.channel_id)?;
+        let channel_id = self.require_registered_channel(&req.channel_id)?;
         let update = ChannelUpdateStore::get_channel_update(
             &self.block_stores.channel_update_store,
-            &req.channel_id,
+            &channel_id,
             None,
         )
         .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
