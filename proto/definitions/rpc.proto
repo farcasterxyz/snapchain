@@ -111,10 +111,24 @@ service HubService {
   // (a boundary-aligned page may return one final empty page). There is no
   // `reverse` (addresses iterate ascending only).
   rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
-  // Channel-message reads use shard-0 stores. All channel_id values are the
-  // raw 32-byte registry labels. An unregistered channel returns NOT_FOUND;
-  // a registered channel with no matching state returns an empty/default
-  // response or page.
+  // Channel-message reads use shard-0 stores. All channel_id values are the raw
+  // 32-byte registry labels; any other width is INVALID_ARGUMENT, not NOT_FOUND.
+  //
+  // The five channel_id-keyed reads below require a registered channel and
+  // return NOT_FOUND otherwise; a registered channel with no matching state
+  // returns an empty/default response or page. GetChannelMembershipsByFid is
+  // the exception: it is keyed by fid alone, performs no registration check,
+  // and therefore never returns NOT_FOUND — it can list memberships for
+  // channels the caller cannot look up individually. It and GetChannelMember
+  // reject an fid that is zero or exceeds u32 with INVALID_ARGUMENT.
+  //
+  // Paging on the three list reads follows GetChannelsByAddress: `page_token`
+  // is opaque bytes, page until `next_page_token` is unset, and a
+  // boundary-aligned page may yield one final empty page. Unlike the reads
+  // above, a token is scoped to the index that minted it — passing one channel's
+  // token to another channel (or another fid's to GetChannelMembershipsByFid)
+  // is INVALID_ARGUMENT rather than a silent cross-channel read. `page_size` is
+  // clamped to the server maximum without signalling; omit it for the default.
   rpc GetChannelMember(ChannelMemberRequest) returns (ChannelMemberResponse);
   rpc GetChannelMembers(ChannelMembersRequest) returns (ChannelMembersResponse);
   rpc GetChannelPin(ChannelRequest) returns (ChannelPinResponse);
