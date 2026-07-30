@@ -247,6 +247,26 @@ impl EngineVersion {
         Self::version_for(&FarcasterTime::current(), network)
     }
 
+    /// Whether a replication snapshot taken at `snapshot_timestamp` (Farcaster
+    /// seconds) may carry channel rows.
+    ///
+    /// Both sides of replication have to answer this identically or a snapshot
+    /// straddling the boundary is served under one rule and replayed under
+    /// another: the server gates which rows it emits (`replicator.rs`, from
+    /// `ReplicationStores::get_timestamp`) and the bootstrap client gates whether
+    /// it will merge them (`bootstrap/replication/service.rs`, from
+    /// `ShardSnapshotMetadata.timestamp`). Those two timestamps share an origin —
+    /// the replicator's own snapshot metadata is what populates the wire field —
+    /// so keeping the derivation in one function is what makes the pair safe.
+    /// Do not re-inline it at either call site.
+    pub fn channel_messages_enabled_for_snapshot(
+        snapshot_timestamp: u64,
+        network: FarcasterNetwork,
+    ) -> bool {
+        Self::version_for(&FarcasterTime::new(snapshot_timestamp), network)
+            .is_enabled(ProtocolFeature::ChannelMessages)
+    }
+
     pub fn is_enabled(&self, feature: ProtocolFeature) -> bool {
         match feature {
             ProtocolFeature::SignerRevokeBug => {
@@ -882,6 +902,43 @@ mod version_test {
                 version
             );
         }
+    }
+
+    #[test]
+    fn snapshot_channel_gate_tracks_the_activation_boundary_on_every_network() {
+        // Both sides of replication derive "may this snapshot carry channel rows?"
+        // from a snapshot timestamp — the server to decide which rows it emits, the
+        // bootstrap client to decide whether it will merge them. They now share this
+        // function, so this is the one place that behavior is pinned. Hardcoding
+        // either call site to a literal used to leave every test green while a
+        // post-activation bootstrap died on its first channel row.
+        for network in [
+            FarcasterNetwork::Mainnet,
+            FarcasterNetwork::Testnet,
+            FarcasterNetwork::Devnet,
+        ] {
+            for timestamp in [0u64, 1, 1_000_000, u32::MAX as u64] {
+                assert_eq!(
+                    EngineVersion::channel_messages_enabled_for_snapshot(timestamp, network),
+                    EngineVersion::version_for(&FarcasterTime::new(timestamp), network)
+                        .is_enabled(ProtocolFeature::ChannelMessages),
+                    "snapshot gate must equal the schedule's answer at {timestamp} on {network:?}"
+                );
+            }
+        }
+
+        // Devnet activates channel messages at genesis, so a devnet snapshot always
+        // carries them — the case the bootstrap tests actually exercise.
+        assert!(EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Devnet
+        ));
+        // Mainnet at timestamp 0 predates every activation, so a snapshot from before
+        // the boundary must not be treated as channel-bearing.
+        assert!(!EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Mainnet
+        ));
     }
 
     #[test]

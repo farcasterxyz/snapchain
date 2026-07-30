@@ -1,5 +1,5 @@
 use crate::{
-    core::{util, util::FarcasterTime},
+    core::util,
     network::replication::{error::ReplicationError, replication_stores::ReplicationStores},
     proto::{
         self, shard_trie_entry_with_message::TrieMessage, GetShardTransactionsResponse,
@@ -18,7 +18,7 @@ use crate::{
         trie::merkle_trie::{self, TrieKey},
     },
     utils::statsd_wrapper::StatsdClientWrapper,
-    version::version::{EngineVersion, ProtocolFeature},
+    version::version::EngineVersion,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -530,9 +530,10 @@ impl Replicator {
         };
 
         let snapshot_timestamp = self.stores.get_timestamp(shard_id, height)?;
-        let channel_messages_enabled =
-            EngineVersion::version_for(&FarcasterTime::new(snapshot_timestamp), self.network())
-                .is_enabled(ProtocolFeature::ChannelMessages);
+        let channel_messages_enabled = EngineVersion::channel_messages_enabled_for_snapshot(
+            snapshot_timestamp,
+            self.network(),
+        );
 
         let mut trie = stores.trie.clone();
 
