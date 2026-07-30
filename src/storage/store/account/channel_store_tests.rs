@@ -446,6 +446,132 @@ mod tests {
     }
 
     #[test]
+    fn channel_read_paths_fail_loud_on_corrupt_index_state() {
+        // These enumerators deliberately hard-error on malformed state instead of
+        // skipping the row, so a corrupt replica is visible rather than quietly
+        // under-reporting. Nothing exercised those branches, which means a
+        // regression back to `continue` / `None` would be invisible — the reads
+        // would simply return fewer rows and look healthy.
+        let stores = test_stores();
+        let channel = channel_id(0x80);
+        let target_fid = 55;
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge(
+            &stores.member,
+            &member_message(
+                1,
+                channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddMember,
+                1,
+            ),
+            &mut txn,
+            DerivedIndexGate::Write,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+        // Baseline: the healthy reads work, so the failures below are caused by the
+        // injected corruption and not by an empty store.
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
+        );
+
+        // A by-fid index entry whose member slot does not exist. This is the anomaly
+        // the index can actually develop, since it is maintained separately from the
+        // slot and lives outside the trie.
+        let orphan_channel = channel_id(0x81);
+        let dangling =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &orphan_channel).unwrap();
+        stores.db.put(&dangling, &[]).unwrap();
+        let error = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            target_fid,
+            &PageOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_internal_state");
+        assert!(
+            error.message.contains("missing slot"),
+            "unexpected message: {}",
+            error.message
+        );
+        stores.db.del(&dangling).unwrap();
+
+        // Wrong-width keys inside each prefix. Truncating a real key by one byte keeps
+        // it inside the scan range while breaking the length invariant the callback
+        // relies on to slice out the fid / channel_id.
+        let mut short_by_fid =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &channel).unwrap();
+        short_by_fid.pop();
+        stores.db.put(&short_by_fid, &[]).unwrap();
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_by_fid).unwrap();
+
+        let mut short_slot = ChannelMemberStore::slot_key(&channel, target_fid).unwrap();
+        short_slot.pop();
+        stores.db.put(&short_slot, &[]).unwrap();
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &channel,
+                None,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_slot).unwrap();
+
+        let mut short_moderate = ChannelModerateStore::slot_key(&channel, &cast_hash(1));
+        short_moderate.pop();
+        stores.db.put(&short_moderate, &[]).unwrap();
+        assert_eq!(
+            ChannelModerateStore::moderations_by_channel(
+                &stores.moderate,
+                &channel,
+                &PageOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "invalid_internal_state"
+        );
+        stores.db.del(&short_moderate).unwrap();
+
+        // With the corruption removed the reads recover, so the errors above are not
+        // a permanently wedged store.
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
+        );
+    }
+
+    #[test]
     fn channel_reads_page_in_reverse_with_the_same_token_contract() {
         // `reverse` is plumbed from the request through `channel_page_options` into
         // every one of these reads, and the two directions use ASYMMETRIC bounds in
