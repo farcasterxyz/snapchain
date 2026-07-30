@@ -487,10 +487,11 @@ impl Replicator {
             | proto::MessageType::ChannelMember
             | proto::MessageType::ChannelPin
             | proto::MessageType::ChannelModerate => {
-                return Err(ReplicationError::InvalidMessage(format!(
-                    "Channel message type is inactive for snapshot {} on shard {}: {:?}",
-                    height, shard_id, user_message_type
-                )));
+                return Err(ReplicationError::ChannelMessagesInactive(
+                    shard_id,
+                    height,
+                    user_message_type,
+                ));
             }
         };
 
@@ -1057,13 +1058,32 @@ mod tests {
             proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events;
-        let replicator =
-            snapshot_replicator(&source, proto::FarcasterNetwork::Testnet, 1_784_124_000);
+        // Testnet's schedule tops out below the ChannelMessages activation, so no
+        // snapshot timestamp on this network can enable the feature. That — not the
+        // timestamp — is what makes this the pre-activation case; the value is 0 so it
+        // does not imply a boundary the schedule does not have. When testnet does get
+        // a V20 entry this test will fail loudly rather than silently stop testing the
+        // gate.
+        let replicator = snapshot_replicator(&source, proto::FarcasterNetwork::Testnet, 0);
+        assert!(!EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            proto::FarcasterNetwork::Testnet
+        ));
         let virtual_shard = TrieKey::for_message(&messages[0])[0][0];
         let error = replicator
             .messages_for_trie_prefix(SHARD_ID, SNAPSHOT_HEIGHT, virtual_shard, None)
             .unwrap_err();
-        assert!(matches!(error, ReplicationError::InvalidMessage(_)));
+        // Must be the ACTIVATION gate, not the permanently-unsupported-type arm.
+        // Those shared one error variant, so deleting all four gated arms left this
+        // test green.
+        assert!(
+            matches!(
+                error,
+                ReplicationError::ChannelMessagesInactive(SHARD_ID, SNAPSHOT_HEIGHT, message_type)
+                    if message_type == messages[0].msg_type()
+            ),
+            "expected the ChannelMessages activation gate, got {error:?}"
+        );
         assert_eq!(source.trie_root_hash(), root_before);
         assert_eq!(
             proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
