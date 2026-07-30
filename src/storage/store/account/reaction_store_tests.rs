@@ -3029,11 +3029,11 @@ mod tests {
     }
 
     #[test]
-    fn the_counter_matches_a_row_scan_after_a_churning_sequence() {
-        // The counter's whole safety argument is that it only moves on a genuine
-        // presence transition. This replays follows, unfollows, re-follows and
-        // duplicate follows, then checks the counter against the ground truth it
-        // is supposed to summarize.
+    fn the_derived_count_matches_the_rows_after_a_churning_sequence() {
+        // `follower_count` derives its answer by scanning the by-channel prefix,
+        // so this checks that the scan, the by-fid rows and a hand-computed
+        // expectation all agree after follows, unfollows, re-follows and
+        // duplicate follows.
         let (store, db, _dir) = create_test_store();
         let fids: Vec<u64> = (0..8).map(|i| FID_FOR_TEST + i).collect();
 

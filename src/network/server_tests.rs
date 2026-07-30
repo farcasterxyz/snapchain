@@ -1608,9 +1608,7 @@ mod tests {
         // member slot. These are the only errors on the read paths the caller can
         // actually cause.
         for err in [
-            HubError::invalid_parameter(
-                "page token does not belong to the requested channel index",
-            ),
+            HubError::invalid_parameter("page token does not belong to the requested index"),
             HubError::invalid_parameter("channel member fid exceeds u32"),
         ] {
             assert_eq!(

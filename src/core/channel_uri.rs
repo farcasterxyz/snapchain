@@ -131,6 +131,11 @@ pub fn channel_registrar_for_network(network: FarcasterNetwork) -> Option<Channe
         // not deployed. Its chain id and address land in the same change that
         // schedules V21 on mainnet — see the sequencing rule above.
         FarcasterNetwork::Mainnet => None,
+        // An unspecified network gets no registrar. Falling through to the
+        // development arm would index follows against Sepolia on a node that
+        // never said which network it is on, which is exactly the kind of
+        // implicit answer a consensus constant must not give.
+        FarcasterNetwork::None => None,
         // PROVISIONAL. Testnet's own deployment is not finalized either; it is
         // expected to be the same contract devnet uses, so both point at the
         // Sepolia development registry for now. Revisit when testnet is pinned —

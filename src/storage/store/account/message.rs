@@ -224,7 +224,7 @@ pub(crate) fn require_page_token_in_prefix(
 ) -> Result<(), HubError> {
     match &page_options.page_token {
         Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
-            "page token does not belong to the requested channel index",
+            "page token does not belong to the requested index",
         )),
         _ => Ok(()),
     }

@@ -513,11 +513,11 @@ impl ReactionStore {
     ) -> Result<ChannelPage<ChannelFollowEntry>, HubError> {
         let prefix = ReactionStoreDef::follow_by_channel_prefix(channel_id);
         Self::follow_page(store, prefix, page_options, |suffix, followed_at| {
-            ChannelFollowEntry {
+            Ok(ChannelFollowEntry {
                 fid: read_fid_key(suffix, 0),
                 channel_id: *channel_id,
                 followed_at,
-            }
+            })
         })
     }
 
@@ -529,13 +529,17 @@ impl ReactionStore {
     ) -> Result<ChannelPage<ChannelFollowEntry>, HubError> {
         let prefix = ReactionStoreDef::follow_by_fid_prefix(fid);
         Self::follow_page(store, prefix, page_options, move |suffix, followed_at| {
-            ChannelFollowEntry {
+            Ok(ChannelFollowEntry {
                 fid,
-                // Infallible: `follow_page` has already rejected any key whose
-                // suffix is not exactly CHANNEL_ID_LENGTH.
-                channel_id: suffix.try_into().unwrap_or([0u8; CHANNEL_ID_LENGTH]),
+                // `follow_page` has already rejected any key whose suffix is not
+                // exactly CHANNEL_ID_LENGTH, so this cannot fail — but it is
+                // surfaced rather than defaulted, because a silent zero
+                // channel_id would be indistinguishable from a real row.
+                channel_id: suffix.try_into().map_err(|_| {
+                    HubError::invalid_internal_state("channel follow key has invalid suffix")
+                })?,
                 followed_at,
-            }
+            })
         })
     }
 
@@ -547,7 +551,7 @@ impl ReactionStore {
         store: &Store<ReactionStoreDef>,
         prefix: Vec<u8>,
         page_options: &PageOptions,
-        mut entry: impl FnMut(&[u8], u32) -> ChannelFollowEntry,
+        mut entry: impl FnMut(&[u8], u32) -> Result<ChannelFollowEntry, HubError>,
     ) -> Result<ChannelPage<ChannelFollowEntry>, HubError> {
         require_page_token_in_prefix(&prefix, page_options)?;
         let suffix_length = FOLLOW_KEY_LENGTH - prefix.len();
@@ -567,7 +571,10 @@ impl ReactionStore {
                 let followed_at: [u8; 4] = value.try_into().map_err(|_| {
                     HubError::invalid_internal_state("channel follow row has invalid length")
                 })?;
-                entries.push(entry(&key[prefix.len()..], u32::from_be_bytes(followed_at)));
+                entries.push(entry(
+                    &key[prefix.len()..],
+                    u32::from_be_bytes(followed_at),
+                )?);
                 last_key = Some(key.to_vec());
                 Ok(entries.len() >= page_size)
             },
