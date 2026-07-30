@@ -235,16 +235,16 @@ pub fn validate_message(
         Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
             key::validate_key_remove_body(&key_remove_body)?;
         }
-        // Channel messages have no defined semantics and no engine can merge them, so they fail
-        // stateless validation outright. This is the only type-level rejection on the data-shard
-        // path: `ShardEngine::validate_user_message`'s body dispatch ends in a permissive `_ => {}`.
-        // Replacing this arm with real body validation therefore ADMITS these types to submit and
-        // gossip — do it only together with a `ProtocolFeature::ChannelMessages` gate.
+        // Channel bodies become statelessly admissible only with ChannelMessages. BlockEngine
+        // performs the state-aware authority checks; ShardEngine separately rejects direct
+        // channel admission because data-shard dispatch does not exist yet.
         Some(proto::message_data::Body::ChannelUpdateBody(_))
         | Some(proto::message_data::Body::ChannelMemberBody(_))
         | Some(proto::message_data::Body::ChannelPinBody(_))
         | Some(proto::message_data::Body::ChannelModerateBody(_)) => {
-            return Err(ValidationError::InvalidMessageType);
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
         }
         None => {}
     }

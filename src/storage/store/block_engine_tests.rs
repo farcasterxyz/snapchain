@@ -3,14 +3,19 @@ mod tests {
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
     use crate::proto::{
-        block_event_data, Block, BlockEvent, BlockEventType, ChannelRegisterEventType,
-        FarcasterNetwork, HubEvent, Message, MessageType, OnChainEvent, StorageUnitType, StoreType,
+        block_event_data, Block, BlockEvent, BlockEventType, ChannelMemberAction,
+        ChannelRegisterEventType, FarcasterNetwork, HubEvent, MembershipMode, Message, MessageType,
+        OnChainEvent, StorageUnitType, StoreType,
     };
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        make_ts_hash, HubEventStorageExt, IntoU8, StorageSlot, VerificationStore,
+        make_ts_hash, ChannelMemberState, ChannelMemberStore, ChannelUpdateStore,
+        HubEventStorageExt, IntoU8, MergeContext, StorageSlot, VerificationStore,
     };
-    use crate::storage::store::block_engine::{BlockStateChange, MessageValidationError};
+    use crate::storage::store::block_engine::{
+        channel_member_authority, BlockStateChange, ChannelAuthorRole, ChannelAuthorityDecision,
+        IsSelf, MessageValidationError, TargetIsOwner,
+    };
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::Limits;
@@ -106,14 +111,74 @@ mod tests {
     }
 
     fn verification_contract_add(address: Vec<u8>, timestamp: u32) -> Message {
+        verification_contract_add_for_fid(VERIFICATION_FID, address, timestamp)
+    }
+
+    fn verification_contract_add_for_fid(fid: u64, address: Vec<u8>, timestamp: u32) -> Message {
         messages_factory::verifications::create_verification_add(
-            VERIFICATION_FID,
+            fid,
             1,
             address,
             vec![],
             vec![0xB6; 32],
             Some(timestamp),
             None,
+        )
+    }
+
+    fn channel_update_message(
+        fid: u64,
+        channel_id: Vec<u8>,
+        name: &str,
+        membership_mode: Option<MembershipMode>,
+        timestamp: u32,
+    ) -> Message {
+        messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelUpdate,
+            crate::proto::message_data::Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id,
+                name: Some(name.to_string()),
+                membership_mode: membership_mode.map(|mode| mode as i32),
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn channel_member_message(
+        author_fid: u64,
+        channel_id: Vec<u8>,
+        target_fid: u64,
+        action: ChannelMemberAction,
+        timestamp: u32,
+    ) -> Message {
+        messages_factory::create_message_with_data(
+            author_fid,
+            MessageType::ChannelMember,
+            crate::proto::message_data::Body::ChannelMemberBody(crate::proto::ChannelMemberBody {
+                channel_id,
+                fid: target_fid,
+                action: action as i32,
+            }),
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn validate_channel_for_test(
+        engine: &crate::storage::store::block_engine::BlockEngine,
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+        engine.validate_user_message(
+            message,
+            &StorageSlot::new(0, 0, 1, u32::MAX),
+            &timestamp,
+            EngineVersion::V20,
+            txn,
         )
     }
 
@@ -150,6 +215,7 @@ mod tests {
         let entries = VerificationStore::get_verifications_by_address(
             &stores.verification_store,
             &verification_address(),
+            None,
         )
         .unwrap();
         match expected {
@@ -163,6 +229,1184 @@ mod tests {
             }
             None => assert!(entries.is_empty()),
         }
+    }
+
+    #[test]
+    fn channel_member_authority_exhaustively_matches_t1() {
+        use crate::storage::store::account::ChannelMemberState;
+
+        let actions = [
+            ChannelMemberAction::AddMember,
+            ChannelMemberAction::RemoveMember,
+            ChannelMemberAction::AddModerator,
+            ChannelMemberAction::RemoveModerator,
+            ChannelMemberAction::Ban,
+            ChannelMemberAction::Unban,
+        ];
+        let roles = [
+            ChannelAuthorRole::Owner,
+            ChannelAuthorRole::Moderator,
+            ChannelAuthorRole::Member,
+            ChannelAuthorRole::Other,
+        ];
+        let states = [
+            None,
+            Some(ChannelMemberState::Removed),
+            Some(ChannelMemberState::Member),
+            Some(ChannelMemberState::Moderator),
+            Some(ChannelMemberState::Banned),
+        ];
+
+        let mut cells = 0;
+        for action in actions {
+            for role in roles {
+                for state in states {
+                    for is_self in [false, true] {
+                        cells += 1;
+                        // This matcher is a direct transcription of T1's allowed cells. The
+                        // production helper is total and returns a reason for every rejected
+                        // cell; this matrix deliberately compares only admission so changing
+                        // a rejection category cannot hide an authority-table drift.
+                        let expected = match action {
+                            ChannelMemberAction::AddMember => {
+                                matches!(state, None | Some(ChannelMemberState::Removed))
+                                    && (matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    ) || is_self)
+                            }
+                            ChannelMemberAction::RemoveMember => match state {
+                                Some(ChannelMemberState::Member) => {
+                                    matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    ) || is_self
+                                }
+                                Some(ChannelMemberState::Moderator) => is_self,
+                                _ => false,
+                            },
+                            ChannelMemberAction::AddModerator => {
+                                role == ChannelAuthorRole::Owner
+                                    && matches!(
+                                        state,
+                                        None | Some(ChannelMemberState::Removed)
+                                            | Some(ChannelMemberState::Member)
+                                    )
+                            }
+                            ChannelMemberAction::RemoveModerator => {
+                                role == ChannelAuthorRole::Owner
+                                    && state == Some(ChannelMemberState::Moderator)
+                            }
+                            ChannelMemberAction::Ban => match state {
+                                None
+                                | Some(ChannelMemberState::Removed)
+                                | Some(ChannelMemberState::Member) => matches!(
+                                    role,
+                                    ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                ),
+                                Some(ChannelMemberState::Moderator) => {
+                                    role == ChannelAuthorRole::Owner
+                                }
+                                Some(ChannelMemberState::Banned) => false,
+                            },
+                            ChannelMemberAction::Unban => {
+                                state == Some(ChannelMemberState::Banned)
+                                    && matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    )
+                            }
+                            ChannelMemberAction::None => unreachable!(),
+                        };
+                        let actual = channel_member_authority(
+                            action,
+                            role,
+                            state,
+                            IsSelf(is_self),
+                            MembershipMode::Open,
+                            TargetIsOwner(false),
+                        ) == ChannelAuthorityDecision::Allowed;
+                        assert_eq!(
+                            actual, expected,
+                            "T1 drift at action={action:?}, role={role:?}, state={state:?}, self={is_self}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(cells, 6 * 4 * 5 * 2);
+
+        // APPROVAL and NONE both close the self-add exception. Owner/moderator authority remains
+        // intact; an otherwise unauthorized joining fid is rejected in both restrictive modes.
+        for mode in [MembershipMode::Approval, MembershipMode::None] {
+            for state in [None, Some(ChannelMemberState::Removed)] {
+                assert_eq!(
+                    channel_member_authority(
+                        ChannelMemberAction::AddMember,
+                        ChannelAuthorRole::Other,
+                        state,
+                        IsSelf(true),
+                        mode,
+                        TargetIsOwner(false),
+                    ),
+                    ChannelAuthorityDecision::Unauthorized
+                );
+            }
+        }
+
+        // The owner is unbannable by EVERY author role, from every target state, whether or not
+        // the ban is a self-ban. The non-self rows are the ones that matter: they are the only
+        // place the `target_is_owner` input is observed independently of `is_self`.
+        for state in states {
+            for role in roles {
+                for is_self in [false, true] {
+                    assert_eq!(
+                        channel_member_authority(
+                            ChannelMemberAction::Ban,
+                            role,
+                            state,
+                            IsSelf(is_self),
+                            MembershipMode::Open,
+                            TargetIsOwner(true),
+                        ),
+                        ChannelAuthorityDecision::OwnerUnbannable,
+                        "owner must be unbannable by role={role:?}, state={state:?}, self={is_self}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// T1's three non-member rows (ChannelUpdate = owner only; ChannelPin / ChannelModerate =
+    /// owner or moderator) are enforced inline in `validate_channel_message`, NOT by
+    /// `channel_member_authority`, so the exhaustive matrix above does not reach them. This
+    /// drives every (row x author role) cell through the real admission path, which also makes
+    /// it the only coverage of `channel_author_role`'s store-lookup branch: the pipeline tests
+    /// all author as the owner and short-circuit on the registry check before reading a slot.
+    #[test]
+    fn channel_pin_update_and_moderate_rows_enforce_t1_author_roles() {
+        use crate::proto::message_data::Body;
+
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 61;
+        let moderator_fid = 62;
+        let member_fid = 63;
+        let stranger_fid = 64;
+        let owner_address = vec![0x61; 20];
+        let channel_key = "role-channel";
+        let channel_id = channel_label(channel_key);
+
+        for fid in [owner_fid, moderator_fid, member_fid, stranger_fid] {
+            register_user(
+                fid,
+                default_signer(),
+                default_custody_address(),
+                1,
+                &mut engine,
+            );
+        }
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                61,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address, timestamp),
+            Validity::Valid,
+        );
+
+        // Seed a real moderator row and a real member row so author roles resolve from the store
+        // rather than from the owner short-circuit.
+        let stores = engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        for (target, action) in [
+            (moderator_fid, ChannelMemberAction::AddModerator),
+            (member_fid, ChannelMemberAction::AddMember),
+        ] {
+            let grant = channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                target,
+                action,
+                timestamp + 1,
+            );
+            assert!(
+                validate_channel_for_test(&engine, &grant, &mut txn).is_ok(),
+                "owner must be able to seed {action:?}"
+            );
+            ChannelMemberStore::merge(&stores.channel_member_store, &grant, &mut txn).unwrap();
+        }
+
+        let pin_body = |channel_id: Vec<u8>| {
+            Body::ChannelPinBody(crate::proto::ChannelPinBody {
+                channel_id,
+                cast_hash: vec![0x77; 20],
+            })
+        };
+        let moderate_body = |channel_id: Vec<u8>| {
+            Body::ChannelModerateBody(crate::proto::ChannelModerateBody {
+                channel_id,
+                cast_hash: vec![0x88; 20],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            })
+        };
+
+        // (message type, body builder, whether a moderator is authorized for this row)
+        let rows: Vec<(MessageType, Box<dyn Fn(Vec<u8>) -> Body>, bool)> = vec![
+            (
+                MessageType::ChannelUpdate,
+                Box::new(|channel_id| {
+                    Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                        channel_id,
+                        name: Some("role".to_string()),
+                        ..Default::default()
+                    })
+                }),
+                false,
+            ),
+            (MessageType::ChannelPin, Box::new(pin_body), true),
+            (MessageType::ChannelModerate, Box::new(moderate_body), true),
+        ];
+
+        for (index, (message_type, body, moderator_allowed)) in rows.iter().enumerate() {
+            for (author, is_owner_or_allowed_mod) in [
+                (owner_fid, true),
+                (moderator_fid, *moderator_allowed),
+                (member_fid, false),
+                (stranger_fid, false),
+            ] {
+                let message = messages_factory::create_message_with_data(
+                    author,
+                    *message_type,
+                    body(channel_id.clone()),
+                    Some(timestamp + 10 + index as u32),
+                    None,
+                );
+                let result = validate_channel_for_test(&engine, &message, &mut txn);
+                if is_owner_or_allowed_mod {
+                    assert!(
+                        result.is_ok(),
+                        "{message_type:?} must admit author {author}: {result:?}"
+                    );
+                } else {
+                    let error =
+                        result.expect_err(&format!("{message_type:?} must reject author {author}"));
+                    assert!(
+                        matches!(
+                            error,
+                            MessageValidationError::HubError(ref hub_error)
+                                if hub_error.message == "unauthorized channel action"
+                        ),
+                        "{message_type:?} author {author} rejected for the wrong reason: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn channel_validation_checks_type_and_widths_before_registry_state() {
+        use crate::proto::message_data::Body;
+
+        let (mut engine, _tmpdir) = setup();
+        let fid = 1234;
+        register_user(
+            fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let block_timestamp = FarcasterTime::new(timestamp as u64);
+        let storage_slot = StorageSlot::new(0, 0, 1, u32::MAX);
+
+        let (_, update_body) = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .next()
+            .unwrap();
+        let mismatch = messages_factory::create_message_with_data(
+            fid,
+            MessageType::KeyAdd,
+            update_body,
+            Some(timestamp),
+            None,
+        );
+        assert!(matches!(
+            engine.validate_user_message(
+                &mismatch,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
+        let wrong_channel_width = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![0x11; 31],
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &wrong_channel_width,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel id must be 32 bytes"
+        ));
+
+        let wrong_cast_width = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelModerate,
+            Body::ChannelModerateBody(crate::proto::ChannelModerateBody {
+                channel_id: vec![0x11; 32],
+                cast_hash: vec![0x22; 19],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &wrong_cast_width,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel moderate cast hash must be 20 bytes"
+        ));
+
+        let unknown_channel = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![0x11; 32],
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &unknown_channel,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "unknown channel"
+        ));
+    }
+
+    #[test]
+    fn same_block_verification_then_channel_action_commits_on_devnet() {
+        let (mut engine, _tmpdir) = setup();
+        let fid = 44;
+        let owner_address = vec![0x44; 20];
+        let channel_key = "same-block-channel";
+        let channel_id = channel_label(channel_key);
+        register_user(
+            fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                50,
+                1,
+            ),
+        );
+
+        let timestamp = messages_factory::farcaster_time();
+        let verification = verification_contract_add_for_fid(fid, owner_address, timestamp);
+        let update = channel_update_message(
+            fid,
+            channel_id.clone(),
+            "same block",
+            Some(MembershipMode::Open),
+            timestamp + 1,
+        );
+        let height = engine.get_confirmed_height().increment();
+        let state_change = engine.propose_state_change(
+            vec![
+                MempoolMessage::UserMessage(verification),
+                MempoolMessage::UserMessage(update.clone()),
+            ],
+            height,
+            Some(FarcasterTime::new((timestamp + 1) as u64)),
+        );
+        assert_eq!(state_change.transactions.len(), 1);
+        assert_eq!(state_change.transactions[0].user_messages.len(), 2);
+        validate_and_commit_state_change(&mut engine, &state_change);
+
+        let state = ChannelUpdateStore::get_channel_update(
+            &engine.stores().channel_update_store,
+            &channel_id,
+            None,
+        )
+        .unwrap()
+        .expect("channel update must merge in the full propose/validate/commit pipeline");
+        assert_eq!(state.body.name.as_deref(), Some("same block"));
+        assert_eq!(state.membership_mode, MembershipMode::Open);
+        assert!(state_change.events.iter().all(|event| {
+            event
+                .data
+                .as_ref()
+                .and_then(|data| data.body.as_ref())
+                .and_then(|body| match body {
+                    block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref(),
+                    _ => None,
+                })
+                .is_none_or(|message| message.msg_type() != MessageType::ChannelUpdate)
+        }));
+    }
+
+    #[test]
+    fn channel_owner_transfer_moves_authority_after_verification() {
+        let (mut engine, _tmpdir) = setup();
+        let old_fid = 51;
+        let new_fid = 52;
+        let old_address = vec![0x51; 20];
+        let new_address = vec![0x52; 20];
+        let channel_key = "transferred-channel";
+        let channel_id = channel_label(channel_key);
+        for fid in [old_fid, new_fid] {
+            register_user(
+                fid,
+                default_signer(),
+                default_custody_address(),
+                1,
+                &mut engine,
+            );
+        }
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                old_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                60,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(old_fid, old_address, timestamp),
+            Validity::Valid,
+        );
+
+        let old_update = channel_update_message(
+            old_fid,
+            channel_id.clone(),
+            "old owner",
+            Some(MembershipMode::Approval),
+            timestamp + 1,
+        );
+        assert!(engine.simulate_message(&old_update).is_ok());
+        commit_message(&mut engine, &old_update, Validity::Valid);
+
+        let owner_ban = channel_member_message(
+            old_fid,
+            channel_id.clone(),
+            old_fid,
+            ChannelMemberAction::Ban,
+            timestamp + 2,
+        );
+        let error = engine.simulate_message(&owner_ban).unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel owner cannot be banned"
+        ));
+
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                "",
+                channel_id.clone(),
+                new_address.clone(),
+                0,
+                ChannelRegisterEventType::Transfer,
+                61,
+                1,
+            ),
+        );
+        let stale_owner_update = channel_update_message(
+            old_fid,
+            channel_id.clone(),
+            "stale owner",
+            Some(MembershipMode::Approval),
+            timestamp + 3,
+        );
+        // Pin the reason, not just the failure: a bare `is_err()` here would also pass if the
+        // transfer had broken owner resolution outright (unknown channel, duplicate hash), which
+        // is exactly the bug this test is named for. The transfer moved ownership to an address
+        // with no shard-0 verification, so the channel is parked and the freeze rejects everyone
+        // — including the stale owner — until the new address verifies.
+        let stale_error = engine.simulate_message(&stale_owner_update).unwrap_err();
+        assert!(
+            matches!(
+                stale_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "channel is parked"
+            ),
+            "old owner must lose authority via the parked freeze, got {stale_error:?}"
+        );
+
+        let new_owner_update = channel_update_message(
+            new_fid,
+            channel_id.clone(),
+            "new owner",
+            Some(MembershipMode::Open),
+            timestamp + 4,
+        );
+        let unverified_error = engine.simulate_message(&new_owner_update).unwrap_err();
+        assert!(
+            matches!(
+                unverified_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "channel is parked"
+            ),
+            "new owner must stay frozen until the new address is verified on shard 0, got {unverified_error:?}"
+        );
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(new_fid, new_address, timestamp + 3),
+            Validity::Valid,
+        );
+        assert!(engine.simulate_message(&new_owner_update).is_ok());
+        commit_message(&mut engine, &new_owner_update, Validity::Valid);
+    }
+
+    #[test]
+    fn parked_channel_freezes_all_actions_except_self_leave() {
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 71;
+        let mod_fid = 72;
+        let member_fid = 73;
+        let outsider_fid = 74;
+        let owner_address = vec![0x71; 20];
+        let channel_key = "parked-channel";
+        let channel_id = channel_label(channel_key);
+        for fid in [owner_fid, mod_fid, member_fid, outsider_fid] {
+            register_user(
+                fid,
+                default_signer(),
+                default_custody_address(),
+                1,
+                &mut engine,
+            );
+        }
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                70,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let assert_parked = |engine: &mut crate::storage::store::block_engine::BlockEngine,
+                             message: &Message,
+                             what: &str| {
+            let error = engine.simulate_message(message).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    MessageValidationError::HubError(ref hub_error)
+                        if hub_error.message == "channel is parked"
+                ),
+                "{what} must be rejected as parked, got {error:?}"
+            );
+        };
+
+        // Day-one shape: registered channel, owner address never verified on shard 0.
+        assert_parked(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "day one",
+                Some(MembershipMode::Open),
+                timestamp,
+            ),
+            "the owner's first action before any verification",
+        );
+
+        // Verify the owner, open the channel, and seed a moderator and a member.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "open",
+                Some(MembershipMode::Open),
+                timestamp + 1,
+            ),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                mod_fid,
+                ChannelMemberAction::AddModerator,
+                timestamp + 2,
+            ),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::AddMember,
+                timestamp + 3,
+            ),
+            Validity::Valid,
+        );
+
+        // Park the channel: the owner's verification is removed, so the owner address no longer
+        // resolves to a fid.
+        commit_message(
+            &mut engine,
+            &messages_factory::verifications::create_verification_remove(
+                owner_fid,
+                owner_address.clone(),
+                Some(timestamp + 4),
+                None,
+            ),
+            Validity::Valid,
+        );
+
+        // Every authority-bearing action is frozen — including the true owner's own, the
+        // moderator's still-seeded powers, and the previously-admitted moderator ban of the
+        // unresolvable owner (the fail-open this freeze closes).
+        assert_parked(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "parked owner",
+                None,
+                timestamp + 5,
+            ),
+            "the unresolvable owner's update",
+        );
+        assert_parked(
+            &mut engine,
+            &messages_factory::create_message_with_data(
+                mod_fid,
+                MessageType::ChannelPin,
+                crate::proto::message_data::Body::ChannelPinBody(crate::proto::ChannelPinBody {
+                    channel_id: channel_id.clone(),
+                    cast_hash: vec![0x77; 20],
+                }),
+                Some(timestamp + 6),
+                None,
+            ),
+            "a moderator pin while parked (the availability cost, pinned deliberately)",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::Ban,
+                timestamp + 7,
+            ),
+            "a moderator ban of a member while parked",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                owner_fid,
+                ChannelMemberAction::Ban,
+                timestamp + 8,
+            ),
+            "a moderator ban of the unresolvable owner (fail-open closure)",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                outsider_fid,
+                channel_id.clone(),
+                outsider_fid,
+                ChannelMemberAction::AddMember,
+                timestamp + 9,
+            ),
+            "an OPEN self-add while parked (joins mint slots nobody can police)",
+        );
+
+        // Self-leave is the sole exception: its authority is self-contained, so a member and a
+        // moderator can still remove themselves. A never-seen fid's self-leave falls through to
+        // the authority table and is rejected on target state — the carve-out mints nothing.
+        let outsider_leave = channel_member_message(
+            outsider_fid,
+            channel_id.clone(),
+            outsider_fid,
+            ChannelMemberAction::RemoveMember,
+            timestamp + 10,
+        );
+        let outsider_error = engine.simulate_message(&outsider_leave).unwrap_err();
+        assert!(
+            matches!(
+                outsider_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "invalid channel target state"
+            ),
+            "a never-seen fid's self-leave must fail on target state, not mint a row, got {outsider_error:?}"
+        );
+        assert!(engine
+            .simulate_message(&channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                mod_fid,
+                ChannelMemberAction::RemoveMember,
+                timestamp + 11,
+            ))
+            .is_ok());
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                member_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::RemoveMember,
+                timestamp + 12,
+            ),
+            Validity::Valid,
+        );
+
+        // Unparking is the owner re-verifying; full authority returns.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address, timestamp + 13),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "unparked",
+                Some(MembershipMode::Approval),
+                timestamp + 14,
+            ),
+            Validity::Valid,
+        );
+    }
+
+    #[test]
+    fn parked_freeze_transitions_within_a_single_block_are_deterministic() {
+        // The freeze resolves the owner THROUGH the transaction batch, so a verification remove or
+        // add earlier in a block parks or unparks the channel for a later message in the SAME
+        // block. Both interleavings are now reachable states. Keep the verification and the channel
+        // action under one fid so they share a per-fid transaction whose `user_messages` replay in
+        // input order in propose AND validate; `commit_messages` asserts both produced identical
+        // state roots, so a mid-block transition is deterministic, not a propose/validate split.
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 81;
+        let owner_address = vec![0x81; 20];
+        let channel_key = "midblock-channel";
+        let channel_id = channel_label(channel_key);
+        register_user(
+            owner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                80,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        // Resolve the owner first: the channel starts UNparked and the owner is authorized.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp),
+            Validity::Valid,
+        );
+
+        // PARK MID-BLOCK. The identical owner update is authorized against the current unparked
+        // state, so the only thing that can freeze it is the remove landing ahead of it.
+        let frozen_update =
+            channel_update_message(owner_fid, channel_id.clone(), "frozen", None, timestamp + 2);
+        assert!(
+            engine.simulate_message(&frozen_update).is_ok(),
+            "owner update must be valid while the channel is unparked",
+        );
+        let park_remove = messages_factory::verifications::create_verification_remove(
+            owner_fid,
+            owner_address.clone(),
+            Some(timestamp + 1),
+            None,
+        );
+        // One block: the remove parks the channel, then the owner's own update in the same block
+        // resolves to `None` and is frozen — rejected, never written to the trie — even though the
+        // same author committed successfully one block earlier.
+        commit_messages(
+            &mut engine,
+            vec![
+                (&park_remove, Validity::Valid),
+                (&frozen_update, Validity::Invalid),
+            ],
+        );
+
+        // UNPARK MID-BLOCK. One block: the owner re-verifies, then the owner's update lands behind
+        // it — the add resolves the owner and the update is admitted in the same block that thawed
+        // the channel.
+        let unpark_add =
+            verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp + 3);
+        let thawed_update = channel_update_message(
+            owner_fid,
+            channel_id.clone(),
+            "thawed",
+            Some(MembershipMode::Approval),
+            timestamp + 4,
+        );
+        commit_messages(
+            &mut engine,
+            vec![
+                (&unpark_add, Validity::Valid),
+                (&thawed_update, Validity::Valid),
+            ],
+        );
+    }
+
+    #[test]
+    fn channel_moderator_cap_is_enforced_at_ten_through_the_txn() {
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 61;
+        let owner_address = vec![0x61; 20];
+        let channel_key = "moderator-cap-channel";
+        let channel_id = channel_label(channel_key);
+        register_user(
+            owner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                70,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address, timestamp),
+            Validity::Valid,
+        );
+
+        let stores = engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        for index in 0..9 {
+            ChannelMemberStore::merge(
+                &stores.channel_member_store,
+                &channel_member_message(
+                    owner_fid,
+                    channel_id.clone(),
+                    1_000 + index,
+                    ChannelMemberAction::AddModerator,
+                    timestamp + 1 + index as u32,
+                ),
+                &mut txn,
+            )
+            .unwrap();
+        }
+        let tenth = channel_member_message(
+            owner_fid,
+            channel_id.clone(),
+            2_000,
+            ChannelMemberAction::AddModerator,
+            timestamp + 20,
+        );
+        assert!(validate_channel_for_test(&engine, &tenth, &mut txn).is_ok());
+        ChannelMemberStore::merge(&stores.channel_member_store, &tenth, &mut txn).unwrap();
+        assert_eq!(
+            ChannelMemberStore::live_moderator_count(
+                &stores.channel_member_store,
+                &channel_id,
+                Some(&txn),
+            )
+            .unwrap(),
+            10
+        );
+
+        let eleventh = channel_member_message(
+            owner_fid,
+            channel_id,
+            2_001,
+            ChannelMemberAction::AddModerator,
+            timestamp + 21,
+        );
+        let error = validate_channel_for_test(&engine, &eleventh, &mut txn).unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel moderator cap reached"
+        ));
+    }
+
+    #[test]
+    fn channel_self_add_follows_folded_modes_and_bans() {
+        let (mut engine, _tmpdir) = setup();
+        let joiner_fid = 71;
+        let channel_key = "self-add-channel";
+        let channel_id = channel_label(channel_key);
+        register_user(
+            joiner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                vec![0x72; 20],
+                1_000,
+                ChannelRegisterEventType::Register,
+                80,
+                1,
+            ),
+        );
+        // The owner address must resolve, or the parked freeze rejects everything before the
+        // fold/ban logic under test is ever reached.
+        let owner_fid = 72;
+        register_user(
+            owner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(
+                owner_fid,
+                vec![0x72; 20],
+                messages_factory::farcaster_time(),
+            ),
+            Validity::Valid,
+        );
+
+        let stores = engine.stores();
+        let timestamp = messages_factory::farcaster_time();
+        let mut txn = RocksDbTransactionBatch::new();
+        for (mode, admitted) in [
+            (MembershipMode::Open, true),
+            (MembershipMode::Approval, false),
+            (MembershipMode::None, false),
+        ] {
+            ChannelUpdateStore::merge(
+                &stores.channel_update_store,
+                &channel_update_message(
+                    joiner_fid,
+                    channel_id.clone(),
+                    "mode",
+                    Some(mode),
+                    timestamp + mode as u32 + 1,
+                ),
+                &mut txn,
+            )
+            .unwrap();
+            let self_add = channel_member_message(
+                joiner_fid,
+                channel_id.clone(),
+                joiner_fid,
+                ChannelMemberAction::AddMember,
+                timestamp + 10 + mode as u32,
+            );
+            assert_eq!(
+                validate_channel_for_test(&engine, &self_add, &mut txn).is_ok(),
+                admitted,
+                "unexpected self-add result for folded mode {mode:?}"
+            );
+        }
+
+        ChannelUpdateStore::merge(
+            &stores.channel_update_store,
+            &channel_update_message(
+                joiner_fid,
+                channel_id.clone(),
+                "open again",
+                Some(MembershipMode::Open),
+                timestamp + 30,
+            ),
+            &mut txn,
+        )
+        .unwrap();
+        ChannelMemberStore::merge(
+            &stores.channel_member_store,
+            &channel_member_message(
+                999,
+                channel_id.clone(),
+                joiner_fid,
+                ChannelMemberAction::Ban,
+                timestamp + 31,
+            ),
+            &mut txn,
+        )
+        .unwrap();
+        assert_eq!(
+            ChannelMemberStore::member_state(
+                &stores.channel_member_store,
+                &channel_id,
+                joiner_fid,
+                Some(&txn),
+            )
+            .unwrap(),
+            Some(ChannelMemberState::Banned)
+        );
+        let self_add = channel_member_message(
+            joiner_fid,
+            channel_id,
+            joiner_fid,
+            ChannelMemberAction::AddMember,
+            timestamp + 32,
+        );
+        let error = validate_channel_for_test(&engine, &self_add, &mut txn).unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel member is banned"
+        ));
+    }
+
+    #[test]
+    fn channel_owner_fid_resolution_sees_same_transaction_verification_changes() {
+        let (engine, _tmpdir) = setup();
+        let stores = engine.stores();
+        let owner_address = vec![0xAB; 20];
+        let older = messages_factory::verifications::create_verification_add(
+            10,
+            1,
+            owner_address.clone(),
+            vec![],
+            vec![0x11; 32],
+            Some(100),
+            None,
+        );
+        let newer = messages_factory::verifications::create_verification_add(
+            20,
+            1,
+            owner_address.clone(),
+            vec![],
+            vec![0x22; 32],
+            Some(200),
+            None,
+        );
+        let remove_newer = messages_factory::verifications::create_verification_remove(
+            20,
+            owner_address.clone(),
+            Some(300),
+            None,
+        );
+        let mut txn = RocksDbTransactionBatch::new();
+        let ctx = MergeContext {
+            version: EngineVersion::V20,
+        };
+        stores
+            .verification_store
+            .merge(&older, &mut txn, &ctx)
+            .unwrap();
+        stores
+            .verification_store
+            .merge(&newer, &mut txn, &ctx)
+            .unwrap();
+        assert_eq!(
+            stores
+                .resolve_channel_owner_fid(&owner_address, Some(&txn))
+                .unwrap(),
+            Some(20)
+        );
+        stores
+            .verification_store
+            .merge(&remove_newer, &mut txn, &ctx)
+            .unwrap();
+        assert_eq!(
+            stores
+                .resolve_channel_owner_fid(&owner_address, Some(&txn))
+                .unwrap(),
+            Some(10)
+        );
     }
 
     fn verification_block_event_messages(block: &Block) -> Vec<&Message> {

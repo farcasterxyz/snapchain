@@ -18,6 +18,8 @@ use crate::{
     proto::{Message, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
 };
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -344,6 +346,7 @@ impl VerificationStore {
     pub fn get_verifications_by_address(
         store: &Store<VerificationStoreDef>,
         address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
     ) -> Result<Vec<(u64, [u8; TS_HASH_LENGTH])>, HubError> {
         // An empty address would make the prefix just the root byte and scan the
         // entire by-address keyspace; no verification has an empty address, so
@@ -355,31 +358,46 @@ impl VerificationStore {
         let prefix = VerificationStoreDef::make_verification_by_address_prefix(address);
         let prefix_len = prefix.len();
         let stop_prefix = increment_vec_u8(&prefix);
-        let mut entries = Vec::new();
-
+        let mut records = BTreeMap::new();
         store.db().for_each_iterator_by_prefix(
-            Some(prefix),
+            Some(prefix.clone()),
             Some(stop_prefix),
             &PageOptions::default(),
             |key, value| {
-                // Best-effort, node-local index: skip anything that isn't a
-                // well-formed new-format (address ++ fid_key -> ts_hash) entry
-                // rather than failing the whole read. During the background M2
-                // migration a legacy address-only slot (key == prefix, 4-byte
-                // fid value) still lives under this prefix; tolerating it keeps
-                // reads for the address working instead of turning a transitional
-                // state into a read outage. Skipping also keeps read_ts_hash from
-                // ever seeing a short value.
-                if key.len() != prefix_len + FID_BYTES || value.len() != TS_HASH_LENGTH {
-                    return Ok(false);
-                }
-
-                let fid = read_fid_key(key, prefix_len);
-                entries.push((fid, read_ts_hash(value, 0)));
-
+                records.insert(key.to_vec(), value.to_vec());
                 Ok(false)
             },
         )?;
+        // RocksDB iterators cannot see the caller's uncommitted batch. Overlay every matching
+        // put/delete so a second shard-0 message in the same block observes the first one.
+        if let Some(txn) = maybe_txn {
+            for (key, value) in &txn.batch {
+                if !key.starts_with(&prefix) {
+                    continue;
+                }
+                match value {
+                    Some(value) => {
+                        records.insert(key.clone(), value.clone());
+                    }
+                    None => {
+                        records.remove(key);
+                    }
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        for (key, value) in records {
+            // Best-effort, node-local index: skip anything that isn't a well-formed new-format
+            // (address ++ fid_key -> ts_hash) entry rather than failing the whole read. During
+            // the background migration a legacy address-only slot can still live under this
+            // prefix; tolerating it keeps reads available through the transitional state.
+            if key.len() != prefix_len + FID_BYTES || value.len() != TS_HASH_LENGTH {
+                continue;
+            }
+            let fid = read_fid_key(&key, prefix_len);
+            entries.push((fid, read_ts_hash(&value, 0)));
+        }
 
         Ok(entries)
     }
@@ -401,4 +419,17 @@ impl VerificationStore {
     ) -> Result<MessagesPage, HubError> {
         store.get_removes_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
+}
+
+/// Deterministic address-owner selection shared by shard-0 authority reads and RPC resolution.
+/// The greatest ts_hash wins; an exact ts_hash tie selects the lower fid.
+pub fn select_verification_address_winner<I>(candidates: I) -> Option<u64>
+where
+    I: IntoIterator<Item = (u64, [u8; TS_HASH_LENGTH])>,
+{
+    candidates
+        .into_iter()
+        .map(|(fid, ts_hash)| (ts_hash, Reverse(fid)))
+        .max()
+        .map(|(_ts_hash, fid)| fid.0)
 }

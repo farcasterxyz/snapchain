@@ -14,7 +14,7 @@ mod tests {
             StorageUnitType, Transaction,
         },
         storage::store::{
-            account::make_ts_hash,
+            account::{make_ts_hash, ChannelModerateStore},
             block_engine::BlockEngine,
             block_engine_test_helpers,
             engine::ShardEngine,
@@ -68,6 +68,31 @@ mod tests {
         broadcast::Sender<Block>,
         mpsc::Receiver<SystemMessage>,
     ) {
+        setup_for_network(
+            config,
+            enable_rate_limits,
+            num_shards,
+            FarcasterNetwork::Devnet,
+        )
+        .await
+    }
+
+    async fn setup_for_network(
+        config: Option<Config>,
+        enable_rate_limits: bool,
+        num_shards: u32,
+        network: FarcasterNetwork,
+    ) -> (
+        HashMap<u32, ShardEngine>,
+        BlockEngine,
+        Option<SnapchainGossip>,
+        Mempool,
+        mpsc::Sender<MempoolRequest>,
+        mpsc::Sender<MempoolMessagesRequest>,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+        mpsc::Receiver<SystemMessage>,
+    ) {
         let keypair = Keypair::generate();
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -98,7 +123,7 @@ mod tests {
                     &config,
                     Some(system_tx),
                     false,
-                    proto::FarcasterNetwork::Devnet,
+                    network,
                     statsd_client.clone(),
                 )
                 .await
@@ -115,7 +140,7 @@ mod tests {
         mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
-            FarcasterNetwork::Devnet,
+            network,
             mempool_rx,
             messages_request_rx,
             num_shards,
@@ -138,6 +163,55 @@ mod tests {
             block_decision_tx,
             system_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_channel_messages_are_rejected_by_mempool_before_activation() {
+        let (_, _, _, mut mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let error = mempool
+                .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
+                .unwrap_err();
+            assert_eq!(error.message, "channel messages not yet active");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_moderate_dedup_uses_the_full_message_key() {
+        let (_, block_engine, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let fid = 1234;
+        let timestamp = messages_factory::farcaster_time();
+        let channel_id = vec![0x11; 32];
+        let moderate = |cast_byte| {
+            messages_factory::create_message_with_data(
+                fid,
+                proto::MessageType::ChannelModerate,
+                proto::message_data::Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id: channel_id.clone(),
+                    cast_hash: vec![cast_byte; 20],
+                    action: proto::ChannelModerateAction::Hide as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        };
+        let merged = moderate(0x22);
+        let distinct_slot = moderate(0x33);
+        let stores = block_engine.stores();
+        let mut txn = crate::storage::db::RocksDbTransactionBatch::new();
+        ChannelModerateStore::merge(&stores.channel_moderate_store, &merged, &mut txn).unwrap();
+        stores.db.commit(txn).unwrap();
+
+        assert!(mempool
+            .message_is_valid(0, &MempoolMessage::UserMessage(merged.clone()), true,)
+            .is_err());
+        assert!(mempool
+            .message_is_valid(0, &MempoolMessage::UserMessage(distinct_slot), true)
+            .is_ok());
     }
 
     async fn pull_message(

@@ -756,12 +756,17 @@ impl ShardEngine {
                         Some(ProtocolFeature::VerificationsOnShardZero),
                         ReplayMerge::Forced,
                     ),
-                    // The channel message types belong here, mapped to
-                    // `ProtocolFeature::ChannelMessages`, as soon as anything can merge them.
-                    // They are omitted only because `merge_message` rejects them outright today,
-                    // so this gate would be unreachable. That makes the wildcard fail-OPEN for
-                    // them: wire up merge dispatch without revisiting this arm and a channel
-                    // message replayed via a BlockEvent merges with no version gate at all.
+                    // Intentionally gated but undispatchable in this increment. Shard 0 can merge
+                    // channel messages, but its BlockEvent allowlist does not emit them yet and
+                    // ShardEngine::merge_message still has no channel stores. Inc 7 adds both;
+                    // keeping ReplayMerge::Normal here closes the wildcard fail-open without
+                    // wiring data-shard state early.
+                    MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate => {
+                        (Some(ProtocolFeature::ChannelMessages), ReplayMerge::Normal)
+                    }
                     _ => (None, ReplayMerge::Normal),
                 };
                 if let Some(feature) = feature_gate {
@@ -2033,6 +2038,21 @@ impl ShardEngine {
             ));
         }
 
+        // Channel state is shard-0-only in this increment. Keep direct data-shard admission
+        // rejected even after stateless channel validation activates; the replay gate below is
+        // intentionally gated-but-undispatchable until data-shard stores land.
+        if matches!(
+            message_data.r#type(),
+            MessageType::ChannelUpdate
+                | MessageType::ChannelMember
+                | MessageType::ChannelPin
+                | MessageType::ChannelModerate
+        ) {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
+
         // State-dependent verifications:
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
@@ -2954,6 +2974,38 @@ mod verification_replay_gate_tests {
             )) if value == MessageType::VerificationRemove as i32
         ));
     }
+
+    #[tokio::test]
+    async fn channel_block_event_is_gated_but_has_no_data_shard_dispatch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let (message_type, body) = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .next()
+            .unwrap();
+        let message = messages_factory::create_message_with_data(
+            FID3_FOR_TEST,
+            message_type,
+            body,
+            None,
+            None,
+        );
+        let block_event = events_factory::create_merge_message_event(message, 1);
+
+        // Devnet resolves the event timestamp with ChannelMessages active, so this passes the
+        // new replay gate and reaches the deliberately absent ShardEngine dispatch.
+        let result = engine.handle_block_event(
+            trie_ctx(),
+            &block_event,
+            &mut RocksDbTransactionBatch::new(),
+            crate::version::version::EngineVersion::V20,
+        );
+        assert!(matches!(
+            result,
+            Err(EngineError::EngineMessageValidationError(
+                MessageValidationError::InvalidMessageType(value)
+            )) if value == MessageType::ChannelUpdate as i32
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -3025,15 +3077,8 @@ mod channel_message_inertness_tests {
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Channel messages route by fid to a data shard (see
-    /// `channel_messages_continue_to_route_by_fid`), so `ShardEngine` — not `BlockEngine` — is the
-    /// admission gate they actually reach. `ShardEngine::validate_user_message`'s body dispatch
-    /// ends in `_ => {}`, which ACCEPTS unrecognized bodies, so the sole thing rejecting a channel
-    /// message here is the arm in `core::validations::message`. Assert the exact error: if a later
-    /// increment installs real body validation without gating admission on
-    /// `ProtocolFeature::ChannelMessages`, channel messages would pass submit and gossip on mainnet
-    /// while dormant. `merge_message` would still refuse them, so this is not a state divergence —
-    /// but it is exactly the accidental wiring these tests exist to catch.
+    /// Routing sends channel messages to shard 0, but ShardEngine still rejects them if they are
+    /// injected directly. Its merge dispatch remains absent until data-shard replay lands.
     #[tokio::test]
     async fn channel_messages_are_rejected_by_shard_engine_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
@@ -3059,14 +3104,26 @@ mod channel_message_inertness_tests {
             assert!(
                 matches!(
                     result,
-                    Err(MessageValidationError::MessageValidationError(
-                        ValidationError::InvalidMessageType
-                    ))
+                    Err(MessageValidationError::InvalidMessageType(value))
+                        if value == message_type as i32
                 ),
                 "{:?} must be rejected by ShardEngine admission, got {:?}",
                 message_type,
                 result
             );
+
+            let pre_feature = engine.validate_user_message(
+                &message,
+                &timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                pre_feature,
+                Err(MessageValidationError::MessageValidationError(
+                    ValidationError::InvalidMessageType
+                ))
+            ));
         }
     }
 
@@ -3087,21 +3144,17 @@ mod channel_message_inertness_tests {
     }
 
     #[test]
-    fn channel_messages_continue_to_route_by_fid() {
+    fn channel_messages_route_to_shard_zero_before_and_after_feature() {
         let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
         let fid = 1234;
         let num_shards = 2;
-        let expected = router.route_fid(fid, num_shards);
-        // Channel messages must land on a data shard, never shard 0 (the block shard).
-        assert_ne!(expected, 0);
 
-        for (message_type, body) in messages_factory::channels::all_message_bodies() {
-            let message =
-                messages_factory::create_message_with_data(fid, message_type, body, None, None);
-            assert_eq!(
-                route_message(&router, &message, num_shards, EngineVersion::V20),
-                expected
-            );
+        for version in [EngineVersion::V19, EngineVersion::V20] {
+            for (message_type, body) in messages_factory::channels::all_message_bodies() {
+                let message =
+                    messages_factory::create_message_with_data(fid, message_type, body, None, None);
+                assert_eq!(route_message(&router, &message, num_shards, version), 0);
+            }
         }
     }
 }

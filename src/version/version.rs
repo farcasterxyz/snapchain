@@ -308,13 +308,23 @@ impl EngineVersion {
             // consumer co-activating with this feature reads an empty store on day one. Revisit
             // this bundling if a consumer needs history at first read.
             //
-            // ChannelMessages has no consumer yet: the four channel message types exist on the
-            // wire, but nothing merges, stores, or replicates them. (Routing and JSON read
-            // mapping DO handle them — that is deliberate and inert; do not widen this sentence.)
-            // Whatever adds merge dispatch must gate it on this feature in the same change.
+            // ChannelMessages now HAS a shard-0 consumer: `BlockEngine::validate_channel_message`
+            // admits the four channel types under this gate and `merge_channel_message` merges
+            // them into the four channel slot stores. It has no DATA-SHARD consumer — shard 0's
+            // BlockEvent allowlist still excludes channel types, so they never fan out and a
+            // fid's data shard never sees them. `ShardEngine` rejects direct channel admission
+            // and has no channel merge dispatch; its replay gate arm is deliberately
+            // gated-but-undispatchable until that fan-out lands.
+            //
+            // The rule that got us here still binds anything added next: whatever widens this
+            // (data-shard dispatch, fan-out) must gate it on this feature in the SAME change.
             // Nothing will remind you: `merge_message` ends in a catch-all arm, so new handling
             // raises no exhaustiveness error, and no compiler check can demand a runtime gate.
             // A type that can merge before its gate is a permanent replay divergence.
+            //
+            // Owner authority for channel messages resolves through the SHARD-0 verification
+            // replica, which the paragraph above notes is empty at activation. That coupling is
+            // load-bearing and unresolved — see `BlockStores::resolve_channel_owner_fid`.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents

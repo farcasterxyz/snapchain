@@ -1236,18 +1236,18 @@ impl OnchainEventStore {
         read_channel_owner_by_channel_key(&self.db, txn, channel_key)
     }
 
-    /// Reads the ChannelKeyByLabel index (label -> channel_key). Test-only: the
-    /// production TRANSFER path resolves the label internally, so there is no
-    /// non-test caller; tests use it to assert the index materialized.
-    #[cfg(test)]
+    /// Reads the ChannelKeyByLabel index (label -> channel_key) through the caller's transaction.
+    /// Channel admission uses this as the first hop from the 32-byte channel label carried by a
+    /// message to the materialized owner record.
     pub fn get_channel_key_by_label(
         &self,
         label: &[u8],
+        txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<String>, OnchainEventStorageError> {
         let empty_txn = RocksDbTransactionBatch::new();
         match get_from_db_or_txn(
             &self.db,
-            &empty_txn,
+            txn_batch.unwrap_or(&empty_txn),
             &make_channel_register_channel_key_by_label_key(label),
         )? {
             Some(bytes) => Ok(Some(

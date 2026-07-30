@@ -74,6 +74,14 @@ pub fn type_to_set_postfix(message_type: MessageType) -> Result<UserPostfix, Hub
         return Ok(UserPostfix::LendStorageMessage);
     }
 
+    match message_type {
+        MessageType::ChannelUpdate => return Ok(UserPostfix::ChannelUpdateMessage),
+        MessageType::ChannelMember => return Ok(UserPostfix::ChannelMemberMessage),
+        MessageType::ChannelPin => return Ok(UserPostfix::ChannelPinMessage),
+        MessageType::ChannelModerate => return Ok(UserPostfix::ChannelModerateMessage),
+        _ => {}
+    }
+
     return Err(HubError {
         code: "internal_error".to_string(),
         message: format!(

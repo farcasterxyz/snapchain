@@ -60,6 +60,9 @@ pub enum RootPrefix {
     /* Gasless-key nonces (user + app counters for KEY_ADD / KEY_REMOVE replay protection).
      * "Gasless" distinguishes these from on-chain signer events and from storage-layer "keys". */
     GaslessKey = 23,
+
+    /* Shard-0 channel slot indexes and per-channel counters. */
+    Channel = 24,
 }
 
 /** Copied from the JS code */
@@ -75,6 +78,10 @@ pub enum UserPostfix {
     UserDataMessage = 6,
     UsernameProofMessage = 7,
     LendStorageMessage = 8,
+    ChannelUpdateMessage = 9,
+    ChannelMemberMessage = 10,
+    ChannelPinMessage = 11,
+    ChannelModerateMessage = 12,
 
     // Add new message types here
     // NOTE: If you add a new message type, make sure that it is only used to store Message protobufs.
@@ -143,6 +150,11 @@ pub enum UserPostfix {
      * counted here — they have their own cap at the L2 KeyRegistry. Absent entry == 0;
      * decrementing to 0 deletes the entry to keep the index sparse. */
     GaslessKeyCountByFid = 107,
+
+    ChannelUpdateAdds = 108,
+    ChannelMemberAdds = 109,
+    ChannelPinAdds = 110,
+    ChannelModerateAdds = 111,
 }
 
 impl UserPostfix {
