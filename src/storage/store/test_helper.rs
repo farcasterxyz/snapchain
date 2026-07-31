@@ -145,6 +145,10 @@ pub struct EngineOptions {
     pub post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
     pub channel_slot_cap_override: Option<u32>,
+    // Mirrors `migrations.run_on_devnet`. Off by default so the suite stays
+    // migration-free; set only by tests that are exercising the migration runner
+    // itself, since a `new_engine()` on Devnet otherwise never constructs one.
+    pub run_migrations_on_devnet: bool,
 }
 
 impl Default for EngineOptions {
@@ -158,6 +162,7 @@ impl Default for EngineOptions {
             shard_id: 1,
             post_commit_tx: None,
             channel_slot_cap_override: None,
+            run_migrations_on_devnet: false,
         }
     }
 }
@@ -206,6 +211,8 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
                 channel_slot_cap_override: options.channel_slot_cap_override,
                 ..Default::default()
             },
+            // Defaults false, keeping the suite migration-free.
+            options.run_migrations_on_devnet,
         )
         .await
         .unwrap(),

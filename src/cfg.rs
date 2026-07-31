@@ -88,6 +88,26 @@ impl Default for ReplicationConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct MigrationsConfig {
+    /// Devnet skips DB migrations entirely (see `ShardEngine::new_with_opts`) so the test
+    /// suite never pays for them, which also means the real startup migration path —
+    /// backfill, legacy sweep, observability, interrupted-run recovery — cannot be
+    /// exercised locally. Set this to run it against a local devnet node.
+    ///
+    /// Only ever widens behavior on Devnet; every other network runs migrations
+    /// regardless. LOCAL TESTING ONLY — never set this in a deployed config.
+    pub run_on_devnet: bool,
+}
+
+impl Default for MigrationsConfig {
+    fn default() -> Self {
+        Self {
+            run_on_devnet: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log_format: String,
     pub fnames: connectors::fname::Config,
@@ -112,6 +132,7 @@ pub struct Config {
     pub mesh: network::mesh::config::Config,
     pub replication: ReplicationConfig,
     pub block_receiver: block_receiver::Config,
+    pub migrations: MigrationsConfig,
 }
 
 impl Default for Config {
@@ -140,6 +161,7 @@ impl Default for Config {
             mesh: network::mesh::config::Config::default(),
             replication: ReplicationConfig::default(),
             block_receiver: block_receiver::Config::default(),
+            migrations: MigrationsConfig::default(),
         }
     }
 }

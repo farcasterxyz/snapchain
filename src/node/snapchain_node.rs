@@ -56,6 +56,7 @@ impl SnapchainNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         network: FarcasterNetwork,
+        run_migrations_on_devnet: bool,
         registry: &SharedRegistry,
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
         block_cache: Option<rocksdb::Cache>,
@@ -138,6 +139,7 @@ impl SnapchainNode {
                 Some(messages_request_tx.clone()),
                 None,
                 engine_post_commit_tx.clone(),
+                run_migrations_on_devnet,
             )
             .await
             {

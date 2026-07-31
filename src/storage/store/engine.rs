@@ -201,6 +201,7 @@ impl ShardEngine {
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        run_migrations_on_devnet: bool,
     ) -> Result<ShardEngine, HubError> {
         Self::new_with_opts(
             db,
@@ -214,6 +215,7 @@ impl ShardEngine {
             fname_signer_address,
             post_commit_tx,
             StoreOptions::default(),
+            run_migrations_on_devnet,
         )
         .await
     }
@@ -230,6 +232,7 @@ impl ShardEngine {
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
         store_opts: StoreOptions,
+        run_migrations_on_devnet: bool,
     ) -> Result<ShardEngine, HubError> {
         let stores = Stores::new_with_opts(
             db.clone(),
@@ -241,8 +244,20 @@ impl ShardEngine {
             store_opts,
         );
 
-        // No migrations on devnet (during tests)
-        if network != proto::FarcasterNetwork::Devnet {
+        // No migrations on devnet (during tests), unless a local operator opts in via
+        // `migrations.run_on_devnet` to exercise the real startup migration path. The
+        // disjunction only ever *adds* the migration run on Devnet — every other network
+        // migrates regardless of the flag, so callers that pass `false` keep today's
+        // behavior exactly.
+        let is_devnet = network == proto::FarcasterNetwork::Devnet;
+        if !is_devnet || run_migrations_on_devnet {
+            if is_devnet {
+                warn!(
+                    shard_id,
+                    "migrations.run_on_devnet is set: running DB migrations against a devnet DB. \
+                     LOCAL TESTING ONLY — this is never correct in a deployed config."
+                );
+            }
             let migration_context = MigrationContext {
                 db: db.clone(),
                 stores: stores.clone(),

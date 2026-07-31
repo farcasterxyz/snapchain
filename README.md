@@ -199,6 +199,13 @@ If you need fresh keypairs for your node, you can generate them with:
 cargo run --bin generate_keys
 ```
 
+### Testing DB migrations
+
+Migrations are gated off on Devnet, so they never run under `make dev` or the test suite. To
+exercise the real startup migration path locally — including seeding pre-migration state and
+reproducing an interrupted run — see
+[`docs/testing-db-migrations-locally.md`](docs/testing-db-migrations-locally.md).
+
 ### Clean up
 
 You can remove any cached items by running:

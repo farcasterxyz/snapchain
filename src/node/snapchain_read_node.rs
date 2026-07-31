@@ -40,6 +40,7 @@ impl SnapchainReadNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         farcaster_network: proto::FarcasterNetwork,
+        run_migrations_on_devnet: bool,
         registry: &SharedRegistry,
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
         block_cache: Option<rocksdb::Cache>,
@@ -99,6 +100,7 @@ impl SnapchainReadNode {
                 None, // For a read-only node, we will never pull from the mempool
                 None,
                 engine_post_commit_tx.clone(),
+                run_migrations_on_devnet,
             )
             .await
             {

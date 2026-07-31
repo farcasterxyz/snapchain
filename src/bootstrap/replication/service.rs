@@ -702,6 +702,9 @@ impl ReplicatorBootstrap {
                 None,
                 None,
                 store_opts,
+                // Replication bootstrap is not a node startup path; the node that owns
+                // this DB migrates it.
+                false,
             )
             .await
             .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?,

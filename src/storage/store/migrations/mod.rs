@@ -375,6 +375,40 @@ mod tests {
         assert_eq!(stores.get_schema_version().unwrap(), 1);
     }
 
+    /// The devnet gate lives in `ShardEngine::new_with_opts`, not in the runner, so it
+    /// needs engine-level coverage: the whole point of `migrations.run_on_devnet` is that
+    /// a devnet node can be made to run the real startup path, and the only way to tell
+    /// the two states apart is the schema version the engine leaves behind.
+    #[tokio::test]
+    async fn test_devnet_gate_runs_migrations_only_when_opted_in() {
+        use crate::storage::store::test_helper::EngineOptions;
+
+        // Default devnet engine: gate closed, schema version untouched.
+        let (engine, _tmpdir) = test_helper::new_engine().await;
+        assert_eq!(engine.network, crate::proto::FarcasterNetwork::Devnet);
+        assert_eq!(engine.get_stores().get_schema_version().unwrap(), 0);
+
+        // Same engine with the opt-in: migrations run in the background, so poll for the
+        // schema version rather than asserting immediately.
+        let (engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            run_migrations_on_devnet: true,
+            ..Default::default()
+        })
+        .await;
+        let stores = engine.get_stores();
+        for _ in 0..100 {
+            if stores.get_schema_version().unwrap() == LATEST_SCHEMA_VERSION {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            stores.get_schema_version().unwrap(),
+            LATEST_SCHEMA_VERSION,
+            "opting in on devnet should run pending migrations to completion"
+        );
+    }
+
     #[tokio::test]
     async fn test_runner_runs_multiple_migrations_in_order() {
         let (engine, _tmpdir) = test_helper::new_engine().await;

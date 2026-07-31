@@ -5,8 +5,32 @@ x-common: &common
   # small shortcut to speed builds up by reusing the same image for all nodes
   image: snapchain-local:dev
   init: true # Auto-reap zombie processes and forward process signals
+  # `setup_local_testnet` runs at image *build* time (see Dockerfile) and its output is COPYed
+  # in, so editing nodes/*/snapchain.toml on the host has no effect here. Config changes for
+  # the devnet therefore go through SNAPCHAIN_* env vars, which figment merges after the TOML
+  # file (see `cfg::load_and_merge_config`).
+  #
+  # The pass-throughs below default to the baked-in behavior, so `make dev` is unchanged.
+  # Override from the shell, e.g.
+  #   SNAPCHAIN_MIGRATIONS__RUN_ON_DEVNET=true SNAPCHAIN_STATSD__ADDR=host.docker.internal:8125 make dev
   environment:
     RUST_BACKTRACE: "full"
+    # Run DB migrations on this devnet. Off by default; see `cfg::MigrationsConfig`.
+    SNAPCHAIN_MIGRATIONS__RUN_ON_DEVNET: "${SNAPCHAIN_MIGRATIONS__RUN_ON_DEVNET:-false}"
+    # The baked default points at each container's own loopback, where nothing is listening.
+    # Point it at host.docker.internal to collect metrics with `cargo run --bin statsd_printer`
+    # on the host. Not the default because an unresolvable host is fatal at startup
+    # (`UdpMetricSink::from` in main.rs), and this file has to work everywhere.
+    SNAPCHAIN_STATSD__ADDR: "${SNAPCHAIN_STATSD__ADDR:-127.0.0.1:8125}"
+    SNAPCHAIN_STATSD__USE_TAGS: "${SNAPCHAIN_STATSD__USE_TAGS:-false}"
+    # The generated configs set a per-node relative path (nodes/<id>/.rocks), which lands in
+    # the container's writable layer rather than the mounted volume below — so a `--watch`
+    # rebuild silently discarded the chain state. Point every node at its own volume instead.
+    SNAPCHAIN_ROCKSDB_DIR: "/app/.rocks"
+  # `host.docker.internal` is built in on Docker Desktop but not on Linux; declaring it keeps
+  # the statsd override above working on both.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   # `make dev` runs `docker compose up --watch`. On changes to the paths the Dockerfile
   # COPYs, rebuild the image and recreate the containers. `rebuild` (not `sync`) is required
   # because the runtime image is a from-scratch Ubuntu with a compiled binary and no cargo,

@@ -234,6 +234,83 @@ mod tests {
         });
     }
 
+    /// `migrations.run_on_devnet` is the escape hatch for exercising the real startup
+    /// migration path on a devnet node (`ShardEngine::new_with_opts` otherwise skips it).
+    /// The env arm is the one the local runbook and the docker compose bed rely on, and
+    /// it is the arm most likely to break: figment has to coerce the string `"true"` into
+    /// a bool for a section that has no other fields to anchor the shape.
+    #[test]
+    #[serial]
+    fn test_migrations_config_default_and_env_override() {
+        // Off unless asked for.
+        run_test(vec![], || {
+            let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert_eq!(config.migrations.run_on_devnet, false);
+        });
+
+        // Set from the config file.
+        run_test(vec![], || {
+            let (_tmpdir, file_path) = write_config_file(
+                r#"
+                log_format = "text"
+
+                [migrations]
+                run_on_devnet = true
+                "#,
+            );
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert_eq!(config.migrations.run_on_devnet, true);
+        });
+
+        // Env wins over the file, including turning it back off.
+        run_test(
+            vec![set("SNAPCHAIN_MIGRATIONS__RUN_ON_DEVNET", "false")],
+            || {
+                let (_tmpdir, file_path) = write_config_file(
+                    r#"
+                    log_format = "text"
+
+                    [migrations]
+                    run_on_devnet = true
+                    "#,
+                );
+                let args = vec![
+                    "test_binary".to_string(),
+                    "--config-path".to_string(),
+                    file_path.to_string(),
+                ];
+                let config = load_and_merge_config(args).expect("Failed to load config");
+                assert_eq!(config.migrations.run_on_devnet, false);
+            },
+        );
+
+        // Env alone, with no section in the file at all.
+        run_test(
+            vec![set("SNAPCHAIN_MIGRATIONS__RUN_ON_DEVNET", "true")],
+            || {
+                let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+                let args = vec![
+                    "test_binary".to_string(),
+                    "--config-path".to_string(),
+                    file_path.to_string(),
+                ];
+                let config = load_and_merge_config(args).expect("Failed to load config");
+                assert_eq!(config.migrations.run_on_devnet, true);
+            },
+        );
+    }
+
     #[test]
     #[serial]
     fn test_missing_config_file() {

@@ -1161,6 +1161,10 @@ impl MyHubService {
                 None,
                 None,
                 None,
+                // Never run migrations from a throwaway simulation engine: this is
+                // constructed per RPC over the live shard DB, and the startup path in
+                // `SnapchainNode::create` already owns migrating it.
+                false,
             )
             .await
             .map_err(engine::MessageValidationError::StoreError)?;
@@ -1204,6 +1208,8 @@ impl MyHubService {
                 None,
                 None,
                 None,
+                // See the note on the single-message simulation engine above.
+                false,
             )
             .await
             {

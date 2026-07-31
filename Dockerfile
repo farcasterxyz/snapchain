@@ -73,6 +73,7 @@ COPY --from=builder \
   /usr/src/app/target/release/submit_message \
   /usr/src/app/target/release/perftest \
   /usr/src/app/target/release/fc \
+  /usr/src/app/target/release/verification_index_inspect \
   /app/
 
 ENV RUSTFLAGS="-Awarnings"

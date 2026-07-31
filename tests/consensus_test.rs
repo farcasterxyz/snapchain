@@ -322,6 +322,8 @@ impl ReadNodeForTest {
             make_tmp_path(),
             statsd_client.clone(),
             fc_network,
+            // No migrations; these nodes run on Devnet and this test is about consensus.
+            false,
             registry,
             None,
             None,
@@ -493,6 +495,8 @@ impl NodeForTest {
             shards_data_dir.clone(),
             statsd_client.clone(),
             fc_network,
+            // No migrations; these nodes run on Devnet and this test is about consensus.
+            false,
             registry,
             None,
             None,
