@@ -1,6 +1,7 @@
 use super::{
-    get_from_db_or_txn, get_message, make_ts_hash, make_user_key, read_fid_key, Store, StoreDef,
-    StoreEventHandler, StoreOptions, TS_HASH_LENGTH,
+    get_from_db_or_txn, get_message, make_ts_hash, make_user_key, read_fid_key,
+    require_page_token_in_prefix, FollowIndexGate, Store, StoreDef, StoreEventHandler,
+    StoreOptions, TS_HASH_LENGTH,
 };
 use crate::core::error::HubError;
 use crate::proto::{
@@ -251,26 +252,10 @@ fn channel_index_key(index: ChannelIndex, channel_id: &[u8], suffix: &[u8]) -> V
     key
 }
 
-/// Rejects a `page_token` that does not sit inside `prefix`.
+/// Reads a big-endian `u32` counter, treating an absent key as zero.
 ///
-/// `RocksDB::get_iterator_options` uses the token as the scan's lower bound
-/// (or, when reversed, its upper bound) *instead of* the prefix, so a token from
-/// outside the prefix widens the range rather than narrowing it. The three
-/// enumerators below identify a row by key length alone, and every channel's
-/// slot keys share a length — so without this check a token minted for one
-/// channel would return a different channel's rows under the requested channel
-/// id. An empty token is out-of-prefix by the same test: it makes the scan start
-/// at the front of the column family. Callers that mean "first page" must pass
-/// `None`; the RPC layer normalizes an empty token to `None` before it gets here.
-fn require_page_token_in_prefix(prefix: &[u8], page_options: &PageOptions) -> Result<(), HubError> {
-    match &page_options.page_token {
-        Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
-            "page token does not belong to the requested channel index",
-        )),
-        _ => Ok(()),
-    }
-}
-
+/// A stored value of any other width is corruption in this node's own derived
+/// state, not caller input, so it fails loudly rather than defaulting.
 fn read_counter(db: &RocksDB, txn: &RocksDbTransactionBatch, key: &[u8]) -> Result<u32, HubError> {
     match get_from_db_or_txn(db, txn, key)? {
         None => Ok(0),
@@ -543,8 +528,16 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
             slot_txn.put(key, value.to_be_bytes().to_vec());
         }
     }
-    let event =
-        store.merge_add_with_conflicts(&ts_hash, message, &mut slot_txn, deleted_messages)?;
+    // Channel slot messages are never a channel follow — a follow is an ordinary
+    // ReactionAdd on the author's own shard, and these four types are shard-0
+    // authority state.
+    let event = store.merge_add_with_conflicts(
+        &ts_hash,
+        message,
+        &mut slot_txn,
+        deleted_messages,
+        FollowIndexGate::no_follow_carrier(),
+    )?;
     store_def.build_gated_secondary_indices(&mut slot_txn, message, gate)?;
     txn.merge(slot_txn);
     Ok(event)

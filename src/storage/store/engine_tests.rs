@@ -6515,4 +6515,157 @@ mod tests {
             );
         }
     }
+
+    /// The channel-follow index, exercised through the PRODUCTION wiring.
+    ///
+    /// Every other follow test builds a `ReactionStore` directly and hands it a
+    /// registrar, which means none of them touch `Stores::new_with_opts` — the one
+    /// place the registrar is actually resolved for a running node. Verified by
+    /// mutation: replacing `channel_registrar_for_network(network)` in `stores.rs`
+    /// with `None` left the entire suite green while the feature was dead in
+    /// production. This test is what fails in that case.
+    #[tokio::test]
+    async fn test_channel_follow_index_is_written_through_the_production_wiring() {
+        use crate::core::channel_uri::{channel_registrar_for_network, ChannelAssetId};
+        use crate::storage::store::account::ReactionStore;
+
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let channel_id = [0x5au8; 32];
+        let registrar = channel_registrar_for_network(engine.network)
+            .expect("devnet must have a registrar, or this feature is inert");
+        let target = Target::TargetUrl(
+            ChannelAssetId::for_channel(&registrar, channel_id).canonical_string(),
+        );
+
+        let follow = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            None,
+            Some(&signer),
+        );
+        commit_message(&mut engine, &follow).await;
+
+        let store = &engine.get_stores().reaction_store;
+        assert_eq!(
+            ReactionStore::follower_count(store, &channel_id).unwrap(),
+            1,
+            "a LIKE of the registrar's asset id must be indexed as a follow"
+        );
+        assert_eq!(
+            ReactionStore::is_following(store, FID_FOR_TEST, &channel_id).unwrap(),
+            Some(follow.data.as_ref().unwrap().timestamp)
+        );
+
+        // And the teardown path, through the same wiring.
+        let unfollow = messages_factory::reactions::create_reaction_remove(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target,
+            Some(follow.data.as_ref().unwrap().timestamp + 10),
+            Some(&signer),
+        );
+        commit_message(&mut engine, &unfollow).await;
+
+        assert_eq!(
+            ReactionStore::follower_count(store, &channel_id).unwrap(),
+            0
+        );
+        assert_eq!(
+            ReactionStore::is_following(store, FID_FOR_TEST, &channel_id).unwrap(),
+            None
+        );
+    }
+
+    /// A reaction merged through the replicator replay path must produce exactly
+    /// the same follow rows as one merged live.
+    ///
+    /// Today this is structurally guaranteed — `replay_replicator_message` calls
+    /// the same `merge_message`, resolving the gate from the same message-embedded
+    /// timestamp — so this is a tripwire against a refactor that gives replay its
+    /// own merge, not a proof of anything the current code could get wrong.
+    #[tokio::test]
+    async fn test_follow_index_is_identical_live_and_on_replicator_replay() {
+        use crate::core::channel_uri::{channel_registrar_for_network, ChannelAssetId};
+        use crate::storage::constants::RootPrefix;
+
+        let follow_rows = |engine: &ShardEngine| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let prefix = vec![RootPrefix::ChannelFollow as u8];
+            let mut rows = vec![];
+            engine
+                .get_stores()
+                .db
+                .for_each_iterator_by_prefix(
+                    Some(prefix.clone()),
+                    Some(crate::storage::util::increment_vec_u8(&prefix)),
+                    &PageOptions::default(),
+                    |key, value| {
+                        rows.push((key.to_vec(), value.to_vec()));
+                        Ok(false)
+                    },
+                )
+                .unwrap();
+            rows
+        };
+
+        let (mut live, _t1) = test_helper::new_engine().await;
+        let (mut replayed, _t2) = test_helper::new_engine().await;
+
+        let registrar = channel_registrar_for_network(live.network).unwrap();
+        let channel_id = [0x77u8; 32];
+        let target = Target::TargetUrl(
+            ChannelAssetId::for_channel(&registrar, channel_id).canonical_string(),
+        );
+
+        let signer = test_helper::default_signer();
+        for engine in [&mut live, &mut replayed] {
+            test_helper::register_user(
+                FID_FOR_TEST,
+                signer.clone(),
+                default_custody_address(),
+                engine,
+            )
+            .await;
+        }
+
+        // A supersede and a removal, so the comparison has something to catch
+        // beyond a single insert.
+        let first = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            Some(1000),
+            Some(&signer),
+        );
+        let second = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            Some(2000),
+            Some(&signer),
+        );
+
+        for msg in [&first, &second] {
+            commit_message(&mut live, msg).await;
+            replayed
+                .commit_replicator_message_for_test(msg, true)
+                .unwrap();
+        }
+
+        assert!(!follow_rows(&live).is_empty(), "fixture wrote no rows");
+        assert_eq!(
+            follow_rows(&live),
+            follow_rows(&replayed),
+            "live merge and replicator replay must produce identical follow rows"
+        );
+    }
 }

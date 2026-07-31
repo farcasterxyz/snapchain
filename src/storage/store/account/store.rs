@@ -11,7 +11,7 @@ use crate::proto::{
 };
 use crate::storage::db::PageOptions;
 use crate::storage::util::increment_vec_u8;
-use crate::version::version::EngineVersion;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use crate::{
     proto::{Message, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -33,6 +33,65 @@ pub const PAGE_SIZE_MAX: usize = 10_000;
 #[derive(Debug, Clone, Copy)]
 pub struct MergeContext {
     pub version: EngineVersion,
+}
+
+/// Whether an add-message merge may write the `ChannelFollows`-gated derived
+/// index — today only the reaction store's channel-follow rows.
+///
+/// This is a required argument on every add-merge rather than a default, for the
+/// same reason as `DerivedIndexGate` in `channel_store.rs`: getting it wrong is
+/// invisible. The follow rows live outside the merkle trie (nothing in
+/// `TrieKey::for_hub_event` derives from them), so a `Skip`ped merge still
+/// stores the message, still updates the trie, and still produces a matching
+/// state root — the reaction just never shows up in `GetChannelFollowers`, with
+/// no error anywhere. Stores that can never carry a follow still have to say so
+/// with `no_follow_carrier()`, which makes every opt-out explicit and greppable.
+///
+/// That is an audit aid, NOT enforcement: `build_follow_index` and
+/// `delete_follow_index` are defaulted trait methods, so a store def that ought
+/// to index follows and does not override them still compiles and silently skips.
+/// The compile-time force comes only from the gate being a required argument.
+/// Re-check the `no_follow_carrier()` sites whenever a store gains a gated index.
+///
+/// Note there is no `Skip` variant on the *delete* side. `delete_add_transaction`
+/// is reached from prune and revoke, neither of which has a version in hand.
+/// Teardown does not need one: it deletes keys that may not exist, which is a
+/// no-op for a pre-activation add that was never indexed. See
+/// `ReactionStoreDef::remove_follow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowIndexGate {
+    /// `ChannelFollows` is active for this merge's clock; write follow rows.
+    Write,
+    /// Feature inactive, or this store cannot carry a follow; message only.
+    Skip,
+}
+
+impl FollowIndexGate {
+    /// Resolves the gate from the merge's own context.
+    ///
+    /// `MergeContext.version` is derived from the *message's* embedded timestamp,
+    /// which is deliberate here: it is the only clock that is identical on the
+    /// live-merge and bootstrap-replay paths, so the index ends up a pure
+    /// function of the merged message set rather than of how a node acquired it.
+    /// See the `ChannelFollows` arm in `version.rs` for the full argument.
+    pub fn for_merge(ctx: &MergeContext) -> Self {
+        if ctx.version.is_enabled(ProtocolFeature::ChannelFollows) {
+            Self::Write
+        } else {
+            Self::Skip
+        }
+    }
+
+    /// For merges whose message type can never be a channel follow. Named rather
+    /// than spelled `Skip` at the call site so the reason is legible, and so
+    /// grepping for it finds every store that has opted out.
+    pub fn no_follow_carrier() -> Self {
+        Self::Skip
+    }
+
+    pub fn writes_follow_index(self) -> bool {
+        self == Self::Write
+    }
 }
 
 /// The fields a compact-state message contributes to compaction, parsed by the owning
@@ -148,6 +207,42 @@ pub trait StoreDef: Send + Sync {
         &self,
         _txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
+        _message: &Message,
+    ) -> Result<(), HubError> {
+        Ok(())
+    }
+
+    /// Derived indices whose write is gated on a protocol feature, and which need
+    /// to read existing rows to stay consistent (hence `db`, which the ungated
+    /// hooks above do not get).
+    ///
+    /// Keyed on the message alone rather than on `ts_hash`: the follow index
+    /// records *that* an fid follows a channel, not which reaction expressed it,
+    /// so a superseding add must land on the same row. That is also what makes
+    /// [`delete_follow_index`](StoreDef::delete_follow_index) able to find what
+    /// this wrote without carrying a ts_hash through prune and revoke.
+    ///
+    /// Named for the one index it serves rather than generically, so it cannot be
+    /// confused with `ChannelSlotStoreDef::build_gated_secondary_indices` — the
+    /// channel slot stores implement both traits.
+    #[inline]
+    fn build_follow_index(
+        &self,
+        _db: &RocksDB,
+        _txn: &mut RocksDbTransactionBatch,
+        _message: &Message,
+        _gate: FollowIndexGate,
+    ) -> Result<(), HubError> {
+        Ok(())
+    }
+
+    /// Tears down what `build_follow_index` wrote. Ungated on purpose — see
+    /// [`FollowIndexGate`].
+    #[inline]
+    fn delete_follow_index(
+        &self,
+        _db: &RocksDB,
+        _txn: &mut RocksDbTransactionBatch,
         _message: &Message,
     ) -> Result<(), HubError> {
         Ok(())
@@ -542,6 +637,7 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
+        gate: FollowIndexGate,
     ) -> Result<(), HubError> {
         put_message_transaction(txn, &message)?;
 
@@ -551,6 +647,9 @@ impl<T: StoreDef + Clone> Store<T> {
 
         self.store_def
             .build_secondary_indices(txn, ts_hash, message)?;
+
+        self.store_def
+            .build_follow_index(&self.db, txn, message, gate)?;
 
         Ok(())
     }
@@ -581,6 +680,8 @@ impl<T: StoreDef + Clone> Store<T> {
     ) -> Result<(), HubError> {
         self.store_def
             .delete_secondary_indices(txn, ts_hash, message)?;
+
+        self.store_def.delete_follow_index(&self.db, txn, message)?;
 
         let add_key = self.store_def.make_add_key(message)?;
         txn.delete(add_key);
@@ -727,7 +828,7 @@ impl<T: StoreDef + Clone> Store<T> {
         if self.store_def().is_compact_state_type(message) {
             self.merge_compact_state(message, txn, ctx)
         } else if self.store_def.is_add_type(message) {
-            self.merge_add(&ts_hash, message, txn)
+            self.merge_add(&ts_hash, message, txn, FollowIndexGate::for_merge(ctx))
         } else {
             self.merge_remove(&ts_hash, message, txn)
         }
@@ -743,6 +844,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        ctx: &MergeContext,
     ) -> Result<HubEvent, HubError> {
         if self.store_def.requires_consensus_order_slot_merge() {
             return Err(HubError::validation_failure(
@@ -777,7 +879,13 @@ impl<T: StoreDef + Clone> Store<T> {
         self.delete_many_transaction(txn, &merge_conflicts)?;
 
         if self.store_def.is_add_type(message) {
-            self.merge_add_with_conflicts(&ts_hash, message, txn, merge_conflicts)
+            self.merge_add_with_conflicts(
+                &ts_hash,
+                message,
+                txn,
+                merge_conflicts,
+                FollowIndexGate::for_merge(ctx),
+            )
         } else {
             self.merge_remove_with_conflicts(&ts_hash, message, txn, merge_conflicts)
         }
@@ -913,6 +1021,7 @@ impl<T: StoreDef + Clone> Store<T> {
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        gate: FollowIndexGate,
     ) -> Result<HubEvent, HubError> {
         if self.store_def.requires_consensus_order_slot_merge() {
             return Err(HubError::validation_failure(
@@ -952,7 +1061,7 @@ impl<T: StoreDef + Clone> Store<T> {
             merge_conflicts
         };
 
-        self.merge_add_with_conflicts(ts_hash, message, txn, merge_conflicts)
+        self.merge_add_with_conflicts(ts_hash, message, txn, merge_conflicts, gate)
     }
 
     pub(super) fn merge_add_with_conflicts(
@@ -961,9 +1070,10 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
         merge_conflicts: Vec<Message>,
+        gate: FollowIndexGate,
     ) -> Result<HubEvent, HubError> {
         // Add ops to store the message by messageKey and index the messageKey by set and by target
-        self.put_add_transaction(txn, ts_hash, message)?;
+        self.put_add_transaction(txn, ts_hash, message, gate)?;
 
         // Event handler
         let mut hub_event = self.store_def.merge_event_args(message, merge_conflicts);

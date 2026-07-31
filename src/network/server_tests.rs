@@ -33,8 +33,8 @@ mod tests {
     use crate::storage::store::account::{
         make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
         ChannelPinStore, ChannelUpdateStore, DerivedIndexGate, HubEventIdGenerator,
-        HubEventStorageExt, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MEMBER_SLOT_CAP,
-        CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
+        HubEventStorageExt, ReactionStoreDef, VerificationStoreDef, CHANNEL_ID_LENGTH,
+        CHANNEL_MEMBER_SLOT_CAP, CHANNEL_MODERATE_SLOT_CAP, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -1608,9 +1608,7 @@ mod tests {
         // member slot. These are the only errors on the read paths the caller can
         // actually cause.
         for err in [
-            HubError::invalid_parameter(
-                "page token does not belong to the requested channel index",
-            ),
+            HubError::invalid_parameter("page token does not belong to the requested index"),
             HubError::invalid_parameter("channel member fid exceeds u32"),
         ] {
             assert_eq!(
@@ -7609,5 +7607,339 @@ mod tests {
             .get_all_lend_storage_messages_by_fid(Request::new(request))
             .await;
         test_helper::assert_contains_all_messages(&response, &[&lend2]);
+    }
+
+    // ---- channel follows -------------------------------------------------
+
+    const FOLLOW_CHANNEL: [u8; 32] = [0xf0; 32];
+
+    /// Writes a follow directly into a shard's reaction store, bypassing the
+    /// message path. These tests are about the read fan-out, not about merging;
+    /// `channel_follow_index_is_written_through_the_production_wiring` covers the
+    /// merge path end to end.
+    fn seed_follow(stores: &HashMap<u32, Stores>, shard_id: u32, fid: u64, followed_at: u32) {
+        let store = &stores.get(&shard_id).unwrap().reaction_store;
+        let mut txn = RocksDbTransactionBatch::new();
+        let value = followed_at.to_be_bytes().to_vec();
+        txn.put(
+            ReactionStoreDef::make_follow_by_fid_key(fid, &FOLLOW_CHANNEL),
+            value.clone(),
+        );
+        txn.put(
+            ReactionStoreDef::make_follow_by_channel_key(&FOLLOW_CHANNEL, fid),
+            value,
+        );
+        store.db().commit(txn).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_followers_spans_every_shard() {
+        let (stores, _senders, _engines, _block_engine, service, _sc, _bc) =
+            make_server(None, None).await;
+        seed_follow(&stores, 1, SHARD1_FID, 1000);
+        seed_follow(&stores, 2, SHARD2_FID, 2000);
+
+        let response = service
+            .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut fids: Vec<u64> = response.followers.iter().map(|f| f.fid).collect();
+        fids.sort();
+        let mut expected = vec![SHARD1_FID, SHARD2_FID];
+        expected.sort();
+        assert_eq!(fids, expected);
+        assert_eq!(response.next_page_token, None);
+
+        let count = service
+            .get_channel_follower_count(Request::new(proto::ChannelFollowerCountRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(count.count, 2, "count must sum both shards");
+    }
+
+    #[tokio::test]
+    async fn test_channel_follower_pagination_terminates_and_is_complete() {
+        // ASYMMETRIC ON PURPOSE. With one follower per shard the two shards finish
+        // in lockstep and `ShardScan::Exhausted` is never constructed, so the
+        // branch that skips a finished shard goes untested — and deleting it
+        // (restarting that shard on every page instead) would still pass. Shard 1
+        // gets one follower and shard 2 gets three, so shard 1 is exhausted while
+        // shard 2 is still paging.
+        let (stores, _senders, _engines, _block_engine, service, _sc, _bc) =
+            make_server(None, None).await;
+        seed_follow(&stores, 1, SHARD1_FID, 1000);
+        for i in 0..3 {
+            seed_follow(&stores, 2, SHARD2_FID + (i * 2), 2000 + i as u32);
+        }
+
+        for reverse in [false, true] {
+            let mut seen = Vec::new();
+            let mut page_token = None;
+            let mut pages = 0;
+            let mut saw_exhausted_cursor = false;
+            loop {
+                let response = service
+                    .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                        channel_id: FOLLOW_CHANNEL.to_vec(),
+                        page_size: Some(1),
+                        page_token,
+                        reverse: Some(reverse),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                seen.extend(response.followers.iter().map(|f| f.fid));
+                pages += 1;
+                assert!(pages < 20, "pagination did not terminate");
+                match response.next_page_token {
+                    None => break,
+                    Some(token) => {
+                        // Pins that the fixture really does drive a shard to
+                        // Exhausted while another is still live. If this stops
+                        // holding, the test has quietly stopped covering the branch.
+                        if String::from_utf8_lossy(&token).contains("Exhausted") {
+                            saw_exhausted_cursor = true;
+                        }
+                        page_token = Some(token)
+                    }
+                }
+            }
+
+            // NOT deduped: a shard that restarts instead of being skipped would
+            // re-emit its rows, and dedup would hide exactly that.
+            assert_eq!(
+                seen.len(),
+                4,
+                "reverse={reverse}: duplicate or missing rows"
+            );
+            seen.sort();
+            let mut expected = vec![SHARD1_FID, SHARD2_FID, SHARD2_FID + 2, SHARD2_FID + 4];
+            expected.sort();
+            assert_eq!(seen, expected, "reverse={reverse}");
+            assert!(
+                saw_exhausted_cursor,
+                "reverse={reverse}: fixture never exercised ShardScan::Exhausted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_follow_reads_reject_malformed_requests() {
+        let (_stores, _senders, _engines, _block_engine, service, _sc, _bc) =
+            make_server(None, None).await;
+
+        let err = service
+            .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                channel_id: vec![0u8; 31],
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        // Tokens that must be refused rather than silently mis-paged. The middle
+        // two are the ones that used to slip through: a token stripped of its
+        // null-valued fields decoded as "every shard exhausted" and returned an
+        // empty follower list AS A SUCCESS, and a duplicated shard id passed the
+        // length check whenever the token still covered the whole set.
+        let bad_tokens: Vec<Vec<u8>> = vec![
+            br#"[{"shard_id":7,"scan":"Exhausted"}]"#.to_vec(),
+            br#"[{"shard_id":1},{"shard_id":2}]"#.to_vec(),
+            br#"[{"shard_id":1,"scan":"Exhausted"},{"shard_id":1,"scan":"Exhausted"},{"shard_id":2,"scan":"Exhausted"}]"#.to_vec(),
+            br#"[{"shard_id":1,"scan":"Exhausted","extra":1},{"shard_id":2,"scan":"Exhausted"}]"#.to_vec(),
+        ];
+        for token in bad_tokens {
+            let err = service
+                .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                    channel_id: FOLLOW_CHANNEL.to_vec(),
+                    page_size: None,
+                    page_token: Some(token.clone()),
+                    reverse: None,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.code(),
+                tonic::Code::InvalidArgument,
+                "token should be rejected: {}",
+                String::from_utf8_lossy(&token)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_follow_reads_do_not_require_a_registered_channel() {
+        // FOLLOW_CHANNEL is never registered on shard 0. Registration lives there
+        // and a follow row can exist for an unminted tokenId, so these reads must
+        // answer rather than 404 — otherwise the count would disagree with
+        // IsFollowingChannel for the same channel.
+        let (stores, _senders, _engines, _block_engine, service, _sc, _bc) =
+            make_server(None, None).await;
+        seed_follow(&stores, 1, SHARD1_FID, 1000);
+
+        let count = service
+            .get_channel_follower_count(Request::new(proto::ChannelFollowerCountRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(count.count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_channel_follows_and_is_following_use_the_fid_home_shard() {
+        let (stores, _senders, _engines, _block_engine, service, _sc, _bc) =
+            make_server(None, None).await;
+        seed_follow(&stores, 1, SHARD1_FID, 1000);
+
+        let follows = service
+            .get_channel_follows(Request::new(proto::ChannelFollowsRequest {
+                fid: SHARD1_FID,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(follows.follows.len(), 1);
+        assert_eq!(follows.follows[0].channel_id, FOLLOW_CHANNEL.to_vec());
+        assert_eq!(follows.follows[0].followed_at, 1000);
+
+        let following = service
+            .is_following_channel(Request::new(proto::IsFollowingChannelRequest {
+                fid: SHARD1_FID,
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(following.following);
+        assert_eq!(following.followed_at, Some(1000));
+
+        // A fid on the other shard has no follow, and must not pick up shard 1's.
+        let not_following = service
+            .is_following_channel(Request::new(proto::IsFollowingChannelRequest {
+                fid: SHARD2_FID,
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!not_following.following);
+        assert_eq!(not_following.followed_at, None);
+    }
+
+    #[tokio::test]
+    async fn test_channel_follow_fan_out_refuses_when_a_shard_is_missing() {
+        // A read node may host a subset of shards — `num_shards` is an independent
+        // constructor argument, not `shard_stores.len()`. Answering a fan-out read
+        // from a subset would report a channel as having fewer followers than it
+        // has, indistinguishable from the truth, so the fan-out reads must refuse.
+        // The single-shard reads have no such problem and must keep working.
+        let (stores, senders, _engines, block_engine, _service, _sc, _bc) =
+            make_server(None, None).await;
+        seed_follow(&stores, 1, SHARD1_FID, 1000);
+
+        let mut partial_stores = stores.clone();
+        partial_stores.remove(&2);
+        assert_eq!(partial_stores.len(), 1);
+
+        let (mempool_tx, _mempool_rx) = mpsc::channel(1000);
+        let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
+        let mut chain_clients = ChainClients {
+            chain_api_map: HashMap::new(),
+        };
+        chain_clients.chain_api_map.insert(
+            Chain::EthMainnet,
+            Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
+        );
+        let partial = MyHubService::new(
+            format!("{}:{}", USER_NAME, PASSWORD),
+            "".to_string(),
+            vec![],
+            block_engine.stores(),
+            partial_stores,
+            senders,
+            test_helper::statsd_client(),
+            // Two shards exist on the network; this node holds one.
+            2,
+            proto::FarcasterNetwork::Devnet,
+            Box::new(routing::EvenOddRouterForTest {}),
+            mempool_tx,
+            gossip_tx,
+            chain_clients,
+            "0.1.2".to_string(),
+            "asddef".to_string(),
+            None,
+            Default::default(),
+        );
+
+        let followers_err = partial
+            .get_channel_followers(Request::new(proto::ChannelFollowersRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(followers_err.code(), tonic::Code::FailedPrecondition);
+
+        let count_err = partial
+            .get_channel_follower_count(Request::new(proto::ChannelFollowerCountRequest {
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(count_err.code(), tonic::Code::FailedPrecondition);
+
+        // The fid-keyed reads are single-shard and must still answer for a fid
+        // this node does host.
+        let following = partial
+            .is_following_channel(Request::new(proto::IsFollowingChannelRequest {
+                fid: SHARD1_FID,
+                channel_id: FOLLOW_CHANNEL.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(following.following);
+
+        let follows = partial
+            .get_channel_follows(Request::new(proto::ChannelFollowsRequest {
+                fid: SHARD1_FID,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(follows.follows.len(), 1);
     }
 }

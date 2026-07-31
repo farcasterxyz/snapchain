@@ -153,6 +153,42 @@ service HubService {
   rpc GetChannelModerations(ChannelModerationsRequest) returns (ChannelModerationsResponse);
   rpc GetChannelMetadata(ChannelRequest) returns (ChannelMetadataResponse);
   rpc GetChannelMembershipsByFid(ChannelMembershipsByFidRequest) returns (ChannelMembershipsResponse);
+  // Channel follows. Unlike everything above, these read DATA SHARDS, not shard 0:
+  // a follow is an ordinary reaction living on its author's own shard (see
+  // ChannelFollower in request_response.proto for the message shape and for the
+  // pruning caveat).
+  //
+  // No registration check, deliberately, and so NEVER NOT_FOUND for an unknown
+  // channel — only INVALID_ARGUMENT for a channel_id that is not 32 bytes.
+  // Registration lives on shard 0, which a data-shard-only node need not host, and
+  // a follow row can legitimately exist for a tokenId that was never minted;
+  // returning NOT_FOUND would make GetChannelFollowerCount disagree with
+  // IsFollowingChannel for the same channel. An unfollowed or unknown channel
+  // returns an empty page and a count of zero.
+  //
+  // GetChannelFollowers and GetChannelFollowerCount FAN OUT across every shard,
+  // because no single shard holds a channel's whole follower set. Two consequences:
+  //
+  //   * A node that does not host all shards returns FAILED_PRECONDITION rather
+  //     than answering from the shards it has. A partial follower list is
+  //     indistinguishable from a small one, so it must not be served silently.
+  //   * `page_size` is per shard, so a page may hold up to page_size * num_shards
+  //     entries, and `page_token` encodes one cursor per shard. A token is rejected
+  //     with INVALID_ARGUMENT if its shard set does not match the node's. Page until
+  //     `next_page_token` is unset; a boundary-aligned page may yield one final
+  //     empty page. As above, `page_size: 0` is INVALID_ARGUMENT — omit it for the
+  //     default.
+  //
+  // A summed count and an enumerated follower list are read from each shard at
+  // slightly different instants, so under concurrent writes they can disagree by a
+  // few entries. Neither is stale in itself; there is just no cross-shard snapshot.
+  //
+  // GetChannelFollows and IsFollowingChannel are keyed by fid, so they answer from
+  // that fid's home shard alone and have none of the above caveats.
+  rpc GetChannelFollowers(ChannelFollowersRequest) returns (ChannelFollowersResponse);
+  rpc GetChannelFollowerCount(ChannelFollowerCountRequest) returns (ChannelFollowerCountResponse);
+  rpc GetChannelFollows(ChannelFollowsRequest) returns (ChannelFollowsResponse);
+  rpc IsFollowingChannel(IsFollowingChannelRequest) returns (IsFollowingChannelResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);

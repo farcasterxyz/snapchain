@@ -206,6 +206,30 @@ pub fn get_from_db_or_txn(
     }
 }
 
+/// Rejects a `page_token` that does not sit inside `prefix`.
+///
+/// `RocksDB::get_iterator_options` uses the token as the scan's lower bound
+/// (or, when reversed, its upper bound) *instead of* the prefix, so a token from
+/// outside the prefix widens the range rather than narrowing it. The channel and
+/// channel-follow enumerators identify a row by key length alone, and every
+/// channel's keys share a length — so without this check a token minted for one
+/// channel would return a different channel's rows under the requested channel
+/// id — or, on a by-fid index, another fid's rows. An empty token is
+/// out-of-prefix by the same test: it makes the scan start
+/// at the front of the column family. Callers that mean "first page" must pass
+/// `None`; the RPC layer normalizes an empty token to `None` before it gets here.
+pub(crate) fn require_page_token_in_prefix(
+    prefix: &[u8],
+    page_options: &PageOptions,
+) -> Result<(), HubError> {
+    match &page_options.page_token {
+        Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
+            "page token does not belong to the requested index",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn get_message_by_key(
     db: &RocksDB,
     txn: &RocksDbTransactionBatch,

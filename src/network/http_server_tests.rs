@@ -355,6 +355,42 @@ pub mod tests {
             Ok(Response::new(ChannelMembershipsResponse::default()))
         }
 
+        async fn get_channel_followers(
+            &self,
+            _request: Request<crate::proto::ChannelFollowersRequest>,
+        ) -> Result<Response<crate::proto::ChannelFollowersResponse>, Status> {
+            Ok(Response::new(
+                crate::proto::ChannelFollowersResponse::default(),
+            ))
+        }
+
+        async fn get_channel_follower_count(
+            &self,
+            _request: Request<crate::proto::ChannelFollowerCountRequest>,
+        ) -> Result<Response<crate::proto::ChannelFollowerCountResponse>, Status> {
+            Ok(Response::new(
+                crate::proto::ChannelFollowerCountResponse::default(),
+            ))
+        }
+
+        async fn get_channel_follows(
+            &self,
+            _request: Request<crate::proto::ChannelFollowsRequest>,
+        ) -> Result<Response<crate::proto::ChannelFollowsResponse>, Status> {
+            Ok(Response::new(
+                crate::proto::ChannelFollowsResponse::default(),
+            ))
+        }
+
+        async fn is_following_channel(
+            &self,
+            _request: Request<crate::proto::IsFollowingChannelRequest>,
+        ) -> Result<Response<crate::proto::IsFollowingChannelResponse>, Status> {
+            Ok(Response::new(
+                crate::proto::IsFollowingChannelResponse::default(),
+            ))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,
@@ -812,5 +848,139 @@ pub mod tests {
           "peers": []
         }
         "#);
+    }
+
+    #[test]
+    fn channel_follow_request_shapes_deserialize() {
+        use crate::network::http_server::{
+            ChannelFollowerCountRequest, ChannelFollowersRequest, ChannelFollowsRequest,
+            IsFollowingChannelRequest,
+        };
+        use base64::prelude::*;
+
+        let channel_id_hex = format!("0x{}", "a1".repeat(32));
+        let query_escape = |value: &str| {
+            value
+                .replace('%', "%25")
+                .replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D")
+        };
+
+        // The fan-out cursor is base64 of a JSON envelope rather than a raw
+        // RocksDB key, which changes the hazard profile from the channel-member
+        // token this mirrors. Base64 of JSON is alphanumeric-dominated — a search
+        // over realistic cursors found none producing both `+` and `/` — so that
+        // part of the query-string mangling is structurally unlikely here. The
+        // padding case is not: `=` is reserved in a query string and appears
+        // whenever the payload length is not a multiple of 3. And the failure is
+        // harsher than a raw key's: one mangled byte makes the JSON unparseable,
+        // so the client gets a hard 400 mid-pagination rather than a wrong page.
+        let cursor = br#"[{"shard_id":1,"scan":{"Resume":[25,2,161,161]}},{"shard_id":2,"scan":"Exhausted"}]"#;
+        let encoded = BASE64_STANDARD.encode(cursor);
+        assert!(
+            encoded.ends_with('='),
+            "fixture must exercise base64 padding: {encoded}"
+        );
+
+        let parsed: ChannelFollowersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id_hex}&pageSize=25&pageToken={}",
+            query_escape(&encoded)
+        ))
+        .unwrap();
+        assert_eq!(parsed.channel_id, vec![0xa1u8; 32]);
+        assert_eq!(parsed.page_size.or(parsed.pageSize), Some(25));
+        assert_eq!(
+            parsed.page_token.or(parsed.pageToken).as_deref(),
+            Some(&cursor[..]),
+            "cursor must survive the base64 + query-string round trip byte for byte"
+        );
+
+        // Both spellings of the paging fields must reach the proto — they are folded
+        // with `.or()`, so a regression that drops one is invisible from the other.
+        let snake: ChannelFollowersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id_hex}&page_size=7&page_token={}",
+            query_escape(&encoded)
+        ))
+        .unwrap();
+        assert_eq!(snake.page_size.or(snake.pageSize), Some(7));
+        assert_eq!(
+            snake.page_token.or(snake.pageToken).as_deref(),
+            Some(&cursor[..])
+        );
+
+        // An absent token must be None, never Some(vec![]) — an empty token is
+        // out-of-prefix by construction and the store rejects it.
+        let bare: ChannelFollowersRequest =
+            serde_qs::from_str(&format!("channelId={channel_id_hex}")).unwrap();
+        assert_eq!(bare.page_token.or(bare.pageToken), None);
+
+        // channelId is accepted with and without the 0x prefix.
+        let unprefixed: ChannelFollowerCountRequest =
+            serde_qs::from_str(&format!("channelId={}", "a1".repeat(32))).unwrap();
+        assert_eq!(unprefixed.channel_id, vec![0xa1u8; 32]);
+
+        let follows: ChannelFollowsRequest = serde_qs::from_str("fid=1234&pageSize=3").unwrap();
+        assert_eq!(follows.fid, 1234);
+        assert_eq!(follows.page_size.or(follows.pageSize), Some(3));
+
+        let is_following: IsFollowingChannelRequest =
+            serde_qs::from_str(&format!("fid=1234&channelId={channel_id_hex}")).unwrap();
+        assert_eq!(is_following.fid, 1234);
+        assert_eq!(is_following.channel_id, vec![0xa1u8; 32]);
+    }
+
+    #[test]
+    fn channel_follow_response_shapes_serialize() {
+        use crate::network::http_server::{
+            ChannelFollow, ChannelFollower, ChannelFollowersResponse, ChannelFollowsResponse,
+            IsFollowingChannelResponse,
+        };
+
+        let followers = ChannelFollowersResponse {
+            followers: vec![ChannelFollower {
+                fid: 1234,
+                followed_at: 99,
+            }],
+            next_page_token: None,
+        };
+        let json = serde_json::to_value(&followers).unwrap();
+        assert_eq!(json["followers"][0]["followedAt"], 99);
+        assert!(
+            json.get("nextPageToken").is_none(),
+            "an absent token must be omitted, not serialized as null"
+        );
+
+        // channel_id goes out as hex on HTTP, unlike the gRPC bytes.
+        let follows = ChannelFollowsResponse {
+            follows: vec![ChannelFollow {
+                channel_id: vec![0xa1u8; 32],
+                followed_at: 7,
+            }],
+            next_page_token: Some("dG9rZW4=".to_string()),
+        };
+        let json = serde_json::to_value(&follows).unwrap();
+        assert_eq!(
+            json["follows"][0]["channelId"],
+            format!("0x{}", "a1".repeat(32))
+        );
+        assert_eq!(json["nextPageToken"], "dG9rZW4=");
+
+        // The documented contract: followedAt is present exactly when following.
+        let yes = serde_json::to_value(&IsFollowingChannelResponse {
+            following: true,
+            followed_at: Some(42),
+        })
+        .unwrap();
+        assert_eq!(yes["following"], true);
+        assert_eq!(yes["followedAt"], 42);
+
+        let no = serde_json::to_value(&IsFollowingChannelResponse {
+            following: false,
+            followed_at: None,
+        })
+        .unwrap();
+        assert_eq!(no["following"], false);
+        assert!(no.get("followedAt").is_none());
     }
 }
