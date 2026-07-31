@@ -135,8 +135,12 @@ pub fn key_remove_typed_data(
 
 /// Mirrors `snapchain::core::validations::verification::eip_712_farcaster_verification_claim`.
 ///
-/// The `EIP712Domain` entry declares four fields, but the domain built below populates only
-/// three of them and none of the two are `chainId` — see [`address_verification_domain`].
+/// The `EIP712Domain` entry here and the domain actually built by
+/// [`address_verification_domain`] deliberately do not line up: this declares `name`,
+/// `version`, `chainId`, and `verifyingContract`, but the domain sets only `name` and
+/// `version` — neither `chainId` nor `verifyingContract` is present — and adds a `salt` that
+/// is not declared here. This mirrors the node exactly; alloy hashes the domain from the
+/// fields that are populated, so changing either side changes the domain separator.
 fn verification_claim_types() -> Value {
     json!({
         "EIP712Domain": [

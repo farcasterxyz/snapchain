@@ -11,17 +11,17 @@ image tag.
 
 ## Subcommands
 
-| Subcommand    | What it does                                                                   |
-| ------------- | ------------------------------------------------------------------------------ |
-| `key-add`     | Submit a gasless `KEY_ADD` (FIP-272). Generates a fresh signer by default.     |
-| `key-remove`  | Submit a `KEY_REMOVE`, either custody-signed or self-revoke.                   |
-| `cast-add`    | Submit a `CAST_ADD` signed by an existing Ed25519 key.                         |
-| `cast-remove` | Submit a `CAST_REMOVE` signed by an existing Ed25519 key.                      |
-| `link`        | Submit `LINK_ADD` / `LINK_REMOVE` / `LINK_COMPACT_STATE` — follows and blocks. |
-| `live-at`     | Submit `USER_DATA_ADD` of type `LIVE_AT` (FIP-268 presence heartbeat).         |
-| `verification`| Submit `VERIFICATION_ADD_ETH_ADDRESS` / `VERIFICATION_REMOVE`.                 |
-| `devnet`      | Devnet-only `AdminService` helpers. Registers FIDs on a local node.            |
-| `subscribe`   | Stream `HubEvent`s from a snapchain gRPC node and log them as JSON to stdout.  |
+| Subcommand     | What it does                                                                  |
+| -------------- | ----------------------------------------------------------------------------- |
+| `key-add`      | Submit a gasless `KEY_ADD` (FIP-272). Generates a fresh signer by default.     |
+| `key-remove`   | Submit a `KEY_REMOVE`, either custody-signed or self-revoke.                   |
+| `cast-add`     | Submit a `CAST_ADD` signed by an existing Ed25519 key.                         |
+| `cast-remove`  | Submit a `CAST_REMOVE` signed by an existing Ed25519 key.                      |
+| `link`         | Submit `LINK_ADD` / `LINK_REMOVE` / `LINK_COMPACT_STATE` — follows and blocks. |
+| `live-at`      | Submit `USER_DATA_ADD` of type `LIVE_AT` (FIP-268 presence heartbeat).         |
+| `verification` | Submit `VERIFICATION_ADD_ETH_ADDRESS` / `VERIFICATION_REMOVE`.                 |
+| `devnet`       | Devnet-only `AdminService` helpers. Registers FIDs on a local node.            |
+| `subscribe`    | Stream `HubEvent`s from a snapchain gRPC node and log them as JSON to stdout.  |
 
 Run `fc <subcommand> --help` for the full flag list.
 
