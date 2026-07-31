@@ -19,6 +19,8 @@ image tag.
 | `cast-remove` | Submit a `CAST_REMOVE` signed by an existing Ed25519 key.                      |
 | `link`        | Submit `LINK_ADD` / `LINK_REMOVE` / `LINK_COMPACT_STATE` — follows and blocks. |
 | `live-at`     | Submit `USER_DATA_ADD` of type `LIVE_AT` (FIP-268 presence heartbeat).         |
+| `verification`| Submit `VERIFICATION_ADD_ETH_ADDRESS` / `VERIFICATION_REMOVE`.                 |
+| `devnet`      | Devnet-only `AdminService` helpers. Registers FIDs on a local node.            |
 | `subscribe`   | Stream `HubEvent`s from a snapchain gRPC node and log them as JSON to stdout.  |
 
 Run `fc <subcommand> --help` for the full flag list.
@@ -143,9 +145,51 @@ names are prost defaults (snake_case), and enums are emitted as variant strings.
 exact hub-API shape, query the snapchain HTTP server directly. This may change in a future
 release; pin a specific image tag if you're parsing the output programmatically.
 
+## Verifications
+
+`verification add` proves an Ethereum EOA belongs to a FID. The claim is EIP-712 typed data
+binding `(fid, address, blockHash, network)`, signed by the **address being verified** — so
+`--wallet-secret` has to be that address's real key, not the FID's. The node recovers the
+signer and rejects the message unless it matches.
+
+```bash
+fc --node http://127.0.0.1:3483 --network devnet verification add \
+  --fid 200001 --wallet-secret 0x<secp256k1-secret> --signer-secret 0x<ed25519-secret>
+
+fc --node http://127.0.0.1:3483 --network devnet verification remove \
+  --fid 200001 --address 0x<20-byte-address> --signer-secret 0x<ed25519-secret>
+```
+
+`--wallet-secret` may be omitted to derive the address from `MNEMONIC` at `--path` instead.
+`--block-hash` defaults to random bytes; devnet does not check it against a real block.
+
+Only EOA verifications are supported. Contract-signature verifications (`type: 1`) are
+validated by the node against a chain RPC outside the consensus loop, which a devnet has no
+endpoint for.
+
+## Devnet bootstrap
+
+A fresh devnet has no registered FIDs, and nothing merges without one. `devnet bootstrap`
+submits the three on-chain events a usable FID needs — storage rent, ID-register, and a
+signer — straight to the `AdminService`:
+
+```bash
+fc devnet bootstrap --grpc-node http://127.0.0.1:3383 --auth dev:dev \
+  --fid 200001 --count 60 --signer-secret 0x<ed25519-secret>
+```
+
+It prints each FID's signer secret (and generates one per FID if `--signer-secret` is
+omitted). On-chain events are applied asynchronously, so give the node a few blocks before
+submitting messages. `--auth` must match the node's `admin_rpc_auth`; the devnet Docker image
+bakes in `dev:dev`.
+
+This is devnet-only by construction: the events are synthetic, and any real network decodes
+them from a chain instead.
+
 ## Environment variables
 
 | Variable        | Used by                          | Description                                          |
 | --------------- | -------------------------------- | ---------------------------------------------------- |
-| `SIGNER_SECRET` | `cast-add`, `cast-remove`, `link`, `live-at`, `key-add`, `key-remove` | Hex-encoded Ed25519 secret (32 bytes, optional `0x` prefix). |
-| `MNEMONIC`      | `key-add`, `key-remove` (custody) | BIP-39 mnemonic for the custody-key derivation path. |
+| `SIGNER_SECRET` | `cast-add`, `cast-remove`, `link`, `live-at`, `key-add`, `key-remove`, `verification`, `devnet bootstrap` | Hex-encoded Ed25519 secret (32 bytes, optional `0x` prefix). |
+| `MNEMONIC`      | `key-add`, `key-remove` (custody), `verification add` | BIP-39 mnemonic for the custody-key derivation path. |
+| `WALLET_SECRET` | `verification add`               | Hex secp256k1 secret for the address being verified.  |

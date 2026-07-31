@@ -1,6 +1,7 @@
 //! EIP-712 typed-data helpers for KEY_ADD / KEY_REMOVE custody signatures and the embedded
-//! SignedKeyRequest metadata. Lifted from `snapchain::core::validations::key` so the CLI can
-//! avoid depending on the snapchain library crate.
+//! SignedKeyRequest metadata, plus the VERIFICATION_ADD_ETH_ADDRESS claim. Lifted from
+//! `snapchain::core::validations::{key, verification}` so the CLI can avoid depending on the
+//! snapchain library crate.
 
 use alloy_dyn_abi::TypedData;
 use serde_json::{json, Value};
@@ -127,6 +128,70 @@ pub fn key_remove_typed_data(
             "key": format!("0x{}", hex::encode(payload.key)),
             "nonce": payload.nonce,
             "deadline": payload.deadline,
+        },
+    });
+    serde_json::from_value::<TypedData>(json)
+}
+
+/// Mirrors `snapchain::core::validations::verification::eip_712_farcaster_verification_claim`.
+///
+/// The `EIP712Domain` entry declares four fields, but the domain built below populates only
+/// three of them and none of the two are `chainId` — see [`address_verification_domain`].
+fn verification_claim_types() -> Value {
+    json!({
+        "EIP712Domain": [
+            { "name": "name", "type": "string" },
+            { "name": "version", "type": "string" },
+            { "name": "chainId", "type": "uint256" },
+            { "name": "verifyingContract", "type": "address" },
+        ],
+        "VerificationClaim": [
+            { "name": "fid", "type": "uint256" },
+            { "name": "address", "type": "address" },
+            { "name": "blockHash", "type": "bytes32" },
+            { "name": "network", "type": "uint8" },
+        ],
+    })
+}
+
+/// Mirrors `snapchain::core::validations::verification::address_verification_domain`.
+///
+/// Deliberately carries no `chainId` and no `verifyingContract`, unlike the KeyAdd domain
+/// above — the claim is chain-agnostic and is separated from other Farcaster payloads by the
+/// fixed salt alone. Adding a `chainId` here silently changes the domain separator and every
+/// signature this CLI produces would be rejected.
+fn address_verification_domain() -> Value {
+    json!({
+        "name": "Farcaster Verify Ethereum Address",
+        "version": "2.0.0",
+        // fixed salt to minimize collisions
+        "salt": "0xf2d857f4a3edcb9b78b4d503bfe733db1e3f6cdc2b7971ee739626c97e86a558",
+    })
+}
+
+/// Typed data for a VERIFICATION_ADD_ETH_ADDRESS claim, as reconstructed and checked by
+/// `validate_verification_eoa_signature`.
+///
+/// `address` and `block_hash` are encoded as lowercase hex **without** a `0x` prefix, matching
+/// `make_verification_address_claim`. The node rebuilds this exact structure from the message
+/// body and recovers the signer, so any divergence here produces a message the node rejects
+/// with `InvalidClaimSignature`.
+pub fn verification_claim_typed_data(
+    fid: u64,
+    address: &[u8],
+    block_hash: &[u8],
+    network: i32,
+) -> Result<TypedData, serde_json::Error> {
+    let json = json!({
+        "address": hex::encode(address),
+        "types": verification_claim_types(),
+        "primaryType": "VerificationClaim",
+        "domain": address_verification_domain(),
+        "message": {
+            "fid": fid,
+            "address": hex::encode(address),
+            "blockHash": hex::encode(block_hash),
+            "network": network,
         },
     });
     serde_json::from_value::<TypedData>(json)

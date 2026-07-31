@@ -13,7 +13,9 @@ pub fn calculate_message_hash(data_bytes: &[u8]) -> Vec<u8> {
     blake3::hash(data_bytes).as_bytes()[0..20].to_vec()
 }
 
-fn current_timestamp() -> u32 {
+/// Seconds since the unix epoch. On-chain event block timestamps use this, unlike message
+/// timestamps which use the Farcaster epoch.
+pub fn unix_time() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is before unix epoch")
@@ -21,5 +23,5 @@ fn current_timestamp() -> u32 {
 }
 
 pub fn farcaster_time() -> u32 {
-    current_timestamp() - (FARCASTER_EPOCH / 1000) as u32
+    unix_time() - (FARCASTER_EPOCH / 1000) as u32
 }
