@@ -3004,7 +3004,7 @@ mod tests {
         // which is why teardown checks row presence instead of re-deriving a gate.
         let (store, db, _dir) = create_test_store();
         let pre_activation = MergeContext {
-            version: EngineVersion::V20,
+            version: EngineVersion::V19,
         };
 
         let add = follow_add(FID_FOR_TEST, CHANNEL_A, Some(1000));

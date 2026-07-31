@@ -28,7 +28,6 @@ pub enum EngineVersion {
     V18 = 18,
     V19 = 19,
     V20 = 20,
-    V21 = 21,
 }
 
 pub enum ProtocolFeature {
@@ -221,7 +220,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V21,
+    version: EngineVersion::V20,
 }]
 .as_slice();
 
@@ -347,14 +346,17 @@ impl EngineVersion {
             | ProtocolFeature::ChannelOwnershipEvents
             | ProtocolFeature::ChannelMessages
             | ProtocolFeature::VerificationsOnShardZero => self >= &EngineVersion::V20,
-            // Deliberately its own arm rather than appended to the V20 block above.
-            // Channel follows are not consensus-coupled to the shard-0 channel set: a
-            // follow is an ordinary ReactionAdd on the author's own shard, and the
-            // feature gates only whether the derived follow index is written. Folding
-            // it into the V20 arm would also quietly widen what
-            // `test_channel_features_activate_together` claims to pin — that test names
-            // its five features explicitly, so a sixth sharing the arm would be
-            // uncovered.
+            // Ships in the V20 rollout, but deliberately kept in its own arm rather than
+            // appended to the block above. Sharing that arm would assert a lock-step
+            // obligation that does not exist here: those five MUST co-activate or
+            // consensus breaks, whereas channel follows are not consensus-coupled to the
+            // shard-0 channel set at all — a follow is an ordinary ReactionAdd on the
+            // author's own shard, and the feature gates only whether the derived follow
+            // index is written. A future version could move this boundary alone without
+            // touching the invariant those five encode. Keeping the arms separate also
+            // keeps `test_channel_features_activate_together` honest: it names its five
+            // features explicitly, so a sixth sharing the arm would look covered by it
+            // while being asserted nowhere.
             //
             // This gate is read from `MergeContext.version`, i.e. the version for the
             // *message's own embedded timestamp*, and never from a block or snapshot
@@ -370,13 +372,15 @@ impl EngineVersion {
             // `store.rs`. Prune and revoke reach `delete_add_transaction` with no
             // version in hand, so removal is driven by row presence instead.
             //
-            // SEQUENCING: a mainnet `active_at` for V21 may not be scheduled while
+            // SEQUENCING: a mainnet `active_at` for V20 may not be scheduled while
             // `channel_registrar_for_network(Mainnet)` is still `None` — the registrar
             // contract is not deployed. Flipping that constant from `None` to `Some`
             // after activation would itself be an unversioned change to derived state,
-            // so the constant and the schedule entry land together.
+            // so the constant and the schedule entry land together. This is a stricter
+            // precondition than the rest of V20 carries, and it now blocks the whole
+            // version rather than one feature within it.
             // `channel_follows_requires_a_registrar_wherever_it_is_scheduled` pins this.
-            ProtocolFeature::ChannelFollows => self >= &EngineVersion::V21,
+            ProtocolFeature::ChannelFollows => self >= &EngineVersion::V20,
         }
     }
 
@@ -398,9 +402,7 @@ impl EngineVersion {
             EngineVersion::V15 => 10,
             EngineVersion::V16 => 11,
             EngineVersion::V17 => 12,
-            EngineVersion::V18 | EngineVersion::V19 | EngineVersion::V20 | EngineVersion::V21 => {
-                LATEST_PROTOCOL_VERSION
-            }
+            EngineVersion::V18 | EngineVersion::V19 | EngineVersion::V20 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -903,8 +905,8 @@ mod version_test {
 
     #[test]
     fn test_channel_follows_feature_gate() {
-        assert!(!EngineVersion::V20.is_enabled(ProtocolFeature::ChannelFollows));
-        assert!(EngineVersion::V21.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(!EngineVersion::V19.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::V20.is_enabled(ProtocolFeature::ChannelFollows));
         assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelFollows));
     }
 
@@ -922,17 +924,6 @@ mod version_test {
     }
 
     #[test]
-    fn channel_follows_does_not_share_the_v20_channel_boundary() {
-        // The follow index is derived from ordinary reactions on the author's own
-        // shard, with no dependency on the shard-0 channel set, so it must NOT be
-        // folded into the V20 arm. Appending it there would also silently widen what
-        // `test_channel_features_activate_together` appears to cover without that test
-        // actually asserting anything about it.
-        assert!(EngineVersion::V20.is_enabled(ProtocolFeature::ChannelMessages));
-        assert!(!EngineVersion::V20.is_enabled(ProtocolFeature::ChannelFollows));
-    }
-
-    #[test]
     fn test_channel_features_activate_together() {
         // CONSENSUS INVARIANT: the four channel features must be enabled at the exact same
         // versions. VerificationsOnShardZero is pinned alongside them for a weaker reason, spelled
@@ -947,6 +938,10 @@ mod version_test {
         // shard-0 replica shares the one V20 rollout boundary rather than drifting into its own;
         // see the comment on the matching arm in `is_enabled`. This test fails CI if a future
         // change splits any activation boundary.
+        //
+        // ChannelFollows also activates at V20 but is deliberately NOT asserted here: it ships in
+        // the same rollout without being coupled to it, so a later change may move its boundary
+        // alone. `test_channel_follows_feature_gate` is what pins it.
         use strum::IntoEnumIterator;
         for version in EngineVersion::iter() {
             let channel_registrations = version.is_enabled(ProtocolFeature::ChannelRegistrations);
@@ -1040,7 +1035,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V21);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V20);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
