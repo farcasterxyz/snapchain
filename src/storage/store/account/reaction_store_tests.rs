@@ -2715,11 +2715,13 @@ mod tests {
     }
 
     #[test]
-    fn a_like_of_a_registrar_asset_id_writes_all_three_rows() {
+    fn a_like_of_a_registrar_asset_id_writes_both_directional_rows() {
         let (store, db, _dir) = create_test_store();
         let add = follow_add(FID_FOR_TEST, CHANNEL_A, Some(1000));
         merge_follow(&store, &db, &add);
 
+        // Two rows, not three: the by-fid and by-channel directions. There is no
+        // stored counter — `follower_count` derives its answer by scanning.
         assert_eq!(is_following(&db, FID_FOR_TEST, CHANNEL_A), Some(1000));
         assert!(has_follower_row(&db, CHANNEL_A, FID_FOR_TEST));
         assert_eq!(follower_count(&store, CHANNEL_A), 1);
