@@ -31,13 +31,25 @@ sol! {
     function configToml() external view returns (string memory);
 }
 
-/// Registry address baked in per network. Mainnet and testnet registries both
-/// live on Ethereum L1 mainnet, distinguished by address; devnet deployments are
-/// ephemeral and always need `--registry`.
+/// Registry address baked in per network. The mainnet registry lives on
+/// Ethereum L1 (chain 1); the testnet registry lives on Sepolia (11155111).
+/// C5's single-salt CREATE2 plan may make the two addresses coincide — keep
+/// them separate constants anyway: a redeploy on either chain breaks the
+/// coincidence. Devnet deployments are ephemeral and always need `--registry`.
 fn baked_in_registry(_network: NetworkArg) -> Option<Address> {
-    // NEYN-13022: fill in the mainnet and testnet addresses once the registry
-    // deploy lands. Devnet stays `None` permanently.
+    // NEYN-13022: fill in the mainnet (L1) and testnet (Sepolia) addresses
+    // once the registry deploy lands. Devnet stays `None` permanently.
     None
+}
+
+/// The chain each network's registry lives on. Devnet (local anvil, arbitrary
+/// chain id) is unchecked.
+fn expected_chain_id(network: NetworkArg) -> Option<u64> {
+    match network {
+        NetworkArg::Mainnet => Some(1),
+        NetworkArg::Testnet => Some(11_155_111), // Sepolia
+        NetworkArg::Devnet => None,
+    }
 }
 
 #[derive(clap::Args)]
@@ -47,8 +59,11 @@ pub struct ConfigPullArgs {
     #[arg(long)]
     registry: Option<String>,
 
-    /// Ethereum L1 JSON-RPC URL. Defaults to `l1_rpc_url` from the target
-    /// config file.
+    /// Ethereum JSON-RPC URL for the chain the selected network's registry
+    /// lives on (mainnet: Ethereum L1; testnet: Sepolia). Mainnet defaults to
+    /// `l1_rpc_url` from the target config file; testnet and devnet require
+    /// this flag, since `l1_rpc_url` intentionally stays on Ethereum mainnet
+    /// (the node uses it for ENS resolution).
     #[arg(long)]
     rpc_url: Option<String>,
 
@@ -131,7 +146,7 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     }
 
     let registry = resolve_registry(args.registry.as_deref(), network)?;
-    let rpc_url = resolve_rpc_url(args.rpc_url, &local)?;
+    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network)?;
 
     // Deliberately not printing the RPC URL: hosted-provider URLs carry the
     // API key in the path, and this line lands in log collectors.
@@ -142,7 +157,9 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
              use https outside local devnets"
         );
     }
-    let rendered = fetch_config_toml(&rpc_url, registry).await?;
+    let client = http_client()?;
+    check_chain_id(&client, &rpc_url, network).await?;
+    let rendered = fetch_config_toml(&client, &rpc_url, registry).await?;
 
     let onchain: toml::Table =
         toml::from_str(&rendered).map_err(|e| format!("registry returned invalid TOML: {e}"))?;
@@ -303,17 +320,85 @@ fn resolve_registry(flag: Option<&str>, network: NetworkArg) -> Result<Address, 
     })
 }
 
-fn resolve_rpc_url(flag: Option<String>, local: &toml::Table) -> Result<String, BoxedError> {
+fn resolve_rpc_url(
+    flag: Option<String>,
+    local: &toml::Table,
+    network: NetworkArg,
+) -> Result<String, BoxedError> {
     if let Some(url) = flag {
         return Ok(url);
     }
-    match local.get("l1_rpc_url").and_then(|v| v.as_str()) {
-        Some(url) if !url.is_empty() => Ok(url.to_string()),
-        _ => Err("no --rpc-url given and the config file sets no l1_rpc_url".into()),
+    match network {
+        // Only mainnet may fall back to the config's l1_rpc_url: every node
+        // points that URL at Ethereum mainnet (it exists for ENS resolution),
+        // which is also where the mainnet registry lives.
+        NetworkArg::Mainnet => match local.get("l1_rpc_url").and_then(|v| v.as_str()) {
+            Some(url) if !url.is_empty() => Ok(url.to_string()),
+            _ => Err("no --rpc-url given and the config file sets no l1_rpc_url".into()),
+        },
+        NetworkArg::Testnet => Err(
+            "the testnet registry lives on Sepolia; pass --rpc-url with a Sepolia endpoint (the \
+             config's l1_rpc_url intentionally points at Ethereum mainnet for ENS and is not a \
+             safe fallback)"
+                .into(),
+        ),
+        NetworkArg::Devnet => Err("devnet requires an explicit --rpc-url".into()),
     }
 }
 
-async fn fetch_config_toml(rpc_url: &str, registry: Address) -> Result<String, BoxedError> {
+fn http_client() -> Result<reqwest::Client, BoxedError> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("cannot build HTTP client: {e}").into())
+}
+
+/// Refuse to read a registry-shaped address on the wrong chain — the one
+/// mistake the mainnet-on-L1 / testnet-on-Sepolia split makes easy.
+async fn check_chain_id(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    network: NetworkArg,
+) -> Result<(), BoxedError> {
+    let Some(expected) = expected_chain_id(network) else {
+        return Ok(());
+    };
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": [],
+    });
+    let response: serde_json::Value = client
+        .post(rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("eth_chainId request failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("eth_chainId HTTP error: {}", e.without_url()))?
+        .json()
+        .await
+        .map_err(|e| format!("eth_chainId response is not JSON: {}", e.without_url()))?;
+    let got = response
+        .get("result")
+        .and_then(|r| r.as_str())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok_or("eth_chainId returned no parseable chain id")?;
+    if got != expected {
+        return Err(format!(
+            "RPC endpoint reports chain id {got}, but the selected network's registry lives on \
+             chain {expected}; check --rpc-url"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn fetch_config_toml(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    registry: Address,
+) -> Result<String, BoxedError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -326,12 +411,6 @@ async fn fetch_config_toml(rpc_url: &str, registry: Address) -> Result<String, B
             "latest",
         ],
     });
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("cannot build HTTP client: {e}"))?;
     // reqwest errors embed the request URL, which routinely carries an RPC API
     // key in its path — strip it (without_url) before the message reaches logs.
     let mut http_response = client
@@ -768,6 +847,43 @@ bootstrap_peers = "x"
         .unwrap();
         let err = validate_onchain(&onchain).unwrap_err().to_string();
         assert!(err.contains("not a valid Ed25519 public key"), "got: {err}");
+    }
+
+    #[test]
+    fn rpc_url_fallback_is_mainnet_only() {
+        let local: toml::Table =
+            toml::from_str(r#"l1_rpc_url = "https://eth.example.invalid""#).unwrap();
+        assert_eq!(
+            resolve_rpc_url(None, &local, NetworkArg::Mainnet).unwrap(),
+            "https://eth.example.invalid"
+        );
+        // l1_rpc_url points at Ethereum mainnet (ENS) on every node — never a
+        // valid endpoint for the Sepolia testnet registry.
+        let err = resolve_rpc_url(None, &local, NetworkArg::Testnet)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Sepolia"), "got: {err}");
+        assert!(resolve_rpc_url(None, &local, NetworkArg::Devnet).is_err());
+        // An explicit flag always wins, on every network.
+        assert_eq!(
+            resolve_rpc_url(Some("https://x".into()), &local, NetworkArg::Testnet).unwrap(),
+            "https://x"
+        );
+    }
+
+    /// Pins the sol! signature to the selector `forge inspect` reports for the
+    /// built contract — an edit to the signature would otherwise fail only at
+    /// runtime, against the real registry.
+    #[test]
+    fn config_toml_selector_matches_deployed_abi() {
+        assert_eq!(configTomlCall::SELECTOR, [0x5a, 0x62, 0xbd, 0x75]);
+    }
+
+    #[test]
+    fn expected_chain_ids_per_network() {
+        assert_eq!(expected_chain_id(NetworkArg::Mainnet), Some(1));
+        assert_eq!(expected_chain_id(NetworkArg::Testnet), Some(11_155_111));
+        assert_eq!(expected_chain_id(NetworkArg::Devnet), None);
     }
 
     #[test]

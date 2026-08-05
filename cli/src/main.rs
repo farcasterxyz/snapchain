@@ -114,9 +114,9 @@ enum ConfigCmd {
     ///
     /// Stable, unlike the message-submission subcommands: flags and behaviour
     /// only change with a deprecation period. Writes to the local filesystem and
-    /// talks to an Ethereum L1 RPC — never to a snapchain node, so --node is
-    /// ignored. --network selects which registry to read and defaults to
-    /// mainnet here.
+    /// talks to an Ethereum JSON-RPC endpoint (Ethereum L1 for mainnet, Sepolia
+    /// for testnet) — never to a snapchain node, so --node is ignored.
+    /// --network selects which registry to read and defaults to mainnet here.
     Pull(config_pull::ConfigPullArgs),
 }
 
