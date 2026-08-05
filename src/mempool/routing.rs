@@ -209,7 +209,14 @@ mod tests {
         // Channel types are new at V21, so their routing is unconditional. The mempool's
         // wall-clock feature gate rejects them before activation; keeping both versions here
         // pins that routing itself cannot strand an admitted channel message on a data shard.
-        for version in [EngineVersion::V21, EngineVersion::V21] {
+        // Straddle the gate: one version with ChannelMessages closed, one with it open. Asserted
+        // rather than assumed because a version renumber can silently collapse this pair into a
+        // single case, leaving the test green while covering only one side.
+        let versions = [EngineVersion::V20, EngineVersion::V21];
+        assert!(!versions[0].is_enabled(ProtocolFeature::ChannelMessages));
+        assert!(versions[1].is_enabled(ProtocolFeature::ChannelMessages));
+
+        for version in versions {
             for message_type in [
                 MessageType::ChannelUpdate,
                 MessageType::ChannelMember,

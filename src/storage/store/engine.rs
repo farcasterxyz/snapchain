@@ -3274,7 +3274,7 @@ mod channel_message_shard_engine_boundary_tests {
     use crate::storage::store::account::HubEventStorageExt;
     use crate::storage::store::test_helper;
     use crate::utils::factory::messages_factory;
-    use crate::version::version::EngineVersion;
+    use crate::version::version::{EngineVersion, ProtocolFeature};
 
     /// Routing sends channel messages to shard 0, and ShardEngine rejects all four types if they
     /// are injected directly. Data-shard replay landing does not widen this: `merge_message` now
@@ -3374,7 +3374,14 @@ mod channel_message_shard_engine_boundary_tests {
         let fid = 1234;
         let num_shards = 2;
 
-        for version in [EngineVersion::V21, EngineVersion::V21] {
+        // Straddle the gate: one version with ChannelMessages closed, one with it open. Asserted
+        // rather than assumed because a version renumber can silently collapse this pair into a
+        // single case, leaving the test green while covering only one side.
+        let versions = [EngineVersion::V20, EngineVersion::V21];
+        assert!(!versions[0].is_enabled(ProtocolFeature::ChannelMessages));
+        assert!(versions[1].is_enabled(ProtocolFeature::ChannelMessages));
+
+        for version in versions {
             for (message_type, body) in messages_factory::channels::all_message_bodies() {
                 let message =
                     messages_factory::create_message_with_data(fid, message_type, body, None, None);
