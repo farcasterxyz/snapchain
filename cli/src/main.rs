@@ -19,6 +19,7 @@
 //! `factory::create_message_with_data` hard-codes `FarcasterNetwork::Mainnet`, so every message is
 //! re-tagged via `retarget_network` before submission.
 
+mod config_pull;
 mod eip712;
 mod factory;
 mod helpers;
@@ -90,11 +91,26 @@ enum Cmd {
     /// Submit a VERIFICATION_ADD_ETH_ADDRESS / VERIFICATION_REMOVE.
     #[command(subcommand)]
     Verification(VerificationCmd),
+    /// Manage node configuration from the onchain SnapchainConfigRegistry.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Devnet-only helpers that drive the AdminService directly.
     #[command(subcommand)]
     Devnet(DevnetCmd),
     /// Stream HubEvents from a snapchain gRPC node and log them to stdout as JSON.
     Subscribe(SubscribeArgs),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Fetch the registry's rendered config and merge it into a local config.toml.
+    ///
+    /// Stable, unlike the message-submission subcommands: flags and behaviour
+    /// only change with a deprecation period. Writes to the local filesystem and
+    /// talks to an Ethereum L1 RPC — never to a snapchain node, so --node is
+    /// ignored. --network selects which registry to read and defaults to
+    /// mainnet here.
+    Pull(config_pull::ConfigPullArgs),
 }
 
 #[derive(Subcommand)]
@@ -1159,6 +1175,9 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::Link(c) => run_link(c, &cli.node, network).await,
         Cmd::LiveAt(a) => run_live_at(a, &cli.node, network).await,
         Cmd::Verification(c) => run_verification(c, &cli.node, network).await,
+        Cmd::Config(ConfigCmd::Pull(a)) => {
+            config_pull::run(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
         Cmd::Devnet(c) => run_devnet(c).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }
