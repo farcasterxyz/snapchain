@@ -206,6 +206,7 @@ pub fn validate_message(
                 &cast_add_body,
                 message_data.timestamp < EMBEDS_V1_CUTOFF,
                 is_pro_user,
+                version,
             )?;
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {

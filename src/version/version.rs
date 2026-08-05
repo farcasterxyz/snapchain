@@ -59,6 +59,7 @@ pub enum ProtocolFeature {
     ChannelMessages,
     VerificationsOnShardZero,
     ChannelFollows,
+    IncreaseEmbedLimitForAllUsers,
 }
 
 pub struct VersionSchedule {
@@ -296,6 +297,12 @@ impl EngineVersion {
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
             ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
+            // Raises the cast embed cap to 4 for every fid, not just Pro subscribers. A pure
+            // loosening: nothing that validated before this boundary stops validating after it,
+            // so replay of pre-V20 history is untouched. It is still versioned because the
+            // rolling-upgrade window is not symmetric — an upgraded proposer would include a
+            // 4-embed non-Pro cast that an un-upgraded validator rejects.
+            ProtocolFeature::IncreaseEmbedLimitForAllUsers => self >= &EngineVersion::V20,
             // Distinct features, but their activation boundaries MUST stay identical.
             // ChannelRegistrations gates *acceptance* of channel-register events (which build the
             // order-dependent shard-0 channel-owner index); SortedBlockEngineEvents gates the
@@ -761,6 +768,26 @@ mod version_test {
         assert!(
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
                 .is_enabled(ProtocolFeature::BlockLinks)
+        );
+    }
+
+    #[test]
+    fn test_increase_embed_limit_feature_gate() {
+        // Gate closed below V20, open at V20+. Below the boundary the cap is 4 for Pro and 2 for
+        // everyone else; at and above it, 4 for everyone. Pin it explicitly: this decides whether
+        // a replayed non-Pro cast with 3 or 4 embeds validates, so moving it silently would fork
+        // every node's view of history.
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V20.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
+            true
         );
     }
 

@@ -1,6 +1,7 @@
 use crate::core::validations::error::ValidationError;
 use crate::proto::cast_add_body::Parent;
 use crate::proto::{embed, CastAddBody, CastRemoveBody, CastType, Embed};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use std::result::Result;
 
 use super::{validate_cast_id, validate_fid, validate_url};
@@ -9,6 +10,7 @@ pub fn validate_cast_add_body(
     body: &CastAddBody,
     allow_embeds_deprecated: bool,
     is_pro_user: bool,
+    version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let text_bytes = body.text.as_bytes();
 
@@ -37,7 +39,14 @@ pub fn validate_cast_add_body(
         _ => {}
     }
 
-    let num_embeds = if is_pro_user { 4 } else { 2 };
+    // Pro used to be the only way to get past 2. Keep honoring it below the boundary so pre-V20
+    // history replays identically — a Pro cast with 3 embeds was valid then and must stay valid.
+    let num_embeds =
+        if is_pro_user || version.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers) {
+            4
+        } else {
+            2
+        };
     if body.embeds.len() > num_embeds {
         return Err(ValidationError::EmbedsExceedsLimit);
     }

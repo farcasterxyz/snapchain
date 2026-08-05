@@ -4,6 +4,7 @@ mod tests {
     use crate::{
         core::validations,
         proto::{cast_add_body, embed, Embed},
+        version::version::EngineVersion,
     };
 
     #[derive(Deserialize)]
@@ -115,7 +116,11 @@ mod tests {
                 }),
             };
             // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
-            if let Err(err) = validations::cast::validate_cast_add_body(&cast, true, true) {
+            // The fixtures predate the embed-limit change, so validate them at V19 — the version
+            // that was live when they were signed.
+            if let Err(err) =
+                validations::cast::validate_cast_add_body(&cast, true, true, EngineVersion::V19)
+            {
                 panic!(
                     "Failed to validate cast: {:?} \
                      (text_len={}, embeds={}, embeds_deprecated={}, mentions={}, type={}, has_parent={})",
@@ -128,6 +133,61 @@ mod tests {
                     cast.parent.is_some(),
                 );
             }
+        }
+    }
+
+    fn cast_with_embeds(count: usize) -> crate::proto::CastAddBody {
+        crate::proto::CastAddBody {
+            text: "hello".to_string(),
+            embeds: (0..count)
+                .map(|i| Embed {
+                    embed: Some(embed::Embed::Url(format!("https://example.com/{i}"))),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn validate_embeds(
+        count: usize,
+        is_pro_user: bool,
+        version: EngineVersion,
+    ) -> Result<(), validations::error::ValidationError> {
+        validations::cast::validate_cast_add_body(
+            &cast_with_embeds(count),
+            false,
+            is_pro_user,
+            version,
+        )
+    }
+
+    /// Pins both sides of the `IncreaseEmbedLimitForAllUsers` boundary. The pre-V20 row is what
+    /// makes replay of existing history safe: a non-Pro cast with 3 embeds was invalid when it
+    /// would have been signed, and must stay invalid forever at that version.
+    #[test]
+    fn embed_limit_is_four_for_everyone_from_v20() {
+        use validations::error::ValidationError;
+
+        // Below the boundary: Pro gets 4, everyone else gets 2.
+        assert!(validate_embeds(2, false, EngineVersion::V19).is_ok());
+        assert!(matches!(
+            validate_embeds(3, false, EngineVersion::V19),
+            Err(ValidationError::EmbedsExceedsLimit)
+        ));
+        assert!(validate_embeds(4, true, EngineVersion::V19).is_ok());
+        assert!(matches!(
+            validate_embeds(5, true, EngineVersion::V19),
+            Err(ValidationError::EmbedsExceedsLimit)
+        ));
+
+        // At and above the boundary: 4 for everyone, Pro or not.
+        for is_pro_user in [false, true] {
+            assert!(validate_embeds(4, is_pro_user, EngineVersion::V20).is_ok());
+            assert!(matches!(
+                validate_embeds(5, is_pro_user, EngineVersion::V20),
+                Err(ValidationError::EmbedsExceedsLimit)
+            ));
+            assert!(validate_embeds(4, is_pro_user, EngineVersion::latest()).is_ok());
         }
     }
 }

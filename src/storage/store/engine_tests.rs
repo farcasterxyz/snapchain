@@ -3613,8 +3613,12 @@ mod tests {
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
+    /// Embeds stopped being a Pro feature at V20. This engine runs devnet, which is always the
+    /// latest version, so the gate is open — a plain fid with no tier event gets all four, and the
+    /// cap itself still bites at five. The version boundary is pinned separately in
+    /// `cast_tests::embed_limit_is_four_for_everyone_from_v20`.
     #[tokio::test]
-    async fn pro_users_get_four_embeds() {
+    async fn all_users_get_four_embeds() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
@@ -3623,50 +3627,50 @@ mod tests {
             &mut engine,
         )
         .await;
-        let pro_event = events_factory::create_pro_user_event(
-            FID_FOR_TEST,
-            1,
-            Some(time::current_timestamp_with_offset(-1)),
-        );
-        let four_embeds = messages_factory::casts::create_cast_add_rich(
-            FID_FOR_TEST,
-            "test",
-            Some(proto::CastType::Cast),
-            vec![
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("abcde".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("fghi".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::CastId(CastId {
-                        fid: FID_FOR_TEST + 1,
-                        hash: rand::random::<[u8; 20]>().to_vec(),
-                    })),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
-                },
-            ],
-            None,
-            vec![],
-            None,
-            None,
-        );
+
+        let cast_with_embeds = |text: &str, count: usize| {
+            let embeds = (0..count)
+                .map(|i| {
+                    // Mix in a CastId embed so the count check is exercised against both variants.
+                    if i == 2 {
+                        Embed {
+                            embed: Some(proto::embed::Embed::CastId(CastId {
+                                fid: FID_FOR_TEST + 1,
+                                hash: rand::random::<[u8; 20]>().to_vec(),
+                            })),
+                        }
+                    } else {
+                        Embed {
+                            embed: Some(proto::embed::Embed::Url(format!(
+                                "https://example.com/{i}"
+                            ))),
+                        }
+                    }
+                })
+                .collect();
+            messages_factory::casts::create_cast_add_rich(
+                FID_FOR_TEST,
+                text,
+                Some(proto::CastType::Cast),
+                embeds,
+                None,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        // No pro event is ever committed: four embeds must merge on a plain fid.
+        let four_embeds = cast_with_embeds("four", 4);
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(!TrieKey::for_message(&four_embeds)
+        assert!(TrieKey::for_message(&four_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
-        commit_event(&mut engine, &pro_event).await;
-        assert!(engine.trie_key_exists(
-            test_helper::trie_ctx(),
-            &TrieKey::for_onchain_event(&pro_event)
-        ));
-
-        commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(TrieKey::for_message(&four_embeds)
+        // Four is still a cap, not an invitation.
+        let five_embeds = cast_with_embeds("five", 5);
+        commit_message_at(&mut engine, &five_embeds, &FarcasterTime::current()).await;
+        assert!(!TrieKey::for_message(&five_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
