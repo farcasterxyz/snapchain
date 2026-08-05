@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_channel_owner_ignores_pre_v20_data_shard_verification() {
+    async fn test_get_channel_owner_ignores_pre_v21_data_shard_verification() {
         let (
             stores,
             _senders,
@@ -6102,7 +6102,7 @@ mod tests {
         );
 
         // This read-path test needs a historical data-shard verification row, not a new direct
-        // submission. V20 rejects the latter by design, so seed the store as pre-activation state.
+        // submission. V21 rejects the latter by design, so seed the store as pre-activation state.
         merge_verification(&engine2.get_stores(), &verification_add);
 
         let username_proof = UserNameProof {

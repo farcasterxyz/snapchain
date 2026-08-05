@@ -129,7 +129,7 @@ pub fn channel_registrar_for_network(network: FarcasterNetwork) -> Option<Channe
     match network {
         // TODO: the mainnet registry (`farcasterchannels.eth` on Ethereum L1) is
         // not deployed. Its chain id and address land in the same change that
-        // schedules V20 on mainnet — see the sequencing rule above.
+        // schedules V21 on mainnet — see the sequencing rule above.
         FarcasterNetwork::Mainnet => None,
         // An unspecified network gets no registrar. Falling through to the
         // development arm would index follows against Sepolia on a node that
@@ -139,7 +139,7 @@ pub fn channel_registrar_for_network(network: FarcasterNetwork) -> Option<Channe
         // PROVISIONAL. Testnet's own deployment is not finalized either; it is
         // expected to be the same contract devnet uses, so both point at the
         // Sepolia development registry for now. Revisit when testnet is pinned —
-        // changing this after V20 activates on testnet would rewrite which
+        // changing this after V21 activates on testnet would rewrite which
         // reactions count as follows without a version boundary.
         _ => Some(ChannelRegistrar {
             chain_id: SEPOLIA_CHAIN_ID,
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn channel_follows_requires_a_registrar_wherever_it_is_scheduled() {
         // SEQUENCING RULE. Flipping `channel_registrar_for_network` from `None` to
-        // `Some` after V20 has already activated would change which reactions are
+        // `Some` after V21 has already activated would change which reactions are
         // indexed without a version boundary — an unversioned change to replicated
         // derived state. So the constant and the schedule entry have to land
         // together, and this fails the moment someone schedules one without the

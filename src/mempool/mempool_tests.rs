@@ -166,10 +166,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s4_mempool_wall_clock_rejects_channels_before_v20_and_admits_them_at_v20() {
-        let (_, _, _, mut pre_v20_mempool, _, _, _, _, _) =
+    async fn s4_mempool_wall_clock_rejects_channels_before_v21_and_admits_them_at_v21() {
+        let (_, _, _, mut pre_v21_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
-        let (_, _, _, mut v20_mempool, _, _, _, _, _) =
+        let (_, _, _, mut v21_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
@@ -177,11 +177,11 @@ mod tests {
             // timestamps are inert, so wall-clock admission changes only with the node version.
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, Some(0), None);
-            let error = pre_v20_mempool
+            let error = pre_v21_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message.clone()), true)
                 .unwrap_err();
             assert_eq!(error.message, "channel messages not yet active");
-            assert!(v20_mempool
+            assert!(v21_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
                 .is_ok());
         }

@@ -44,7 +44,7 @@ pub const FID_FOR_TEST: u64 = 1234;
 /// Two things ARE version-sensitive and build their own context instead: link compaction
 /// (`is_compaction_conflict`), and the reaction store's channel-follow index, which is gated on
 /// `ProtocolFeature::ChannelFollows` read from this context. A test that asserts a follow row is
-/// absent must pass a pre-V20 context explicitly rather than relying on this helper.
+/// absent must pass a pre-V21 context explicitly rather than relying on this helper.
 pub fn default_merge_ctx() -> crate::storage::store::account::MergeContext {
     crate::storage::store::account::MergeContext {
         version: crate::version::version::EngineVersion::latest(),

@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_messages_replicate_round_trip_from_v20_snapshot() {
+    async fn channel_messages_replicate_round_trip_from_v21_snapshot() {
         let messages = channel_messages();
         let (mut source, _source_tmp) = test_helper::new_engine().await;
         replay_messages(&mut source, &messages).await;
@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s4_pre_v20_snapshot_rejects_channel_cache_reads_without_state_changes() {
+    async fn s4_pre_v21_snapshot_rejects_channel_cache_reads_without_state_changes() {
         let messages = channel_messages();
         let (mut source, _source_tmp) = test_helper::new_engine().await;
         replay_messages(&mut source, &messages[..1]).await;
@@ -1062,7 +1062,7 @@ mod tests {
         // snapshot timestamp on this network can enable the feature. That — not the
         // timestamp — is what makes this the pre-activation case; the value is 0 so it
         // does not imply a boundary the schedule does not have. When testnet does get
-        // a V20 entry this test will fail loudly rather than silently stop testing the
+        // a V21 entry this test will fail loudly rather than silently stop testing the
         // gate.
         let replicator = snapshot_replicator(&source, proto::FarcasterNetwork::Testnet, 0);
         assert!(!EngineVersion::channel_messages_enabled_for_snapshot(

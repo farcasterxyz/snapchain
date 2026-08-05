@@ -39,17 +39,17 @@ mod tests {
         hex::encode(b)
     }
 
-    const PRE_V20_TESTNET_UNIX_TIMESTAMP: u64 = 1_784_124_000;
+    const PRE_V21_TESTNET_UNIX_TIMESTAMP: u64 = 1_784_124_000;
 
-    fn pre_v20_testnet_time(offset_seconds: u64) -> FarcasterTime {
-        FarcasterTime::from_unix_seconds(PRE_V20_TESTNET_UNIX_TIMESTAMP + offset_seconds)
+    fn pre_v21_testnet_time(offset_seconds: u64) -> FarcasterTime {
+        FarcasterTime::from_unix_seconds(PRE_V21_TESTNET_UNIX_TIMESTAMP + offset_seconds)
     }
 
-    fn pre_v20_testnet_message_timestamp(offset_seconds: u64) -> u32 {
-        pre_v20_testnet_time(offset_seconds).to_u64() as u32
+    fn pre_v21_testnet_message_timestamp(offset_seconds: u64) -> u32 {
+        pre_v21_testnet_time(offset_seconds).to_u64() as u32
     }
 
-    async fn new_pre_v20_testnet_engine() -> (ShardEngine, tempfile::TempDir) {
+    async fn new_pre_v21_testnet_engine() -> (ShardEngine, tempfile::TempDir) {
         test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet),
             ..EngineOptions::default()
@@ -57,7 +57,7 @@ mod tests {
         .await
     }
 
-    async fn commit_pre_v20_message(engine: &mut ShardEngine, message: &proto::Message) {
+    async fn commit_pre_v21_message(engine: &mut ShardEngine, message: &proto::Message) {
         let block_time = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
         assert_eq!(
             EngineVersion::version_for(&block_time, FarcasterNetwork::Testnet),
@@ -691,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_verification_messages() {
-        let timestamp = pre_v20_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v20_testnet_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
         test_helper::register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
@@ -711,7 +711,7 @@ mod tests {
             None,
         );
 
-        commit_pre_v20_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
@@ -723,16 +723,16 @@ mod tests {
             None,
         );
 
-        commit_pre_v20_message(&mut engine, &verification_remove).await;
+        commit_pre_v21_message(&mut engine, &verification_remove).await;
 
         let verification_result = engine.get_verifications_by_fid(FID_FOR_TEST);
         assert_eq!(0, verification_result.unwrap().messages.len());
     }
 
     #[tokio::test]
-    async fn s4_data_shard_verification_admission_splits_at_v20() {
-        let pre_v20_block_time = pre_v20_testnet_time(0);
-        let timestamp = pre_v20_block_time.to_u64() as u32;
+    async fn s4_data_shard_verification_admission_splits_at_v21() {
+        let pre_v21_block_time = pre_v21_testnet_time(0);
+        let timestamp = pre_v21_block_time.to_u64() as u32;
         let verification_add = messages_factory::verifications::create_verification_add(
             FID3_FOR_TEST,
             0,
@@ -749,30 +749,30 @@ mod tests {
             None,
         );
 
-        let (mut pre_v20_engine, _tmpdir) = new_pre_v20_testnet_engine().await;
+        let (mut pre_v21_engine, _tmpdir) = new_pre_v21_testnet_engine().await;
         register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
-            &mut pre_v20_engine,
+            &mut pre_v21_engine,
         )
         .await;
-        commit_pre_v20_message(&mut pre_v20_engine, &verification_add).await;
+        commit_pre_v21_message(&mut pre_v21_engine, &verification_add).await;
 
-        let (mut post_v20_engine, _tmpdir) = test_helper::new_engine().await;
+        let (mut post_v21_engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
-            &mut post_v20_engine,
+            &mut post_v21_engine,
         )
         .await;
         for message in [&verification_add, &verification_remove] {
-            let error = post_v20_engine
+            let error = post_v21_engine
                 .validate_user_message(
                     message,
                     &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
-                    EngineVersion::V20,
+                    EngineVersion::V21,
                     &mut RocksDbTransactionBatch::new(),
                 )
                 .unwrap_err();
@@ -786,8 +786,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_ethereum_address_with_verification() {
-        let timestamp = pre_v20_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v20_testnet_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -810,7 +810,7 @@ mod tests {
             None,
         );
 
-        commit_pre_v20_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         // Verify the verification was added
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
@@ -867,8 +867,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
-        let timestamp = pre_v20_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v20_testnet_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -896,7 +896,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_pre_v20_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         // Step 2: Set the Ethereum address as primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -906,7 +906,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v20_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v21_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -931,7 +931,7 @@ mod tests {
             Some(timestamp + 2),
             None,
         );
-        commit_pre_v20_message(&mut engine, &verification_remove).await;
+        commit_pre_v21_message(&mut engine, &verification_remove).await;
 
         // Step 4: Verify the primary address was automatically revoked
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -1008,8 +1008,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
-        let timestamp = pre_v20_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v20_testnet_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -1037,7 +1037,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_pre_v20_message(&mut engine, &primary_verification_add).await;
+        commit_pre_v21_message(&mut engine, &primary_verification_add).await;
 
         let other_address = "182327170fc284caaa5b1bc3e3878233f529d741";
         let other_address_bytes = hex::decode(other_address).unwrap();
@@ -1052,7 +1052,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v20_message(&mut engine, &other_verification_add).await;
+        commit_pre_v21_message(&mut engine, &other_verification_add).await;
 
         // Set the primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -1062,7 +1062,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v20_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v21_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -1080,7 +1080,7 @@ mod tests {
         );
 
         // This should succeed
-        commit_pre_v20_message(&mut engine, &other_verification_remove).await;
+        commit_pre_v21_message(&mut engine, &other_verification_remove).await;
 
         // Verify the primary address is STILL set (should not be revoked)
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -3613,8 +3613,12 @@ mod tests {
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
+    /// Embeds stopped being a Pro feature at V20. This engine runs devnet, which is always the
+    /// latest version, so the gate is open — a plain fid with no tier event gets all four, and the
+    /// cap itself still bites at five. The version boundary is pinned separately in
+    /// `cast_tests::embed_limit_is_four_for_everyone_from_v20`.
     #[tokio::test]
-    async fn pro_users_get_four_embeds() {
+    async fn all_users_get_four_embeds() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
@@ -3623,50 +3627,50 @@ mod tests {
             &mut engine,
         )
         .await;
-        let pro_event = events_factory::create_pro_user_event(
-            FID_FOR_TEST,
-            1,
-            Some(time::current_timestamp_with_offset(-1)),
-        );
-        let four_embeds = messages_factory::casts::create_cast_add_rich(
-            FID_FOR_TEST,
-            "test",
-            Some(proto::CastType::Cast),
-            vec![
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("abcde".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("fghi".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::CastId(CastId {
-                        fid: FID_FOR_TEST + 1,
-                        hash: rand::random::<[u8; 20]>().to_vec(),
-                    })),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
-                },
-            ],
-            None,
-            vec![],
-            None,
-            None,
-        );
+
+        let cast_with_embeds = |text: &str, count: usize| {
+            let embeds = (0..count)
+                .map(|i| {
+                    // Mix in a CastId embed so the count check is exercised against both variants.
+                    if i == 2 {
+                        Embed {
+                            embed: Some(proto::embed::Embed::CastId(CastId {
+                                fid: FID_FOR_TEST + 1,
+                                hash: rand::random::<[u8; 20]>().to_vec(),
+                            })),
+                        }
+                    } else {
+                        Embed {
+                            embed: Some(proto::embed::Embed::Url(format!(
+                                "https://example.com/{i}"
+                            ))),
+                        }
+                    }
+                })
+                .collect();
+            messages_factory::casts::create_cast_add_rich(
+                FID_FOR_TEST,
+                text,
+                Some(proto::CastType::Cast),
+                embeds,
+                None,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        // No pro event is ever committed: four embeds must merge on a plain fid.
+        let four_embeds = cast_with_embeds("four", 4);
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(!TrieKey::for_message(&four_embeds)
+        assert!(TrieKey::for_message(&four_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
-        commit_event(&mut engine, &pro_event).await;
-        assert!(engine.trie_key_exists(
-            test_helper::trie_ctx(),
-            &TrieKey::for_onchain_event(&pro_event)
-        ));
-
-        commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(TrieKey::for_message(&four_embeds)
+        // Four is still a cap, not an invitation.
+        let five_embeds = cast_with_embeds("five", 5);
+        commit_message_at(&mut engine, &five_embeds, &FarcasterTime::current()).await;
+        assert!(!TrieKey::for_message(&five_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
@@ -4285,7 +4289,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn replicator_replay_bypasses_post_v20_direct_admission_reject() {
+        async fn replicator_replay_bypasses_post_v21_direct_admission_reject() {
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             let add = verification_add(messages_factory::farcaster_time());
             engine
@@ -4346,7 +4350,7 @@ mod tests {
             );
         }
 
-        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V20
+        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V21
         // cutover, then the SAME verification arriving again by shard-0 forced replay after
         // cutover. This is the window case `routing.rs` documents: self-supersede keeps the store,
         // by-address index, and trie mutually consistent (the replay is a state no-op), while the
@@ -4355,7 +4359,7 @@ mod tests {
         // the verification twice even though state converges.
         //
         // `commit_replicator_message_for_test` stands in for the pre-cutover live merge: it seeds
-        // the row the data shard would already hold from the pre-V20 regime, which post-V20 direct
+        // the row the data shard would already hold from the pre-V21 regime, which post-V21 direct
         // admission now rejects (that rejection is exactly what makes shard 0 the only live path).
         #[tokio::test]
         async fn cutover_straddle_live_then_replay_converges_state_but_re_emits_event() {
@@ -5239,7 +5243,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_active_merge_on_chain_event_block_event_folds_replica_and_hints() {
-            // Devnet runs V20, so the arm folds the fanned-out REGISTER into this shard's own
+            // Devnet runs V21, so the arm folds the fanned-out REGISTER into this shard's own
             // replica: it materializes all three secondary indexes (ByChannelKey,
             // ChannelKeyByLabel, ByOwnerAddress), emits exactly one REGISTER hint, and — being a
             // secondary-index-only fold — never touches the trie.
@@ -5566,7 +5570,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
-            // On Mainnet the block's timestamp (0) resolves to a pre-V20 version, so
+            // On Mainnet the block's timestamp (0) resolves to a pre-V21 version, so
             // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The
             // caller warns and swallows the error, so the block still commits — but no state is
             // produced: the merge is short-circuited before any fold or trie write.
@@ -5611,7 +5615,7 @@ mod tests {
     // every error warns and yields fewer hints, and the merge result + trie are untouched.
     //
     // Most tests drive the real BlockEvent replay + forced merge + trie + hint sequence. Two edges
-    // — the pre-V20 gate and the Solana-protocol skip — call the emitter directly with an explicit
+    // — the pre-V21 gate and the Solana-protocol skip — call the emitter directly with an explicit
     // version because no running network can construct those states through replay.
     // ----------------------------------------------------------------------------------------
     mod channel_ownership_events_verification_hint_tests {
@@ -5632,7 +5636,7 @@ mod tests {
             hex::decode(VERIFIED_ADDRESS_HEX).unwrap()
         }
 
-        // A fresh devnet engine (V20 active) with FID3_FOR_TEST registered so the fixture
+        // A fresh devnet engine (V21 active) with FID3_FOR_TEST registered so the fixture
         // verification can merge.
         async fn new_verifier_engine() -> (ShardEngine, tempfile::TempDir) {
             let (mut engine, tmpdir) = test_helper::new_engine().await;
@@ -5998,7 +6002,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
             );
             assert_eq!(hints.len(), 1, "the hook emits the hint");
             // Persist the hint's writes: only the event store is touched, never the trie.
@@ -6017,35 +6021,35 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_pre_v20_gate_suppresses_hints_on_a_populated_replica() {
-            // The pre-V20 gate on the exact state no running network exhibits: a populated
+        async fn test_pre_v21_gate_suppresses_hints_on_a_populated_replica() {
+            // The pre-V21 gate on the exact state no running network exhibits: a populated
             // replica with the feature off. Built on devnet (so the replica exists), then the
-            // hook is called directly with a pre-V20 vs V20 version — the ONLY difference between
+            // hook is called directly with a pre-V21 vs V21 version — the ONLY difference between
             // "no hints" and "the hint" is the version, proving the gate is the discriminator.
             let (mut engine, _tmp) = new_verifier_engine().await;
             register_channel(&mut engine, "pets", verified_address()).await;
             let add = verification_add(messages_factory::farcaster_time());
 
             let mut txn_pre = RocksDbTransactionBatch::new();
-            let pre_v20 = engine.emit_channel_owner_hints_for_verification(
+            let pre_v21 = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn_pre,
                 EngineVersion::V19,
             );
             assert!(
-                pre_v20.is_empty(),
-                "pre-V20 (feature off) emits no hint even on a populated replica"
+                pre_v21.is_empty(),
+                "pre-V21 (feature off) emits no hint even on a populated replica"
             );
 
-            let mut txn_v20 = RocksDbTransactionBatch::new();
-            let v20 = engine.emit_channel_owner_hints_for_verification(
+            let mut txn_v21 = RocksDbTransactionBatch::new();
+            let v21 = engine.emit_channel_owner_hints_for_verification(
                 &add,
-                &mut txn_v20,
-                EngineVersion::V20,
+                &mut txn_v21,
+                EngineVersion::V21,
             );
-            assert_eq!(v20.len(), 1, "the same inputs at V20 emit the hint");
+            assert_eq!(v21.len(), 1, "the same inputs at V21 emit the hint");
             assert_hint(
-                &v20[0],
+                &v21[0],
                 "pets",
                 &verified_address(),
                 proto::ChannelOwnerChangeCause::VerificationAdd,
@@ -6073,7 +6077,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &solana_add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
             );
             assert!(
                 hints.is_empty(),
@@ -6099,7 +6103,7 @@ mod tests {
                     .emit_channel_owner_hints_for_verification(
                         &verification_add(messages_factory::farcaster_time()),
                         &mut txn,
-                        EngineVersion::V20,
+                        EngineVersion::V21,
                     )
                     .len(),
                 1,
@@ -6132,7 +6136,7 @@ mod tests {
                 let hints = engine.emit_channel_owner_hints_for_verification(
                     msg,
                     &mut txn,
-                    EngineVersion::V20,
+                    EngineVersion::V21,
                 );
                 assert!(
                     hints.is_empty(),
@@ -6159,7 +6163,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
                 3,
             );
 
@@ -6195,7 +6199,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
             );
 
             assert_eq!(
@@ -6268,7 +6272,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
                 3,
             );
             assert_eq!(hints.len(), 3, "the cap truncated to 3 hints");
@@ -6301,7 +6305,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V20,
+                EngineVersion::V21,
                 256,
             );
 
