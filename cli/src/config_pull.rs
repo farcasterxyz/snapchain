@@ -420,13 +420,26 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
                 }
             }
         }
-        if i > 0 && set.effective_at < sets[i - 1].effective_at {
-            return Err(format!(
-                "validator set {i}: effective_at {} is below its predecessor's {}",
-                set.effective_at,
-                sets[i - 1].effective_at
-            )
-            .into());
+        // effective_at is a per-shard height: shard counters advance
+        // independently, so entries governing disjoint shards are unordered
+        // relative to each other. Mirror the contract's rule and no stronger
+        // one — bound each entry against the most recent preceding entry
+        // sharing at least one shard (>=, since sibling rollouts land on the
+        // same height). A global check would reject legitimate configs the
+        // first time two shards rotate at different heights.
+        let prev_sharing_shard = sets[..i]
+            .iter()
+            .rev()
+            .find(|prev| prev.shard_ids.iter().any(|s| set.shard_ids.contains(s)));
+        if let Some(prev) = prev_sharing_shard {
+            if set.effective_at < prev.effective_at {
+                return Err(format!(
+                    "validator set {i}: effective_at {} regresses below {} set earlier for an \
+                     overlapping shard",
+                    set.effective_at, prev.effective_at
+                )
+                .into());
+            }
         }
     }
 
@@ -673,7 +686,49 @@ bootstrap_peers = "x"
         );
         let onchain: toml::Table = toml::from_str(&two_sets).unwrap();
         let err = validate_onchain(&onchain).unwrap_err().to_string();
-        assert!(err.contains("below its predecessor"), "got: {err}");
+        assert!(err.contains("overlapping shard"), "got: {err}");
+    }
+
+    /// A validator-set block in the onchain grammar, with a known-good key.
+    fn set_block(effective_at: u64, shard_ids: &str) -> String {
+        format!(
+            "[[consensus.validator_sets]]\neffective_at = {effective_at}\nshard_ids = \
+             {shard_ids}\nvalidator_public_keys = [\n  \
+             \"29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970\",\n]\n\n"
+        )
+    }
+
+    const GOSSIP_BLOCK: &str = "[gossip]\nbootstrap_peers = \"\"\ndirect_peers = \"\"\n";
+
+    #[test]
+    fn accepts_lower_effective_at_on_disjoint_shards() {
+        // Shard counters are independent clocks: shard 1 at height 30M after
+        // shard 0 at 50M is a legitimate rollout, not a regression.
+        let doc = format!(
+            "{}{}{}{GOSSIP_BLOCK}",
+            set_block(0, "[0, 1]"),
+            set_block(50_000_000, "[0]"),
+            set_block(30_000_000, "[1]"),
+        );
+        let onchain: toml::Table = toml::from_str(&doc).unwrap();
+        validate_onchain(&onchain).unwrap();
+    }
+
+    #[test]
+    fn rejects_regression_within_a_shard_across_interleaved_entries() {
+        // Entry 3 regresses shard 0 (60 < 100) even though its immediate array
+        // predecessor is a disjoint shard-1 entry — the bound is against the
+        // most recent entry sharing a shard, not the previous array element.
+        let doc = format!(
+            "{}{}{}{}{GOSSIP_BLOCK}",
+            set_block(0, "[0, 1]"),
+            set_block(100, "[0]"),
+            set_block(50, "[1]"),
+            set_block(60, "[0]"),
+        );
+        let onchain: toml::Table = toml::from_str(&doc).unwrap();
+        let err = validate_onchain(&onchain).unwrap_err().to_string();
+        assert!(err.contains("overlapping shard"), "got: {err}");
     }
 
     /// Parity with the node: the mirrored `ValidatorSetConfig` must deserialize
