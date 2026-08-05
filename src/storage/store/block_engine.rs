@@ -90,14 +90,14 @@ pub enum MessageValidationError {
 //
 // Unlike the data shard's pruned store, shard 0 never reclaims a tombstone. Do not "clean this
 // up" by aging, pruning, or reclaiming them: dropping a tombstone empties the address's logical
-// key, which lets anyone re-gossip the owner's old post-V20-signed add. Shard 0 merges it (LWW
+// key, which lets anyone re-gossip the owner's old post-V21-signed add. Shard 0 merges it (LWW
 // against nothing), fans it out, and force-override replay re-imposes it on the data shard
-// unconditionally — resurrecting a verification its owner deliberately removed. Pre-V20 pruning
+// unconditionally — resurrecting a verification its owner deliberately removed. Pre-V21 pruning
 // had the same hole bounded by plain LWW; force-override amplifies it. Permanent-but-bounded is
 // the design, and the bound is what keeps "permanent" affordable.
 //
 // Legacy verification limits ran into the hundreds, so this floor lets a fid shed a large
-// pre-V20 verification set. Larger storage allocations scale the bound through `max_messages`.
+// pre-V21 verification set. Larger storage allocations scale the bound through `max_messages`.
 // The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
 // shard-0 rows.
 const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
@@ -1031,7 +1031,7 @@ impl BlockEngine {
                     return Err(MessageValidationError::InvalidMessageType);
                 }
                 // D9: channel slots resolve by shard-0 consensus order, not timestamp LWW.
-                // Embedded timestamps are inert, and these types did not exist before V20, so
+                // Embedded timestamps are inert, and these types did not exist before V21, so
                 // the verification activation floor has no channel analogue.
                 channel_dispatch = Some(self.validate_channel_message(message_data, txn_batch)?);
             }
@@ -1169,7 +1169,7 @@ impl BlockEngine {
                     // deliberately admitted even past `tombstone_cap`: a fid at cap, or one whose
                     // storage lapsed, must always be able to shed live state.
                     (false, Some(_)) => {}
-                    // Mints a new tombstone row. This is the pre-V20-address remove case: the
+                    // Mints a new tombstone row. This is the pre-V21-address remove case: the
                     // replica has never seen the address, so the row is new.
                     (false, None) => {
                         if verification_counts.tombstones >= tombstone_cap || total_rows >= row_cap
@@ -1550,12 +1550,12 @@ impl BlockEngine {
                             }
                         }
                     }
-                    // THE live path for verifications once V20 is enabled: routing sends them
+                    // THE live path for verifications once V21 is enabled: routing sends them
                     // here, admission has already applied the timestamp floor and the replica
                     // quota, and successful merges fan out as BlockEvents for force-override
-                    // replay onto every data shard. Below V20 this arm is unreachable —
+                    // replay onto every data shard. Below V21 this arm is unreachable —
                     // `validate_user_message` rejects verification bodies outright, so the merge
-                    // is never attempted and nothing here can perturb pre-V20 streams.
+                    // is never attempted and nothing here can perturb pre-V21 streams.
                     MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
                         if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
                             match self.merge_message(message, txn_batch, version) {
@@ -2390,7 +2390,7 @@ mod verification_cap_tests {
         assert_eq!(verification_row_cap(0), 0);
 
         // Below the floor (one 2025 unit is 5), the floor dominates so a whale shedding a large
-        // pre-V20 set is not blocked by its own small live allowance.
+        // pre-V21 set is not blocked by its own small live allowance.
         assert_eq!(verification_tombstone_cap(5), 256);
         assert_eq!(verification_row_cap(5), 261);
 
@@ -2441,7 +2441,7 @@ mod ordering_tests {
         let off = block_engine_system_messages_for_replay(&messages, EngineVersion::V19);
         assert_eq!(log_indexes(off.as_ref()), vec![20, 10, 30]);
 
-        let on = block_engine_system_messages_for_replay(&messages, EngineVersion::V20);
+        let on = block_engine_system_messages_for_replay(&messages, EngineVersion::V21);
         assert_eq!(log_indexes(on.as_ref()), vec![30, 10, 20]);
     }
 }
@@ -2561,7 +2561,7 @@ mod channel_message_gate_tests {
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Pre-feature channel bodies still die in stateless validation. With V20 active they reach
+    /// Pre-feature channel bodies still die in stateless validation. With V21 active they reach
     /// the channel arm and fail because the fixture's channel is intentionally unregistered.
     #[test]
     fn channel_messages_are_gated_and_require_a_registered_channel() {
@@ -2583,7 +2583,7 @@ mod channel_message_gate_tests {
                 &message,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &timestamp,
-                EngineVersion::V20,
+                EngineVersion::V21,
                 &mut RocksDbTransactionBatch::new(),
             );
             assert!(matches!(

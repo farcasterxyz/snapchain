@@ -655,7 +655,7 @@ mod tests {
             Some(&fid_signer),
         );
 
-        // Post-V20 verifications reach data shards as shard-0 BlockEvents. Seed the source
+        // Post-V21 verifications reach data shards as shard-0 BlockEvents. Seed the source
         // through that public replay path so replication coverage keeps a verification row
         // without relying on the now-rejected direct-submission path.
         let verification_block_event = factory::events_factory::create_merge_message_event(
