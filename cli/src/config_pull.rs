@@ -12,13 +12,18 @@
 //! which owns the real loader; the deploy scripts run it between pulling and
 //! restarting the node.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy_primitives::Address;
 use alloy_sol_types::{sol, SolCall};
 use serde::Deserialize;
 
 use crate::{BoxedError, NetworkArg};
+
+/// Cap on the eth_call HTTP response. configToml() output is bounded onchain
+/// (8 KiB peer strings, capped key arrays), so a few KiB is normal; anything
+/// approaching this cap is not the registry.
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 sol! {
     /// The one read `config pull` needs from ISnapchainConfigRegistry
@@ -51,7 +56,8 @@ pub struct ConfigPullArgs {
     #[arg(long)]
     config: PathBuf,
 
-    /// Print the merged document to stdout instead of writing the file.
+    /// Print the merged document to stdout instead of writing the file
+    /// (consensus.private_key is shown redacted).
     #[arg(long)]
     dry_run: bool,
 }
@@ -95,10 +101,16 @@ struct OnchainDoc {
 }
 
 pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedError> {
-    let local_raw = std::fs::read_to_string(&args.config)
-        .map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
+    // Resolve symlinks up front so the rewrite replaces the real file, not the
+    // symlink pointing at it.
+    let config_path = std::fs::canonicalize(&args.config)
+        .map_err(|e| format!("cannot resolve {}: {e}", args.config.display()))?;
+    let local_raw = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("cannot read {}: {e}", config_path.display()))?;
     let mut local: toml::Table = toml::from_str(&local_raw)
-        .map_err(|e| format!("cannot parse {}: {e}", args.config.display()))?;
+        .map_err(|e| sanitized_toml_error(&config_path.display().to_string(), &local_raw, &e))?;
+
+    check_network_matches(&local, network)?;
 
     // The registry manages validators only; read nodes keep their own peer
     // configuration path (spec §2.5). A dry run is harmless inspection.
@@ -121,7 +133,15 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     let registry = resolve_registry(args.registry.as_deref(), network)?;
     let rpc_url = resolve_rpc_url(args.rpc_url, &local)?;
 
-    eprintln!("Fetching configToml() from {registry} via {rpc_url}");
+    // Deliberately not printing the RPC URL: hosted-provider URLs carry the
+    // API key in the path, and this line lands in log collectors.
+    eprintln!("Fetching configToml() from {registry}");
+    if rpc_url.starts_with("http://") {
+        eprintln!(
+            "warning: --rpc-url is plaintext http and its response chooses the validator set; \
+             use https outside local devnets"
+        );
+    }
     let rendered = fetch_config_toml(&rpc_url, registry).await?;
 
     let onchain: toml::Table =
@@ -134,20 +154,135 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
         toml::to_string(&local).map_err(|e| format!("cannot serialize merged config: {e}"))?;
     // Belt and braces: never emit a document the parser itself would reject.
     toml::from_str::<toml::Table>(&merged)
-        .map_err(|e| format!("merged config does not re-parse: {e}"))?;
+        .map_err(|e| sanitized_toml_error("merged config does not re-parse", &merged, &e))?;
 
     if args.dry_run {
-        print!("{merged}");
+        print!("{}", redact_private_key(local));
         return Ok(());
     }
 
-    // Write via rename so a crash mid-write cannot leave a truncated config for
-    // the next node start to trip over.
-    let tmp = args.config.with_extension("toml.tmp");
-    std::fs::write(&tmp, &merged).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &args.config)
-        .map_err(|e| format!("cannot rename {} into place: {e}", tmp.display()))?;
-    eprintln!("Wrote {}", args.config.display());
+    write_replace(&config_path, &merged)?;
+    eprintln!("Wrote {}", config_path.display());
+    Ok(())
+}
+
+/// Refuse to splice one network's registry output into a config that declares
+/// another. Latent until the baked-in registry addresses land; after that,
+/// `fc config pull` (which defaults to mainnet) run against a testnet node's
+/// config would otherwise silently install the mainnet validator set.
+fn check_network_matches(local: &toml::Table, network: NetworkArg) -> Result<(), BoxedError> {
+    let declared = match local.get("fc_network").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        // Absent from the file (the node would default it): nothing to check.
+        None => return Ok(()),
+    };
+    let selected = match network {
+        NetworkArg::Mainnet => "Mainnet",
+        NetworkArg::Testnet => "Testnet",
+        NetworkArg::Devnet => "Devnet",
+    };
+    if declared.eq_ignore_ascii_case(selected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "config file declares fc_network = {declared:?} but the selected network is \
+             {selected}; pass a matching --network"
+        )
+        .into())
+    }
+}
+
+/// Render a TOML error without echoing the offending source line. The local
+/// config contains the consensus private key; the default error Display quotes
+/// the source line, which would land verbatim in captured stderr.
+fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> String {
+    match err.span() {
+        Some(span) => {
+            let line = source[..span.start.min(source.len())].matches('\n').count() + 1;
+            format!(
+                "{context}: TOML parse error at line {line}: {}",
+                err.message()
+            )
+        }
+        None => format!("{context}: TOML parse error: {}", err.message()),
+    }
+}
+
+/// Dry-run output goes to stdout, which deployment pipelines capture into log
+/// collectors — mask the private key. The three managed keys, the thing
+/// dry-run exists to inspect, are unaffected.
+fn redact_private_key(mut merged: toml::Table) -> String {
+    if let Some(consensus) = merged.get_mut("consensus").and_then(|c| c.as_table_mut()) {
+        if consensus.contains_key("private_key") {
+            consensus.insert(
+                "private_key".to_string(),
+                toml::Value::String("<redacted>".to_string()),
+            );
+        }
+    }
+    toml::to_string(&merged).expect("table serialized successfully before redaction")
+}
+
+/// Replace `path` with `contents` without exposing a world-readable copy of the
+/// config (it carries the consensus private key) and without a window where a
+/// crash leaves a truncated file: unique temp sibling created 0600, contents
+/// fsync'd, the original file's permissions copied over, atomic rename, then a
+/// best-effort directory fsync so the rename itself survives power loss.
+fn write_replace(path: &Path, contents: &str) -> Result<(), BoxedError> {
+    use std::io::Write as _;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("config path {} has no file name", path.display()))?;
+    // PID-unique name so a racing pull cannot write into our temp file and get
+    // its half-written bytes renamed into place.
+    let tmp = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
+
+    let original_perms = std::fs::metadata(path)
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
+        .permissions();
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+
+    let written = (|| -> Result<(), BoxedError> {
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync {}: {e}", tmp.display()))?;
+        std::fs::set_permissions(&tmp, original_perms)
+            .map_err(|e| format!("cannot set permissions on {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            format!(
+                "cannot rename {} over {}: {e} (note: a single-file bind mount cannot be \
+                 replaced by rename)",
+                tmp.display(),
+                path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if written.is_err() {
+        // Never leave a stray copy of the private key on disk.
+        let _ = std::fs::remove_file(&tmp);
+        return written;
+    }
+
+    if let Some(dir) = path.parent() {
+        if let Ok(dir_handle) = std::fs::File::open(dir) {
+            let _ = dir_handle.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -191,14 +326,35 @@ async fn fetch_config_toml(rpc_url: &str, registry: Address) -> Result<String, B
             "latest",
         ],
     });
-    let response: serde_json::Value = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("cannot build HTTP client: {e}"))?;
+    // reqwest errors embed the request URL, which routinely carries an RPC API
+    // key in its path — strip it (without_url) before the message reaches logs.
+    let mut http_response = client
         .post(rpc_url)
         .json(&request)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .await
+        .map_err(|e| format!("eth_call request failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("eth_call HTTP error: {}", e.without_url()))?;
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = http_response
+        .chunk()
+        .await
+        .map_err(|e| format!("eth_call read failed: {}", e.without_url()))?
+    {
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(format!("eth_call response exceeds {MAX_RESPONSE_BYTES} bytes").into());
+        }
+    }
+    let response: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| format!("eth_call response is not JSON: {e}"))?;
     if let Some(error) = response.get("error") {
         return Err(format!("eth_call failed: {error}").into());
     }
@@ -236,10 +392,22 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
             return Err(format!("validator set {i}: empty validator_public_keys").into());
         }
         for key in &set.validator_public_keys {
-            // The node does hex::decode(key).unwrap() at startup
-            // (src/consensus/validator.rs), so a malformed key must die here.
+            // The node's startup does hex::decode(..).unwrap() and then full
+            // Ed25519 point decompression, also unwrapped (src/consensus/
+            // validator.rs:59, libp2p ed25519 PublicKey::try_from_bytes —
+            // ed25519-dalek underneath). Roughly half of all 32-byte values
+            // are not curve points, so hex-validity alone is not enough:
+            // anything the node would panic on must die here instead.
             match hex::decode(key) {
-                Ok(bytes) if bytes.len() == 32 => {}
+                Ok(bytes) if bytes.len() == 32 => {
+                    let arr: [u8; 32] = bytes.try_into().expect("length checked above");
+                    if ed25519_dalek::VerifyingKey::from_bytes(&arr).is_err() {
+                        return Err(format!(
+                            "validator set {i}: key {key:?} is not a valid Ed25519 public key"
+                        )
+                        .into());
+                    }
+                }
                 Ok(bytes) => {
                     return Err(format!(
                         "validator set {i}: key {key:?} decodes to {} bytes, expected 32",
@@ -263,12 +431,18 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
     }
 
     // Entry 0 seeds the node's active-set scan unconditionally, so it must be
-    // the genesis entry (spec §2.3). Operator-owned data, so warn rather than
-    // refuse.
-    if sets[0].effective_at != 0 {
+    // the genesis entry: effective_at 0 AND covering every shard the document
+    // mentions (spec §2.3). Operator-owned data, so warn rather than refuse.
+    let all_shards: std::collections::BTreeSet<u32> = sets
+        .iter()
+        .flat_map(|s| s.shard_ids.iter().copied())
+        .collect();
+    let entry0_shards: std::collections::BTreeSet<u32> =
+        sets[0].shard_ids.iter().copied().collect();
+    if sets[0].effective_at != 0 || !entry0_shards.is_superset(&all_shards) {
         eprintln!(
-            "warning: first validator set has effective_at = {} (expected genesis entry at 0)",
-            sets[0].effective_at
+            "warning: first validator set should be the genesis entry (effective_at = 0, every \
+             shard listed) — the node's active-set scan seeds from it unconditionally"
         );
     }
 
@@ -522,6 +696,54 @@ bootstrap_peers = "x"
             assert_eq!(m.validator_public_keys, n.validator_public_keys);
             assert_eq!(m.shard_ids, n.shard_ids);
         }
+    }
+
+    #[test]
+    fn rejects_key_that_is_not_a_curve_point() {
+        // Find a 32-byte value that fails Ed25519 point decompression (about
+        // half of all values do) rather than hard-coding one.
+        let bad = (0u8..=255)
+            .map(|b| [b; 32])
+            .find(|bytes| ed25519_dalek::VerifyingKey::from_bytes(bytes).is_err())
+            .expect("some constant-byte array is not a curve point");
+        let onchain: toml::Table = toml::from_str(&ONCHAIN.replace(
+            "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+            &hex::encode(bad),
+        ))
+        .unwrap();
+        let err = validate_onchain(&onchain).unwrap_err().to_string();
+        assert!(err.contains("not a valid Ed25519 public key"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_network_mismatch_against_fc_network() {
+        let local: toml::Table = toml::from_str(r#"fc_network = "Testnet""#).unwrap();
+        assert!(check_network_matches(&local, NetworkArg::Testnet).is_ok());
+        let err = check_network_matches(&local, NetworkArg::Mainnet)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fc_network"), "got: {err}");
+        // Absent fc_network: nothing to cross-check.
+        let empty = toml::Table::new();
+        assert!(check_network_matches(&empty, NetworkArg::Mainnet).is_ok());
+    }
+
+    #[test]
+    fn dry_run_output_redacts_private_key() {
+        let merged: toml::Table =
+            toml::from_str(&format!("[consensus]\nprivate_key = \"{PRIVATE_KEY}\"\n")).unwrap();
+        let printed = redact_private_key(merged);
+        assert!(!printed.contains(PRIVATE_KEY));
+        assert!(printed.contains("<redacted>"));
+    }
+
+    #[test]
+    fn sanitized_parse_error_does_not_echo_source() {
+        let source = format!("private_key = \"{PRIVATE_KEY}\" stray");
+        let err = toml::from_str::<toml::Table>(&source).unwrap_err();
+        let msg = sanitized_toml_error("test", &source, &err);
+        assert!(!msg.contains(PRIVATE_KEY), "leaked source line: {msg}");
+        assert!(msg.contains("line 1"), "got: {msg}");
     }
 
     /// The spec's worked example must pass this binary's structural validation —
