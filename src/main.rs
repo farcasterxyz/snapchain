@@ -293,6 +293,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // Deploy scripts run `snapchain --check-config` between rewriting config.toml
+    // (fc config pull) and restarting the node, so a bad config fails here — before
+    // the running node is stopped — rather than as a crash loop after.
+    if app_config.check_config {
+        println!("config OK");
+        return Ok(());
+    }
+
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match app_config.log_format.as_str() {
         "text" => tracing_subscriber::fmt().with_env_filter(env_filter).init(),

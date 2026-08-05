@@ -236,6 +236,32 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_check_config_flag() {
+        run_test(vec![], || {
+            let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+
+            // Off unless the flag is passed.
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert!(!config.check_config);
+
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+                "--check-config".to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert!(config.check_config);
+        })
+    }
+
+    #[test]
+    #[serial]
     fn test_missing_config_file() {
         run_test(vec![], || {
             let args = vec![

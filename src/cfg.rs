@@ -103,6 +103,7 @@ pub struct Config {
     pub http_address: String,
     pub rocksdb_dir: String,
     pub clear_db: bool,
+    pub check_config: bool,
     pub statsd: StatsdConfig,
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
@@ -130,6 +131,7 @@ impl Default for Config {
             http_address: format!("0.0.0.0:{}", DEFAULT_HTTP_PORT),
             rocksdb_dir: ".rocks".to_string(),
             clear_db: false,
+            check_config: false,
             statsd: StatsdConfig::default(),
             l1_rpc_url: "".to_string(),
             fc_network: FarcasterNetwork::Devnet,
@@ -154,6 +156,14 @@ pub struct CliArgs {
 
     #[arg(long, action, help = "Start the node with a clean database")]
     clear_db: bool,
+
+    #[arg(
+        long,
+        action,
+        help = "Load and validate the configuration, then exit without starting the node \
+                (exit code 0 if valid, 1 if not)"
+    )]
+    check_config: bool,
     // All new arguments that are to override values from config files or environment variables
     // should be probably be optional (`Option<T>`) and without a default. Setting a default
     // in this case will have the effect of automatically overriding all previous configuration
@@ -179,6 +189,7 @@ pub fn load_and_merge_config(args: Vec<String>) -> Result<Config, Box<dyn Error>
         config.log_format = log_format;
     }
     config.clear_db = cli_args.clear_db;
+    config.check_config = cli_args.check_config;
 
     Ok(config)
 }
