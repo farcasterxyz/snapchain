@@ -61,9 +61,11 @@ struct Cli {
     #[arg(long, default_value = "https://iris.farcaster.xyz:3381", global = true)]
     node: String,
 
-    /// Network to tag messages with.
-    #[arg(long, value_enum, default_value = "testnet", global = true)]
-    network: NetworkArg,
+    /// Network to operate on. Defaults per subcommand: message submission
+    /// defaults to testnet (the safe direction for a tool that submits);
+    /// `config pull` defaults to mainnet (it only reads a registry).
+    #[arg(long, value_enum, global = true)]
+    network: Option<NetworkArg>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -1148,7 +1150,7 @@ async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
     let cli = Cli::parse();
-    let network = cli.network.as_proto();
+    let network = cli.network.unwrap_or(NetworkArg::Testnet).as_proto();
     match cli.cmd {
         Cmd::KeyAdd(a) => run_key_add(a, &cli.node, network).await,
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
