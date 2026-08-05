@@ -759,4 +759,92 @@ bootstrap_peers = "x"
         assert_eq!(sets[0].shard_ids, vec![0, 1, 2]);
         assert_eq!(sets[0].validator_public_keys.len(), 2);
     }
+
+    /// Render validator sets exactly as the contract's §3.1 grammar does:
+    /// underscore-free integers, `[0, 1, 2]` shard arrays, trailing commas in
+    /// the key array, two-space indent, blank line closing each block.
+    fn render_per_spec_grammar(sets: &[ValidatorSetConfig]) -> String {
+        let mut out = String::new();
+        for set in sets {
+            out.push_str("[[consensus.validator_sets]]\n");
+            out.push_str(&format!("effective_at = {}\n", set.effective_at));
+            let shards: Vec<String> = set.shard_ids.iter().map(u32::to_string).collect();
+            out.push_str(&format!("shard_ids = [{}]\n", shards.join(", ")));
+            out.push_str("validator_public_keys = [\n");
+            for key in &set.validator_public_keys {
+                out.push_str(&format!("  \"{key}\",\n"));
+            }
+            out.push_str("]\n\n");
+        }
+        out.push_str("[gossip]\nbootstrap_peers = \"\"\ndirect_peers = \"\"\n");
+        out
+    }
+
+    /// The full mainnet history rendered through the registry's exact output
+    /// grammar must deserialize equal to what the node reads from
+    /// validators.toml — the two documents differ in every formatting detail
+    /// the spec fixes (digit separators, trailing commas, inline arrays), and
+    /// only the parser can prove they mean the same thing.
+    #[test]
+    fn spec_grammar_rendering_of_mainnet_history_round_trips() {
+        let doc: toml::Table = toml::from_str(include_str!("../../validators.toml")).unwrap();
+        let original: Vec<ValidatorSetConfig> = doc["consensus"].as_table().unwrap()
+            ["validator_sets"]
+            .clone()
+            .try_into()
+            .unwrap();
+        assert!(original.len() >= 2, "expected the real multi-entry history");
+
+        let rendered = render_per_spec_grammar(&original);
+        let onchain: toml::Table = toml::from_str(&rendered).unwrap();
+        validate_onchain(&onchain).unwrap();
+        let round_tripped = onchain["consensus"].as_table().unwrap()["validator_sets"]
+            .clone()
+            .try_into::<Vec<ValidatorSetConfig>>()
+            .unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replace_preserves_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("fc-config-pull-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "old = true\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_replace(&path, "new = true\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = true\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must not widen a 0600 key file");
+        // No stray temp copy of the (secret-bearing) content left behind.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "config.toml")
+            .collect();
+        assert!(strays.is_empty(), "stray temp files: {strays:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Parity for the peer-field mirror: the node's gossip config must still
+    /// carry string-typed `bootstrap_peers` / `direct_peers`, or the splice
+    /// writes keys the node no longer reads.
+    #[test]
+    fn mirror_matches_node_gossip_peer_fields() {
+        let node_gossip = toml::Value::try_from(snapchain::network::gossip::Config::default())
+            .expect("node gossip config serializes");
+        let node_gossip = node_gossip.as_table().expect("gossip config is a table");
+        for field in ["bootstrap_peers", "direct_peers"] {
+            assert!(
+                node_gossip.get(field).is_some_and(|v| v.is_str()),
+                "node gossip config no longer has string field {field:?} — update the \
+                 OnchainGossip mirror and the registry renderer"
+            );
+        }
+    }
 }
