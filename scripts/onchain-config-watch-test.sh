@@ -121,6 +121,7 @@ run_tick() {
         FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
         ONCHAIN_WATCH_NETWORK=mainnet \
         ONCHAIN_CONFIG_RESTART_CMD="touch $DIR/restarted" \
+        ONCHAIN_CONFIG_RESTART_GRACE=7 \
         ONCHAIN_CONFIG_WATCH_ONCE=1 \
         "$@" \
         "$SCRIPT" config.toml 2>&1)" || RC=$?
@@ -256,9 +257,9 @@ setup
 printf '8\n7\n' > "$DIR/version-seq"
 echo 8 > "$DIR/bound-seq"
 echo "1 2" > "$DIR/slot.txt"   # fake clock starts at 0 → slot 1 waits 1 window
-run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=200
 check "reverted while waiting: exits 0" [ "$RC" -eq 0 ]
-check "reverted while waiting: waited for the window" grep -qx "slept 100" "$DIR/sleep.log"
+check "reverted while waiting: waited for the window" grep -qx "slept 200" "$DIR/sleep.log"
 check "reverted while waiting: NO restart" not restarted
 check "reverted while waiting: says so" grep -q "no longer applies" <<< "$OUT"
 
@@ -268,7 +269,7 @@ printf '8\n9\n' > "$DIR/version-seq"
 printf '8\n9\n' > "$DIR/bound-seq"
 printf '# merged-from-registry\nNOAPPEND\n' > "$DIR/pull-seq"
 echo "1 2" > "$DIR/slot.txt"
-run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=200
 check "content revert while waiting: NO restart" not restarted
 check "content revert while waiting: watermark set to the new version" \
     grep -q "version 9); recording watermark" <<< "$OUT"
@@ -278,19 +279,28 @@ setup
 printf '8\n8\n' > "$DIR/version-seq"
 printf '8\n8\n' > "$DIR/bound-seq"
 echo "1 2" > "$DIR/slot.txt"
-run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=200
 check "standing change: waited then restarted" restarted
-check "standing change: exactly one wait" [ "$(wc -l < "$DIR/sleep.log")" -eq 1 ]
+check "standing change: exactly one wait" \
+    [ "$(grep -cx "slept 200" "$DIR/sleep.log")" -eq 1 ]
+# The stubbed restart command "succeeds" but nothing actually stops the
+# container (this process), which is exactly the hung-shutdown case: after
+# the grace sleep the watcher must re-arm loudly instead of exiting.
+check "standing change: sent-but-survived waits out the restart grace" \
+    grep -qx "slept 7" "$DIR/sleep.log"
+check "standing change: sent-but-survived re-arms loudly" \
+    grep -q "still running 7s after the restart trigger" <<< "$OUT"
+check "standing change: sent-but-survived exits 0" [ "$RC" -eq 0 ]
 
 #### a mid-wait write that moves this node's slot re-enters the wait loop
 setup
 printf '8\n8\n8\n' > "$DIR/version-seq"
 printf '8\n8\n8\n' > "$DIR/bound-seq"
 printf '1 2\n2 3\n2 3\n' > "$DIR/slot-seq"
-run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=200
 check "slot shift: exits 0" [ "$RC" -eq 0 ]
 check "slot shift: waited once for the old slot, once for the new" \
-    [ "$(wc -l < "$DIR/sleep.log")" -eq 2 ]
+    [ "$(grep -cx "slept 200" "$DIR/sleep.log")" -eq 2 ]
 check "slot shift: restarted only from the recomputed window" restarted
 check "slot shift: restart names the new slot" grep -q "(slot 2)" <<< "$OUT"
 
@@ -346,6 +356,25 @@ run_tick ONCHAIN_WATCH_WATERMARK=banana
 check "garbage handoff: no restart, catch-up ran" \
     grep -q "recording watermark" <<< "$OUT"
 
+#### a version too wide for bash's signed-64-bit arithmetic is a failed poll,
+#### not a negative number that parks the watcher as "current" forever
+setup
+echo 99999999999999999999 > "$DIR/version-seq"   # 20 digits > the 18-digit bound
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "overflow-width version: treated as a failed poll" \
+    grep -q "configVersion poll failed" <<< "$OUT"
+check "overflow-width version: NO restart" not restarted
+
+#### a stagger window whose grace tenth cannot cover one evaluation's latency
+#### would livelock the restart path — refused at startup, not at rollout time
+setup
+RC=0
+OUT="$(env FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
+    ONCHAIN_WATCH_NETWORK=mainnet ONCHAIN_CONFIG_STAGGER_WINDOW=60 \
+    ONCHAIN_CONFIG_WATCH_ONCE=1 "$SCRIPT" "$DIR/config.toml" 2>&1)" || RC=$?
+check "tiny stagger window: exits nonzero" [ "$RC" -ne 0 ]
+check "tiny stagger window: says why" grep -q "must be >= 120" <<< "$OUT"
+
 #### missing required network env → refuses to start
 setup
 RC=0
@@ -360,6 +389,11 @@ check "missing network: says why" grep -q ONCHAIN_WATCH_NETWORK <<< "$OUT"
 source "$SCRIPT"
 check "window: single validator restarts immediately" \
     [ "$(seconds_until_window 12345 0 1 900)" = 0 ]
+# A union shrunk to one key must NOT restart its non-members immediately —
+# they share the trailing window: cycle 2*900, sentinel start 900, pos
+# 12345 % 1800 = 1545 -> (900 - 1545 + 1800) % 1800 = 1155.
+check "window: count-of-one sentinel keeps the trailing window" \
+    [ "$(seconds_until_window 12345 1 1 900)" = 1155 ]
 check "window: zero-count (defensive) immediate" \
     [ "$(seconds_until_window 12345 0 0 900)" = 0 ]
 check "window: at own window start" [ "$(seconds_until_window 0 0 4 100)" = 0 ]

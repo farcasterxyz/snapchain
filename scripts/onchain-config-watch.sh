@@ -41,7 +41,11 @@
 # shift another node's slot into the vacated window — full cross-version
 # exclusion needs registry-assigned slots or a registry-level write
 # cooldown, so until then: one membership write at a time, and wait a full
-# cycle before the next.
+# cycle before the next. Two more: wall-clock alignment assumes fleet
+# clocks agree to well within the grace tenth (fine under NTP; a validator
+# with a drifted clock can restart inside another node's window), and a
+# union of exactly one key gives its sole member an immediate restart while
+# non-members keep the trailing window (see seconds_until_window).
 #
 # Restart: `kill -TERM 1`. Every compose file in this repo (and the deployer)
 # sets `init: true`, so PID 1 is docker-init, which forwards the TERM to the
@@ -79,6 +83,9 @@
 #   ONCHAIN_CONFIG_RESTART_CMD     Restart trigger (default "kill -TERM 1").
 #                            Escape hatch for layouts without docker-init,
 #                            and the test seam.
+#   ONCHAIN_CONFIG_RESTART_GRACE   Seconds to wait after a sent restart
+#                            trigger before concluding the node hung in
+#                            shutdown and re-arming (default 60).
 #   ONCHAIN_CONFIG_WATCH_ONCE      Test seam: run one tick, no initial sleep.
 
 log() {
@@ -96,7 +103,15 @@ log() {
 # without grace that would cost a full extra cycle every time.
 seconds_until_window() {
     local now="$1" index="$2" count="$3" window="$4"
-    if [[ "$count" -le 1 ]]; then
+    if [[ "$count" -eq 0 ]]; then
+        echo 0
+        return
+    fi
+    # The sole member of a one-key union has nobody to stagger against; its
+    # sentinels do NOT get the same shortcut — a union shrunk to one key by a
+    # registry write must not restart every still-running old validator at
+    # once, so non-members keep their trailing window below.
+    if [[ "$count" -eq 1 && "$index" -eq 0 ]]; then
         echo 0
         return
     fi
@@ -147,7 +162,13 @@ evaluate() {
     EVAL_INDEX=""
     EVAL_COUNT=""
     local v wm tmp bound slot_out cmp_rc
-    if ! v="$(fc_version)" || ! [[ "$v" =~ ^[0-9]+$ ]]; then
+    # Width-bounded: configVersion is a uint256 onchain but bash arithmetic is
+    # 64-bit signed, and a wider value would WRAP NEGATIVE in the -le gates
+    # below — parking the watcher as "current" forever. 18 digits (< 2^63)
+    # keeps every comparison numerically sound; an honest counter increments
+    # once per registry write and cannot get near that, so anything wider is a
+    # garbage or hostile RPC response, treated as a failed poll.
+    if ! v="$(fc_version)" || ! [[ "$v" =~ ^[0-9]{1,18}$ ]]; then
         log "WARNING: configVersion poll failed; will retry in ${POLL_INTERVAL}s"
         return 0
     fi
@@ -181,7 +202,7 @@ evaluate() {
         return 0
     fi
     if ! bound="$(tr -d '[:space:]' < "$tmp.version" 2>/dev/null)" \
-        || ! [[ "$bound" =~ ^[0-9]+$ ]]; then
+        || ! [[ "$bound" =~ ^[0-9]{1,18}$ ]]; then
         log "ERROR: pull reported no usable configVersion; NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
@@ -268,8 +289,15 @@ tick() {
     done
     log "restarting node to apply config version $EVAL_VERSION (slot ${EVAL_INDEX:-?})"
     if bash -c "$RESTART_CMD"; then
-        # The container is now shutting down; this watcher dies with it.
-        exit 0
+        # Success means the signal was SENT, not that the container is dying:
+        # a node hung in graceful shutdown leaves PID 1 up, and exiting here
+        # would end the watch with the change unapplied — the same silent
+        # watcher death the failure branch below guards against. If shutdown
+        # proceeds, the container (and this sleep) never gets past this line;
+        # if we are still running afterwards, re-arm and retry next tick.
+        sleep "$RESTART_GRACE"
+        log "ERROR: still running ${RESTART_GRACE}s after the restart trigger — node hung in shutdown?; will retry next tick"
+        return 0
     fi
     # A failed trigger must not end the watch (the unconditional exit here
     # was silent watcher death): leave the watermark alone and retry the
@@ -292,11 +320,17 @@ SNAPCHAIN_BIN="${SNAPCHAIN_BIN:-/app/snapchain}"
 POLL_INTERVAL="${ONCHAIN_CONFIG_POLL_INTERVAL:-300}"
 WINDOW="${ONCHAIN_CONFIG_STAGGER_WINDOW:-900}"
 RESTART_CMD="${ONCHAIN_CONFIG_RESTART_CMD:-kill -TERM 1}"
+RESTART_GRACE="${ONCHAIN_CONFIG_RESTART_GRACE:-60}"
+if ! [[ "$RESTART_GRACE" =~ ^[0-9]+$ ]] || [[ "$RESTART_GRACE" -eq 0 ]]; then
+    log "ERROR: ONCHAIN_CONFIG_RESTART_GRACE must be a positive integer; exiting"
+    exit 1
+fi
 # Handed off by the boot that verified it (see read_watermark). Unset or
 # garbage -> 0: the first successful pull re-derives the truth by content
-# comparison, at the cost of one pull.
+# comparison, at the cost of one pull. Width-bounded like every version
+# parse: wider than 18 digits wraps bash's signed-64-bit arithmetic.
 WATERMARK_MEM="${ONCHAIN_WATCH_WATERMARK:-0}"
-[[ "$WATERMARK_MEM" =~ ^[0-9]+$ ]] || WATERMARK_MEM="0"
+[[ "$WATERMARK_MEM" =~ ^[0-9]{1,18}$ ]] || WATERMARK_MEM="0"
 
 if [[ -z "${ONCHAIN_WATCH_NETWORK:-}" ]]; then
     log "ERROR: ONCHAIN_WATCH_NETWORK not set (apply-onchain-config.sh sets it); exiting"
@@ -309,6 +343,16 @@ if ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ && "$WINDOW" =~ ^[0-9]+$ ]] \
     log "ERROR: ONCHAIN_CONFIG_POLL_INTERVAL/ONCHAIN_CONFIG_STAGGER_WINDOW must be positive integers; exiting"
     exit 1
 fi
+# A restart fires only when a FRESH evaluation lands inside [start,
+# start + window/10], and an evaluation costs an RPC round trip plus
+# check-config — seconds. A grace tenth smaller than that latency can never
+# be hit: the loop overshoots every cycle, re-pulls, and re-sleeps — a
+# rollout that silently never lands. Refuse windows whose grace is below a
+# margin over worst-case evaluation latency instead of livelocking.
+if [[ "$WINDOW" -lt 120 ]]; then
+    log "ERROR: ONCHAIN_CONFIG_STAGGER_WINDOW must be >= 120 (grace = window/10 must exceed one evaluation's RPC+validation latency, or the restart window can never be hit); exiting"
+    exit 1
+fi
 
 REGISTRY_ARGS=()
 if [[ -n "${ONCHAIN_CONFIG_REGISTRY:-}" ]]; then
@@ -319,7 +363,11 @@ if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
 fi
 
 if [[ -n "${ONCHAIN_CONFIG_WATCH_ONCE:-}" ]]; then
-    tick
+    # Same error semantics as the production loop below: `|| log` suppresses
+    # set -e inside tick, so the harness exercises exactly the failure mode
+    # production runs with — an unguarded failing command falls through here
+    # just as it would in the loop, instead of aborting only under test.
+    tick || log "WARNING: watcher tick failed unexpectedly; continuing"
     exit 0
 fi
 
@@ -327,6 +375,9 @@ log "watching configVersion every ${POLL_INTERVAL}s (stagger window ${WINDOW}s, 
 
 # One log line an hour proves the loop is alive without flooding the
 # container logs; there is no autoheal for a dead watcher, only this.
+# Caveat for anyone alerting on heartbeat absence: tick blocks inside the
+# stagger wait, which can last a full cycle — the heartbeat goes quiet
+# during a rollout, and the last "waiting Ns" line is the liveness signal.
 HEARTBEAT_TICKS=$((3600 / POLL_INTERVAL))
 [[ "$HEARTBEAT_TICKS" -lt 1 ]] && HEARTBEAT_TICKS=1
 ticks=0

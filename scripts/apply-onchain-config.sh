@@ -204,7 +204,9 @@ fi
 if "$FC_BIN" "${pull_args[@]}" && check_config; then
     if [[ -n "$version_report" ]]; then
         onchain_version="$(tr -d '[:space:]' < "$version_report" 2>/dev/null || true)"
-        if [[ "$onchain_version" =~ ^[0-9]+$ ]]; then
+        # Width-bounded to 18 digits: the watcher compares this in bash's
+        # signed-64-bit arithmetic, where a wider value wraps negative.
+        if [[ "$onchain_version" =~ ^[0-9]{1,18}$ ]]; then
             log "applied configVersion $onchain_version"
         else
             log "WARNING: pull reported no usable configVersion; watcher will start with an unset watermark"
@@ -261,7 +263,12 @@ if [[ -n "$CACHE_PATH" && -f "$CACHE_PATH" ]]; then
         log ERROR "cache at $CACHE_PATH is for network '$cached_network', this node is '$network'; refusing to boot from it"
         exit 1
     fi
-    # Compare, never print: these are consensus signing keys.
+    # Compare, never print: these are consensus signing keys. Known limit:
+    # this reads the FILE values only, so a deployment supplying the key via
+    # the SNAPCHAIN_CONSENSUS__PRIVATE_KEY overlay (no private_key line in
+    # either file) passes vacuously — the guard degrades to the network check
+    # above. Every compose path in this repo and the deployer writes the key
+    # into config.toml; revisit if an env-keyed layout ever runs this script.
     if [[ "$(file_value "$CACHE_PATH" private_key)" != "$(file_value "$CONFIG_PATH" private_key)" ]]; then
         log ERROR "cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); refusing to boot from it"
         exit 1
