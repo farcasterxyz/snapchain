@@ -41,6 +41,16 @@ services:
         endpoint_url = "https://e1f9f185c6e63471dd39f96abd3413c4.r2.cloudflarestorage.com"
         load_db_from_snapshot=true
         EOF
+        # Merge registry-managed validator config (no-op on read nodes and
+        # unless ONCHAIN_CONFIG_ENABLED is set; see the script header). The
+        # testnet registry lives on Sepolia, so enabling this requires
+        # ONCHAIN_CONFIG_RPC_URL — the config's l1_rpc_url stays on Ethereum
+        # mainnet for ENS and is not a usable fallback here.
+        ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
+        ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
+        ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
+        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.toml \
+        /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
     ports:
@@ -49,6 +59,7 @@ services:
       - "3383:3383/tcp"
     volumes:
       - .rocks.testnet:/app/.rocks.testnet
+      - .onchain-config:/app/.onchain-config
     networks:
       - snapchain
     ulimits:

@@ -43,6 +43,13 @@ services:
         # Append validator sets from the dedicated validators.toml file.
         # See validators.toml for the full history of validator changes and operator details.
         cat /app/validators.toml >> config.toml
+        # Merge registry-managed validator config (no-op on read nodes and
+        # unless ONCHAIN_CONFIG_ENABLED is set; see the script header).
+        ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
+        ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
+        ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
+        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.toml \
+        /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
     restart: always
@@ -53,6 +60,7 @@ services:
     volumes:
       - .rocks:/app/.rocks
       - .rocks.snapshot:/app/.rocks.snapshot
+      - .onchain-config:/app/.onchain-config
       - ./validators.toml:/app/validators.toml:ro
     networks:
       - snapchain
