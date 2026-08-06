@@ -118,6 +118,12 @@ enum ConfigCmd {
     /// for testnet) — never to a snapchain node, so --node is ignored.
     /// --network selects which registry to read and defaults to mainnet here.
     Pull(config_pull::ConfigPullArgs),
+    /// Print the registry's configVersion() counter (decimal, on stdout).
+    ///
+    /// Stable, like `pull`: the rollout gate polls this to decide whether a
+    /// restart is warranted. Read-only — talks to an Ethereum JSON-RPC
+    /// endpoint, never to a snapchain node, and writes nothing.
+    Version(config_pull::ConfigVersionArgs),
 }
 
 #[derive(Subcommand)]
@@ -1184,6 +1190,9 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::Verification(c) => run_verification(c, &cli.node, network).await,
         Cmd::Config(ConfigCmd::Pull(a)) => {
             config_pull::run(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
+        Cmd::Config(ConfigCmd::Version(a)) => {
+            config_pull::run_version(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
         }
         Cmd::Devnet(c) => run_devnet(c).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,

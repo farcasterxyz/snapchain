@@ -1,5 +1,10 @@
-//! `fc config pull` — fetch the onchain-managed node configuration from the
-//! SnapchainConfigRegistry and merge it into a local `config.toml`.
+//! `fc config pull` / `fc config version` — read the onchain-managed node
+//! configuration from the SnapchainConfigRegistry.
+//!
+//! `pull` fetches the rendered document and merges it into a local
+//! `config.toml`; `version` prints the registry's `configVersion()` counter,
+//! the cheap poll the rollout gate (scripts/onchain-config-watch.sh) uses to
+//! decide whether a restart is warranted at all.
 //!
 //! The registry renders a TOML fragment whose byte-level format is specified in
 //! `farcasterxyz/contracts` (`docs/snapchain-config-registry.md`). This module is
@@ -36,9 +41,11 @@ use crate::{BoxedError, NetworkArg};
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 sol! {
-    /// The one read `config pull` needs from ISnapchainConfigRegistry
-    /// (farcasterxyz/contracts).
+    /// The two reads this module needs from ISnapchainConfigRegistry
+    /// (farcasterxyz/contracts): the rendered document for `pull`, and the
+    /// mutation counter for `version`.
     function configToml() external view returns (string memory);
+    function configVersion() external view returns (uint256);
 }
 
 /// Registry address baked in per network. The mainnet registry lives on
@@ -105,6 +112,63 @@ pub struct ConfigPullArgs {
     /// from the registry regardless.
     #[arg(long)]
     accept_local_bootstrap_peers_config: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ConfigVersionArgs {
+    /// SnapchainConfigRegistry contract address. Overrides the baked-in
+    /// per-network address; required for devnet.
+    #[arg(long)]
+    registry: Option<String>,
+
+    /// Ethereum JSON-RPC URL for the chain the selected network's registry
+    /// lives on. Same resolution rules as `config pull`: mainnet may fall
+    /// back to `l1_rpc_url` from --config; testnet and devnet require the flag.
+    #[arg(long)]
+    rpc_url: Option<String>,
+
+    /// Optional node config.toml: supplies the mainnet `l1_rpc_url` fallback
+    /// and cross-checks `fc_network` against --network. Never written.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+/// `fc config version` — print the registry's `configVersion()` counter as a
+/// decimal integer on stdout. A read-only single eth_call, cheap enough to
+/// poll: the counter increments on every mutation, so a watcher that stores
+/// the last-applied value can gate restarts on it moving. Compare for
+/// inequality, not ordering — an onchain revert moves the counter forward.
+pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result<(), BoxedError> {
+    let local: toml::Table = match &args.config {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            toml::from_str(&raw)
+                .map_err(|e| sanitized_toml_error(&path.display().to_string(), &raw, &e))?
+        }
+        None => toml::Table::new(),
+    };
+    let env_fc_network = std::env::var("SNAPCHAIN_FC_NETWORK").ok();
+    check_network_matches(&local, network, env_fc_network.as_deref())?;
+    // No read_node gate: unlike `pull` this writes nothing, and the watcher
+    // only runs on validators anyway.
+
+    let registry = resolve_registry(args.registry.as_deref(), network)?;
+    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network)?;
+    let client = http_client()?;
+    check_chain_id(&client, &rpc_url, network).await?;
+
+    let raw = eth_call(
+        &client,
+        &rpc_url,
+        registry,
+        configVersionCall {}.abi_encode(),
+    )
+    .await?;
+    let version = configVersionCall::abi_decode_returns(&raw)
+        .map_err(|e| format!("cannot ABI-decode configVersion() return: {e}"))?;
+    println!("{version}");
+    Ok(())
 }
 
 /// Mirrors `ValidatorSetConfig` in `snapchain/src/consensus/consensus.rs`.
@@ -582,6 +646,20 @@ async fn fetch_config_toml(
     rpc_url: &str,
     registry: Address,
 ) -> Result<String, BoxedError> {
+    let raw = eth_call(client, rpc_url, registry, configTomlCall {}.abi_encode()).await?;
+    Ok(configTomlCall::abi_decode_returns(&raw)
+        .map_err(|e| format!("cannot ABI-decode configToml() return: {e}"))?)
+}
+
+/// One `eth_call` against the registry, returning the decoded (hex-stripped)
+/// return bytes. Shared by `pull` (configToml) and `version` (configVersion);
+/// carries the response-size cap and the credential-scrubbing error handling.
+async fn eth_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    registry: Address,
+    calldata: Vec<u8>,
+) -> Result<Vec<u8>, BoxedError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -589,7 +667,7 @@ async fn fetch_config_toml(
         "params": [
             {
                 "to": format!("{registry}"),
-                "data": format!("0x{}", hex::encode(configTomlCall {}.abi_encode())),
+                "data": format!("0x{}", hex::encode(calldata)),
             },
             "latest",
         ],
@@ -612,10 +690,8 @@ async fn fetch_config_toml(
         .get("result")
         .and_then(|r| r.as_str())
         .ok_or("eth_call response carries neither result nor error")?;
-    let raw = hex::decode(result.trim_start_matches("0x"))
-        .map_err(|e| format!("eth_call result is not hex: {e}"))?;
-    Ok(configTomlCall::abi_decode_returns(&raw)
-        .map_err(|e| format!("cannot ABI-decode configToml() return: {e}"))?)
+    Ok(hex::decode(result.trim_start_matches("0x"))
+        .map_err(|e| format!("eth_call result is not hex: {e}"))?)
 }
 
 /// Structural validation of the rendered document, before any of it touches the
@@ -1306,6 +1382,24 @@ bootstrap_peers = "x"
     #[test]
     fn config_toml_selector_matches_deployed_abi() {
         assert_eq!(configTomlCall::SELECTOR, [0x5a, 0x62, 0xbd, 0x75]);
+    }
+
+    /// Same pin for the rollout gate's poll: `forge inspect` on the as-built
+    /// registry reports 0xdd64d24d for configVersion().
+    #[test]
+    fn config_version_selector_matches_deployed_abi() {
+        assert_eq!(configVersionCall::SELECTOR, [0xdd, 0x64, 0xd2, 0x4d]);
+    }
+
+    /// configVersion() returns a bare 32-byte big-endian uint256; make sure the
+    /// decode path renders it as the decimal the watch script compares.
+    #[test]
+    fn config_version_decodes_bare_uint256() {
+        let mut raw = [0u8; 32];
+        raw[30] = 0x01; // 256 + 7
+        raw[31] = 0x07;
+        let version = configVersionCall::abi_decode_returns(&raw).unwrap();
+        assert_eq!(version.to_string(), "263");
     }
 
     #[test]
