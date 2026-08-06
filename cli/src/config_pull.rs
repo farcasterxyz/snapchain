@@ -99,7 +99,7 @@ pub struct ConfigPullArgs {
     config: PathBuf,
 
     /// Print the merged document to stdout instead of writing the file
-    /// (consensus.private_key is shown redacted).
+    /// (credential-bearing keys are shown redacted).
     #[arg(long)]
     dry_run: bool,
 
@@ -109,7 +109,9 @@ pub struct ConfigPullArgs {
     /// to exactly the document that was merged — a load-balanced RPC cannot
     /// pair a fresh counter with a stale document. The deploy scripts use the
     /// value as the rollout watermark. Requires an EIP-1898-capable endpoint.
-    #[arg(long)]
+    /// Conflicts with --dry-run: a report written for a merge that never
+    /// happened would gate that version out of a later real rollout.
+    #[arg(long, conflicts_with = "dry_run")]
     report_version: Option<PathBuf>,
 
     /// Keep a non-empty `gossip.bootstrap_peers` already enumerated in the
@@ -274,12 +276,15 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     // block hash: eth_getBlockByNumber(latest) once, then eth_call each read
     // at that hash. Separate "latest" calls against a load-balanced RPC can
     // pair a fresh counter with a stale document — a watermark recorded that
-    // way would silently swallow the newer version forever. A reorg that
-    // drops the pinned block fails the call loudly; the next attempt re-pins.
+    // way would silently swallow the newer version forever. requireCanonical
+    // makes a reorg that drops the pinned block fail the call loudly (without
+    // it, EIP-1898 defaults to serving state for stored-but-orphaned blocks,
+    // and a watermark bound to an orphaned mutation would suppress the
+    // canonical document at the same version); the next attempt re-pins.
     let (block, bound_version) = match &args.report_version {
         Some(_) => {
             let hash = latest_block_hash(&client, &rpc_url).await?;
-            let block = serde_json::json!({ "blockHash": hash });
+            let block = serde_json::json!({ "blockHash": hash, "requireCanonical": true });
             let raw = eth_call(
                 &client,
                 &rpc_url,
@@ -713,22 +718,7 @@ async fn latest_block_hash(client: &reqwest::Client, rpc_url: &str) -> Result<St
         "jsonrpc": "2.0", "id": 1,
         "method": "eth_getBlockByNumber", "params": ["latest", false],
     });
-    let response: serde_json::Value = client
-        .post(rpc_url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| format!("eth_getBlockByNumber request failed: {}", e.without_url()))?
-        .error_for_status()
-        .map_err(|e| format!("eth_getBlockByNumber HTTP error: {}", e.without_url()))?
-        .json()
-        .await
-        .map_err(|e| {
-            format!(
-                "eth_getBlockByNumber response is not JSON: {}",
-                e.without_url()
-            )
-        })?;
+    let response = post_json_capped(client, rpc_url, &request, "eth_getBlockByNumber").await?;
     response
         .get("result")
         .and_then(|r| r.get("hash"))
@@ -1547,6 +1537,34 @@ rpc_url = "https://base-mainnet.example.com/v2/BASE_API_KEY_IN_PATH"
             assert!(!printed.contains(secret), "leaked {secret}: {printed}");
         }
         assert!(printed.contains("<redacted>"));
+    }
+
+    /// A report written for a merge that never happened would record its
+    /// version as applied and gate it out of a later real rollout — the flag
+    /// pair must be rejected at parse time, not silently half-honored.
+    #[test]
+    fn report_version_conflicts_with_dry_run() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: ConfigPullArgs,
+        }
+        assert!(TestCli::try_parse_from([
+            "fc",
+            "--config",
+            "c.toml",
+            "--dry-run",
+            "--report-version",
+            "v.txt",
+        ])
+        .is_err());
+        // Each flag stays valid on its own.
+        assert!(TestCli::try_parse_from(["fc", "--config", "c.toml", "--dry-run"]).is_ok());
+        assert!(
+            TestCli::try_parse_from(["fc", "--config", "c.toml", "--report-version", "v.txt"])
+                .is_ok()
+        );
     }
 
     #[test]
