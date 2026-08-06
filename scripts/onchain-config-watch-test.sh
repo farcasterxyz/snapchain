@@ -43,6 +43,7 @@ consume() { # pop and print the first line of $1; fails if empty/missing
 }
 case "$subcmd" in
 version)
+    printf '%s\n' "$@" > "$here/fc.version.args"
     consume "$here/version-seq" || exit 1
     ;;
 pull)
@@ -55,7 +56,13 @@ pull)
     esac
     ;;
 slot)
-    if [[ -f "$here/slot.txt" ]]; then cat "$here/slot.txt"; else echo "0 1"; fi
+    if [[ -f "$here/slot-seq" ]]; then
+        consume "$here/slot-seq" || exit 1
+    elif [[ -f "$here/slot.txt" ]]; then
+        cat "$here/slot.txt"
+    else
+        echo "0 1"
+    fi
     ;;
 esac
 EOF
@@ -69,13 +76,19 @@ done
 grep -q "BAD" "$config" && exit 1
 echo "config OK"
 EOF
+    # A coherent fake clock: date reads it, sleep advances it. Without the
+    # advance, the post-sleep window re-check would recompute the same
+    # positive delta forever and the re-evaluation loop could never converge.
     cat > "$DIR/date" <<'EOF'
 #!/bin/bash
-echo 0
+cat "$(dirname "$0")/clock" 2>/dev/null || echo 0
 EOF
     cat > "$DIR/sleep" <<'EOF'
 #!/bin/bash
-echo "slept $1" >> "$(dirname "$0")/sleep.log"
+here="$(dirname "$0")"
+echo "slept $1" >> "$here/sleep.log"
+now="$(cat "$here/clock" 2>/dev/null || echo 0)"
+echo $((now + $1)) > "$here/clock"
 EOF
     chmod +x "$DIR/fc" "$DIR/snapchain" "$DIR/date" "$DIR/sleep"
     cat > "$DIR/config.toml" <<'EOF'
@@ -224,6 +237,53 @@ run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
 check "standing change: waited then restarted" restarted
 check "standing change: exactly one wait" [ "$(wc -l < "$DIR/sleep.log")" -eq 1 ]
 
+#### a mid-wait write that moves this node's slot re-enters the wait loop
+setup
+printf '8\n8\n8\n' > "$DIR/version-seq"
+printf '1 2\n2 3\n2 3\n' > "$DIR/slot-seq"
+echo 7 > "$DIR/cache/config.toml.version"
+run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
+check "slot shift: exits 0" [ "$RC" -eq 0 ]
+check "slot shift: waited once for the old slot, once for the new" \
+    [ "$(wc -l < "$DIR/sleep.log")" -eq 2 ]
+check "slot shift: restarted only from the recomputed window" restarted
+check "slot shift: restart names the new slot" grep -q "(slot 2)" <<< "$OUT"
+
+#### restart command failure → loud, watermark untouched, watcher survives
+setup
+echo 8 > "$DIR/version-seq"
+echo 7 > "$DIR/cache/config.toml.version"
+run_tick ONCHAIN_CONFIG_RESTART_CMD=false
+check "restart failure: exits 0" [ "$RC" -eq 0 ]
+check "restart failure: logged loudly" grep -q "restart command failed" <<< "$OUT"
+check "restart failure: watermark untouched" [ "$(watermark)" = 7 ]
+
+#### loop mode: a failed restart does not silently kill the watcher
+setup
+echo 8 > "$DIR/version-seq"
+echo 7 > "$DIR/cache/config.toml.version"
+(cd "$DIR" && env \
+    PATH="$DIR:$PATH" TMPDIR="$DIR/tmp" \
+    FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
+    ONCHAIN_WATCH_NETWORK=mainnet \
+    ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml" \
+    ONCHAIN_CONFIG_RESTART_CMD=false \
+    ONCHAIN_CONFIG_POLL_INTERVAL=1 \
+    "$SCRIPT" config.toml > "$DIR/loop.log" 2>&1 & echo $! > "$DIR/loop.pid")
+/bin/sleep 1
+kill "$(cat "$DIR/loop.pid")" 2>/dev/null || true
+check "loop mode: restart failure logged" grep -q "restart command failed" "$DIR/loop.log"
+check "loop mode: loop continued past the failure" \
+    grep -q "configVersion poll failed" "$DIR/loop.log"
+
+#### registry/rpc env propagate to the version poll
+setup
+echo 7 > "$DIR/version-seq"
+echo 7 > "$DIR/cache/config.toml.version"
+run_tick ONCHAIN_CONFIG_REGISTRY=0xabc ONCHAIN_CONFIG_RPC_URL=https://rpc.example
+check "registry args: --registry forwarded" grep -qx 0xabc "$DIR/fc.version.args"
+check "registry args: --rpc-url forwarded" grep -qx https://rpc.example "$DIR/fc.version.args"
+
 #### no watermark file at all (fresh volume) → treated as 0, one catch-up pass
 setup
 echo 5 > "$DIR/version-seq"
@@ -258,6 +318,12 @@ check "window: sentinel slot is the trailing window" \
     [ "$(seconds_until_window 0 4 4 100)" = 400 ]
 check "window: wraps across cycle boundary" \
     [ "$(seconds_until_window 499 1 4 100)" = 101 ]
+# Grace: the post-sleep re-check can land a beat late; the first tenth of the
+# window still counts as its start.
+check "window: grace absorbs drift just past the start" \
+    [ "$(seconds_until_window 205 2 4 100)" = 0 ]
+check "window: past the grace waits for the next cycle" \
+    [ "$(seconds_until_window 211 2 4 100)" = 489 ]
 
 echo
 if [[ "$FAILURES" -gt 0 ]]; then

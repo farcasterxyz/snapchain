@@ -242,6 +242,7 @@ check "rotated-key cache: key values not printed" not grep -q "rotated-away-key"
 no_stray_cache_files() {
     local f name
     for f in "$DIR/cache"/*; do
+        [[ -e "$f" ]] || continue # unexpanded glob on an empty dir
         name="$(basename "$f")"
         case "$name" in
             config.toml | config.toml.version | config.toml.prev) ;;
