@@ -27,6 +27,12 @@ while [[ $# -gt 0 ]]; do
     if [[ "$1" == "--config" ]]; then config="$2"; fi
     shift
 done
+# Mirror real fc: it refuses read_node = true configs in write mode (it only
+# checks the file — the SNAPCHAIN_READ_NODE env overlay is invisible to it).
+if grep -Eq '^[[:space:]]*read_node[[:space:]]*=[[:space:]]*true' "$config"; then
+    echo "read_node = true; the registry manages validator config only" >&2
+    exit 1
+fi
 echo "${FC_STUB_APPEND:-# merged-from-registry}" >> "$config"
 EOF
     cat > "$DIR/snapchain" <<'EOF'
@@ -140,10 +146,16 @@ sed -i.bak '/fc_network/d' "$DIR/config.toml"
 run_script
 check "missing fc_network: exits nonzero" [ "$RC" -ne 0 ]
 
+# Writes a cache fixture whose identity (fc_network, private_key) matches the
+# sandbox's fresh config, as a real prior successful pull would have produced.
+write_matching_cache() {
+    mkdir -p "$DIR/cache"
+    printf 'fc_network = "Mainnet"\ncached = "last-known-good"\n' > "$DIR/cache/config.toml"
+}
+
 #### pull fails + valid cache → boot from last-known-good
 setup
-mkdir -p "$DIR/cache"
-echo 'cached = "last-known-good"' > "$DIR/cache/config.toml"
+write_matching_cache
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "rpc-fail fallback: exits 0" [ "$RC" -eq 0 ]
 check "rpc-fail fallback: config restored from cache" grep -q last-known-good "$DIR/config.toml"
@@ -161,8 +173,7 @@ check "rpc-fail cache disabled: exits nonzero" [ "$RC" -ne 0 ]
 
 #### pull succeeds but merge fails validation + valid cache → fall back
 setup
-mkdir -p "$DIR/cache"
-echo 'cached = "last-known-good"' > "$DIR/cache/config.toml"
+write_matching_cache
 run_script FC_STUB_APPEND="BAD" ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "bad-merge fallback: exits 0" [ "$RC" -eq 0 ]
 check "bad-merge fallback: config restored from cache" grep -q last-known-good "$DIR/config.toml"
@@ -170,10 +181,36 @@ check "bad-merge fallback: config restored from cache" grep -q last-known-good "
 #### pull fails + cache is itself invalid → refuse to boot
 setup
 mkdir -p "$DIR/cache"
-echo 'BAD' > "$DIR/cache/config.toml"
+printf 'fc_network = "Mainnet"\nBAD\n' > "$DIR/cache/config.toml"
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "corrupt cache: exits nonzero" [ "$RC" -ne 0 ]
 check "corrupt cache: refuses loudly" grep -q "cached config failed" <<< "$OUT"
+
+#### pull fails + cache is for a different network → refuse to boot
+setup
+mkdir -p "$DIR/cache"
+printf 'fc_network = "Testnet"\ncached = "last-known-good"\n' > "$DIR/cache/config.toml"
+run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "wrong-network cache: exits nonzero" [ "$RC" -ne 0 ]
+check "wrong-network cache: config NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "wrong-network cache: names the mismatch" grep -q 'is for network "testnet"' <<< "$OUT"
+
+#### pull fails + cache has a different consensus key → refuse to boot
+setup
+echo 'private_key = "current-key"' >> "$DIR/config.toml"
+mkdir -p "$DIR/cache"
+printf 'fc_network = "Mainnet"\nprivate_key = "rotated-away-key"\ncached = "last-known-good"\n' \
+    > "$DIR/cache/config.toml"
+run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "rotated-key cache: exits nonzero" [ "$RC" -ne 0 ]
+check "rotated-key cache: config NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "rotated-key cache: key values not printed" not grep -q "rotated-away-key" <<< "$OUT"
+
+#### cache publication leaves no temp files behind
+setup
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "tmp cleanup on success: only the cache file remains" \
+    [ "$(ls "$DIR/cache")" = "config.toml" ]
 
 #### missing config file → hard fail
 setup

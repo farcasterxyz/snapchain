@@ -46,12 +46,14 @@ services:
         # testnet registry lives on Sepolia, so enabling this requires
         # ONCHAIN_CONFIG_RPC_URL — the config's l1_rpc_url stays on Ethereum
         # mainnet for ENS and is not a usable fallback here.
+        # Cache filename is network-specific: running mainnet and testnet from
+        # the same checkout shares the .onchain-config host dir, and a fallback
+        # boot must never restore the other network's cached config. (Keep
+        # comments OUT of the continuation lines below — a comment line ends
+        # the backslash continuation and silently drops the remaining vars.)
         ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
         ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
         ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
-        # Network-specific filename: running mainnet and testnet from the same
-        # checkout shares the .onchain-config host dir, and a fallback boot
-        # must never restore the other network's cached config.
         ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.testnet.toml \
         /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command

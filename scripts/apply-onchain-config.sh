@@ -62,11 +62,18 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
     exit 1
 fi
 
-# Read a top-level scalar from the config. The node's loader overlays
-# SNAPCHAIN_* env vars over the file, so an env value — when present — is what
-# the node will actually run with and takes precedence here too. The file
-# values come from the entrypoint heredocs, so plain `key = value` lines are
-# the only shape we need to parse.
+# Read a scalar `key = value` line from a file. The values come from the
+# entrypoint heredocs, so plain assignment lines are the only shape we need
+# to parse.
+file_value() {
+    local file="$1" key="$2"
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" \
+        "$file" | head -1 | tr -d '[:space:]'
+}
+
+# Same, from the active config — but the node's loader overlays SNAPCHAIN_*
+# env vars over the file, so an env value — when present — is what the node
+# will actually run with and takes precedence here too.
 config_value() {
     local key="$1" env_name="$2" env_value
     env_value="${!env_name:-}"
@@ -74,8 +81,7 @@ config_value() {
         echo "$env_value"
         return
     fi
-    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" \
-        "$CONFIG_PATH" | head -1 | tr -d '[:space:]'
+    file_value "$CONFIG_PATH" "$key"
 }
 
 # Read nodes keep the existing GitHub validators.toml path; the registry
@@ -114,13 +120,20 @@ check_config() {
 if "$FC_BIN" "${pull_args[@]}" && check_config; then
     if [[ -n "$CACHE_PATH" ]]; then
         # The merged config contains consensus.private_key: keep the cache
-        # non-world-readable and write it atomically so a crash mid-copy can't
-        # leave a truncated last-known-good. A cache-write failure (full or
-        # read-only volume) must not stop the boot — config.toml is already
-        # pulled and validated at this point.
+        # non-world-readable (mktemp creates 0600) and publish it with an
+        # atomic rename so a crash mid-copy can't leave a truncated
+        # last-known-good. The temp name must be unique per invocation:
+        # overlapping containers (deploy replacement + autoheal) each have
+        # their own PID namespace, so even $$ can collide — with a shared temp
+        # name, interleaved writers can publish a spliced file. A cache-write
+        # failure (full or read-only volume) must not stop the boot —
+        # config.toml is already pulled and validated at this point.
+        cache_tmp=""
+        trap '[[ -n "$cache_tmp" ]] && rm -f "$cache_tmp"' EXIT
         if { mkdir -p "$(dirname "$CACHE_PATH")" \
-            && (umask 077 && cp "$CONFIG_PATH" "$CACHE_PATH.tmp") \
-            && mv "$CACHE_PATH.tmp" "$CACHE_PATH"; }; then
+            && cache_tmp="$(mktemp "$CACHE_PATH.XXXXXX")" \
+            && cp "$CONFIG_PATH" "$cache_tmp" \
+            && mv "$cache_tmp" "$CACHE_PATH" && cache_tmp=""; }; then
             log "pull OK; cached last-known-good to $CACHE_PATH"
         else
             log "WARNING: pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
@@ -136,6 +149,22 @@ fi
 # rolling restart could otherwise take down several validators at once and
 # cost quorum. Boot from the last-known-good instead, loudly.
 if [[ -n "$CACHE_PATH" && -f "$CACHE_PATH" ]]; then
+    # The cache persists on the host across image rolls, network flips, and
+    # key rotations, so it can belong to a different identity than this node
+    # — and a stale config for the WRONG node passes --check-config just fine
+    # (it is a valid config, just not ours). Restore only when the cache
+    # matches the fresh config's network and consensus key; otherwise
+    # crash-looping beats booting as somebody else.
+    cached_network="$(file_value "$CACHE_PATH" fc_network | tr '[:upper:]' '[:lower:]')"
+    if [[ "$cached_network" != "$network" ]]; then
+        log "ERROR: cache at $CACHE_PATH is for network \"$cached_network\", this node is \"$network\"; refusing to boot from it"
+        exit 1
+    fi
+    # Compare, never print: these are consensus signing keys.
+    if [[ "$(file_value "$CACHE_PATH" private_key)" != "$(file_value "$CONFIG_PATH" private_key)" ]]; then
+        log "ERROR: cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); refusing to boot from it"
+        exit 1
+    fi
     log "WARNING: config pull failed; falling back to last-known-good $CACHE_PATH"
     log "WARNING: env-derived config changes since that pull will NOT apply this boot"
     cp "$CACHE_PATH" "$CONFIG_PATH"
