@@ -125,7 +125,8 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     let mut local: toml::Table = toml::from_str(&local_raw)
         .map_err(|e| sanitized_toml_error(&config_path.display().to_string(), &local_raw, &e))?;
 
-    check_network_matches(&local, network)?;
+    let env_fc_network = std::env::var("SNAPCHAIN_FC_NETWORK").ok();
+    check_network_matches(&local, network, env_fc_network.as_deref())?;
 
     // The registry manages validators only; read nodes keep their own peer
     // configuration path (spec §2.5). A dry run is harmless inspection.
@@ -187,10 +188,18 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
 /// another. Latent until the baked-in registry addresses land; after that,
 /// `fc config pull` (which defaults to mainnet) run against a testnet node's
 /// config would otherwise silently install the mainnet validator set.
-fn check_network_matches(local: &toml::Table, network: NetworkArg) -> Result<(), BoxedError> {
-    let declared = match local.get("fc_network").and_then(|v| v.as_str()) {
+fn check_network_matches(
+    local: &toml::Table,
+    network: NetworkArg,
+    env_fc_network: Option<&str>,
+) -> Result<(), BoxedError> {
+    // The node's loader overlays SNAPCHAIN_* env vars over the file, so the
+    // env value — when set — is what the node will actually run with and
+    // takes precedence here too.
+    let declared = match env_fc_network.or_else(|| local.get("fc_network").and_then(|v| v.as_str()))
+    {
         Some(s) => s,
-        // Absent from the file (the node would default it): nothing to check.
+        // Declared nowhere (the node would default it): nothing to check.
         None => return Ok(()),
     };
     let selected = match network {
@@ -463,6 +472,8 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
         _ => return Err("registry has no validator sets — is it seeded?".into()),
     };
 
+    let mut last_effective_at: std::collections::BTreeMap<u32, u64> =
+        std::collections::BTreeMap::new();
     for (i, set) in sets.iter().enumerate() {
         if set.shard_ids.is_empty() {
             return Err(format!("validator set {i}: empty shard_ids").into());
@@ -501,24 +512,27 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
         }
         // effective_at is a per-shard height: shard counters advance
         // independently, so entries governing disjoint shards are unordered
-        // relative to each other. Mirror the contract's rule and no stronger
-        // one — bound each entry against the most recent preceding entry
-        // sharing at least one shard (>=, since sibling rollouts land on the
-        // same height). A global check would reject legitimate configs the
-        // first time two shards rotate at different heights.
-        let prev_sharing_shard = sets[..i]
-            .iter()
-            .rev()
-            .find(|prev| prev.shard_ids.iter().any(|s| set.shard_ids.contains(s)));
-        if let Some(prev) = prev_sharing_shard {
-            if set.effective_at < prev.effective_at {
-                return Err(format!(
-                    "validator set {i}: effective_at {} regresses below {} set earlier for an \
-                     overlapping shard",
-                    set.effective_at, prev.effective_at
-                )
-                .into());
+        // relative to each other. Mirror the contract exactly: it keeps a
+        // per-shard running maximum (`_lastEffectiveAt`) and bounds each
+        // entry, for every shard it governs, against that shard's latest
+        // height (>=, since sibling rollouts land on the same height). A
+        // single nearest-overlapping-entry comparison is weaker: a
+        // multi-shard entry would only be checked against one of its shards'
+        // histories.
+        for shard in &set.shard_ids {
+            if let Some(&latest) = last_effective_at.get(shard) {
+                if set.effective_at < latest {
+                    return Err(format!(
+                        "validator set {i}: effective_at {} regresses below {latest}, the \
+                         latest height previously set for shard {shard}",
+                        set.effective_at
+                    )
+                    .into());
+                }
             }
+        }
+        for shard in &set.shard_ids {
+            last_effective_at.insert(*shard, set.effective_at);
         }
     }
 
@@ -532,9 +546,15 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
     let entry0_shards: std::collections::BTreeSet<u32> =
         sets[0].shard_ids.iter().copied().collect();
     if sets[0].effective_at != 0 || !entry0_shards.is_superset(&all_shards) {
-        eprintln!(
-            "warning: first validator set should be the genesis entry (effective_at = 0, every \
-             shard listed) — the node's active-set scan seeds from it unconditionally"
+        // Hard error, not a warning: the node's active-set scan seeds from
+        // sets[0] unconditionally, without checking its shards, so a partial
+        // entry 0 silently governs shards it never listed. The spec requires
+        // entry 0 to be the genesis entry and no legitimate registry violates
+        // it.
+        return Err(
+            "first validator set must be the genesis entry (effective_at = 0, every shard \
+             listed) — the node's active-set scan seeds from it unconditionally"
+                .into(),
         );
     }
 
@@ -765,7 +785,7 @@ bootstrap_peers = "x"
         );
         let onchain: toml::Table = toml::from_str(&two_sets).unwrap();
         let err = validate_onchain(&onchain).unwrap_err().to_string();
-        assert!(err.contains("overlapping shard"), "got: {err}");
+        assert!(err.contains("regresses below"), "got: {err}");
     }
 
     /// A validator-set block in the onchain grammar, with a known-good key.
@@ -807,7 +827,58 @@ bootstrap_peers = "x"
         );
         let onchain: toml::Table = toml::from_str(&doc).unwrap();
         let err = validate_onchain(&onchain).unwrap_err().to_string();
-        assert!(err.contains("overlapping shard"), "got: {err}");
+        assert!(err.contains("shard 0"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_multi_shard_entry_regressing_one_of_its_shards() {
+        // Entry 4 governs [0, 1]; its nearest overlapping predecessor is the
+        // shard-1 entry @50 (60 >= 50), but shard 0's latest is 100 — the
+        // contract's per-shard _lastEffectiveAt map rejects it, so fc must
+        // too. A nearest-overlap comparison passes this wrongly.
+        let doc = format!(
+            "{}{}{}{}{GOSSIP_BLOCK}",
+            set_block(0, "[0, 1]"),
+            set_block(100, "[0]"),
+            set_block(50, "[1]"),
+            set_block(60, "[0, 1]"),
+        );
+        let onchain: toml::Table = toml::from_str(&doc).unwrap();
+        let err = validate_onchain(&onchain).unwrap_err().to_string();
+        assert!(err.contains("shard 0"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_entry0_that_is_not_a_full_genesis_entry() {
+        // Non-zero height on entry 0.
+        let doc = format!("{}{GOSSIP_BLOCK}", set_block(10, "[0]"));
+        let onchain: toml::Table = toml::from_str(&doc).unwrap();
+        let err = validate_onchain(&onchain).unwrap_err().to_string();
+        assert!(err.contains("genesis"), "got: {err}");
+
+        // Entry 0 not covering every shard the document mentions: the node
+        // seeds its scan from entry 0 without checking shards, so shard 1
+        // would silently be governed by an entry that never listed it.
+        let doc = format!(
+            "{}{}{GOSSIP_BLOCK}",
+            set_block(0, "[0]"),
+            set_block(100, "[1]"),
+        );
+        let onchain: toml::Table = toml::from_str(&doc).unwrap();
+        let err = validate_onchain(&onchain).unwrap_err().to_string();
+        assert!(err.contains("genesis"), "got: {err}");
+    }
+
+    #[test]
+    fn network_check_honors_env_overlay() {
+        // File says Testnet but SNAPCHAIN_FC_NETWORK overrides to Mainnet —
+        // the node would run as mainnet, so fc must judge against the env.
+        let local: toml::Table = toml::from_str(r#"fc_network = "Testnet""#).unwrap();
+        assert!(check_network_matches(&local, NetworkArg::Mainnet, Some("Mainnet")).is_ok());
+        assert!(check_network_matches(&local, NetworkArg::Testnet, Some("Mainnet")).is_err());
+        // Env set, file silent: env alone decides.
+        let empty = toml::Table::new();
+        assert!(check_network_matches(&empty, NetworkArg::Mainnet, Some("Testnet")).is_err());
     }
 
     /// Parity with the node: the mirrored `ValidatorSetConfig` must deserialize
@@ -889,14 +960,14 @@ bootstrap_peers = "x"
     #[test]
     fn rejects_network_mismatch_against_fc_network() {
         let local: toml::Table = toml::from_str(r#"fc_network = "Testnet""#).unwrap();
-        assert!(check_network_matches(&local, NetworkArg::Testnet).is_ok());
-        let err = check_network_matches(&local, NetworkArg::Mainnet)
+        assert!(check_network_matches(&local, NetworkArg::Testnet, None).is_ok());
+        let err = check_network_matches(&local, NetworkArg::Mainnet, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("fc_network"), "got: {err}");
-        // Absent fc_network: nothing to cross-check.
+        // Declared nowhere: nothing to cross-check.
         let empty = toml::Table::new();
-        assert!(check_network_matches(&empty, NetworkArg::Mainnet).is_ok());
+        assert!(check_network_matches(&empty, NetworkArg::Mainnet, None).is_ok());
     }
 
     #[test]
