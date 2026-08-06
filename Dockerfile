@@ -74,6 +74,9 @@ COPY --from=builder \
   /usr/src/app/target/release/perftest \
   /usr/src/app/target/release/fc \
   /app/
+COPY scripts/apply-onchain-config.sh /app/
 
 ENV RUSTFLAGS="-Awarnings"
-CMD ["./snapchain", "--id", "1"]
+# Compose files override both entrypoint and command; this default only covers
+# a bare `docker run` (the previous `--id 1` was not a valid flag and exited 1).
+CMD ["./snapchain", "--config-path", "config.toml"]

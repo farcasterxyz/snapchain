@@ -7,3 +7,4 @@
 /Makefile
 README.md
 /scripts
+!/scripts/apply-onchain-config.sh
