@@ -17,7 +17,7 @@
 #   81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8  - Neynar (validator 3)
 #   2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8  - Neynar (validator 4)
 #   67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102  - Neynar (validator 5)
-#   db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081  - Neynar (validator 6)
+#   db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081  - Neynar (validator 6, removed 2026-08-13)
 #   80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860  - Uno (validator 7)
 #   3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e  - Degen (validator 8)
 
@@ -145,6 +145,47 @@ validator_public_keys = [
   "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
   "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
   "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+  "3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e",
+]
+
+# Removed validator 6 (db6576...) from block shard 0.
+# All three shards below cut over at approximately 2026-08-13 12:00 CDT; heights
+# are projected from the 7-day average block rate per shard as of 2026-08-05.
+[[consensus.validator_sets]]
+effective_at = 42_760_000
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+  "3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e",
+]
+
+# Removed validator 6 (db6576...) from message shard 2
+[[consensus.validator_sets]]
+effective_at = 43_233_000
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+  "3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e",
+]
+
+# Removed validator 6 (db6576...) from message shard 1
+[[consensus.validator_sets]]
+effective_at = 43_400_000
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
   "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
   "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
   "3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e",

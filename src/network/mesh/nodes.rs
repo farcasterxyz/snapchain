@@ -159,7 +159,9 @@ const BUILTIN: &[BuiltinNode] = &[
         ),
         peer_id: Some("12D3KooWQaoBw2gvdmfGdXjepEQU9i47FXxvsCZ6wu8Vn4gwvHm2"),
         offline: false,
-        note: None,
+        note: Some(
+            "leaves the validator set at heights 42_760_000 (shard 0), 43_233_000 (shard 2), 43_400_000 (shard 1); host stays up, demote-vs-decommission TBD",
+        ),
     },
     BuiltinNode {
         name: "erebor",
