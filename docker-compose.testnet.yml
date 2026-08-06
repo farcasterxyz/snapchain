@@ -58,6 +58,11 @@ services:
         /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
+    # The onchain-config watcher applies a config change by TERMing PID 1 and
+    # relying on this policy to re-run the entrypoint; without it a validator
+    # exits cleanly on the first version bump and stays down. Also retries a
+    # refused boot (apply-onchain-config.sh exits nonzero) until fixed.
+    restart: always
     ports:
       - "3381:3381/tcp"
       - "3382:3382/udp"

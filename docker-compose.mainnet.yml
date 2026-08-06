@@ -45,6 +45,9 @@ services:
         cat /app/validators.toml >> config.toml
         # Merge registry-managed validator config (no-op on read nodes and
         # unless ONCHAIN_CONFIG_ENABLED is set; see the script header).
+        # Enabling this as a validator requires ONCHAIN_CONFIG_RPC_URL: the
+        # heredoc above writes no l1_rpc_url, so fc's mainnet fallback has
+        # nothing to read and the pull fails (loudly) without it.
         ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
         ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
         ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
