@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - (reactions): replace flaky live test with a representative fixture set (#981)
-- Sort block engine onchain replay events (V20-gated) (#959)
+- Sort block engine onchain replay events (V21-gated) (#959)
 - *(devnet)* Enable block_receiver in generated node configs (#990)
 - *(onchain_events)* Watch both channel registry contracts (#992)
 
