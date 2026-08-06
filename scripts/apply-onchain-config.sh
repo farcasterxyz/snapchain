@@ -41,13 +41,18 @@
 #                            onchain-config-watch.sh). Test hook.
 #
 # Alongside the cache this script maintains, when ONCHAIN_CONFIG_CACHE is set:
-#   $CACHE.version  configVersion() watermark — the counter value read just
-#                   before the last successfully applied pull. The watch loop
-#                   compares the live counter against it (by inequality) to
-#                   gate restarts.
 #   $CACHE.prev     the previous known-good config, rotated out when a pull
 #                   changes the cache — the manual-rollback artifact that can
 #                   restore the old config without an RPC round-trip.
+#
+# The rollout watermark (the configVersion() bound to the applied document,
+# reported by `fc config pull --report-version` from block-pinned reads) is
+# handed to the spawned watcher through its ENVIRONMENT, never through a
+# shared file: overlapping containers (deploy replacement, autoheal) racing
+# on a shared watermark file could pair one container's cache with another's
+# version and park a stale survivor forever. A fallback boot hands off an
+# empty watermark (-> 0), which the watcher self-heals by content comparison
+# on its first successful pull.
 #
 # Exit codes: 0 = config ready to boot (pulled, restored from cache, or no-op);
 # nonzero = do not boot (entrypoints call this as `apply-onchain-config.sh || exit 1`,
@@ -161,36 +166,51 @@ spawn_watcher() {
         log "WARNING: watcher $watch_bin missing or not executable; config changes will only apply on the next restart"
         return 0
     fi
-    # The watcher never re-derives the network: this boot's value is what the
-    # node actually runs with until the next restart, which replaces the
-    # watcher too. stdin closed, stdout/stderr inherited into container logs.
-    ONCHAIN_WATCH_NETWORK="$network" "$watch_bin" "$CONFIG_PATH" < /dev/null &
+    # The watcher never re-derives the network or re-reads shared state: this
+    # boot's network is what the node runs with until the next restart, and
+    # the watermark is the version bound to the document THIS boot applied
+    # (empty on fallback boots -> the watcher starts at 0 and self-heals by
+    # content comparison). stdin closed, stdout/stderr inherited into
+    # container logs.
+    ONCHAIN_WATCH_NETWORK="$network" \
+        ONCHAIN_WATCH_WATERMARK="$onchain_version" \
+        "$watch_bin" "$CONFIG_PATH" < /dev/null &
     log "started onchain-config watcher (pid $!)"
 }
 
-# Read the mutation counter BEFORE pulling the document: if a registry write
-# lands between the two calls, the stored watermark is low — costing one
-# harmless extra restart later — never high, which would eat a change. Best
-# effort: a boot must not fail because the counter read did, and without a
-# cache volume there is nowhere durable to record it (the watcher then keeps
-# an in-memory watermark instead).
+# The pull reports the configVersion() bound to the very document it merged
+# (both reads pinned to one block hash inside fc) — the only value safe to
+# hand the watcher as its watermark. Best-effort: a boot must not fail over
+# watermark plumbing; an unset watermark just costs the watcher one catch-up
+# content comparison.
 onchain_version=""
-if [[ -n "$CACHE_PATH" ]]; then
-    version_args=(--network "$network" config version --config "$CONFIG_PATH")
-    if [[ -n "${ONCHAIN_CONFIG_REGISTRY:-}" ]]; then
-        version_args+=(--registry "$ONCHAIN_CONFIG_REGISTRY")
-    fi
-    if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
-        version_args+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
-    fi
-    if ! onchain_version="$("$FC_BIN" "${version_args[@]}")" \
-        || ! [[ "$onchain_version" =~ ^[0-9]+$ ]]; then
-        log "WARNING: could not read configVersion; watermark will not be recorded this boot"
-        onchain_version=""
-    fi
+version_report=""
+cache_tmp=""
+# Invoked via the EXIT trap only.
+# shellcheck disable=SC2329
+cleanup_temps() {
+    [[ -n "$cache_tmp" ]] && rm -f "$cache_tmp"
+    [[ -n "$version_report" ]] && rm -f "$version_report"
+    return 0
+}
+trap cleanup_temps EXIT
+if version_report="$(mktemp "${TMPDIR:-/tmp}/onchain-config-version.XXXXXX")"; then
+    pull_args+=(--report-version "$version_report")
+else
+    version_report=""
+    log "WARNING: cannot create version-report temp file; watcher will start with an unset watermark"
 fi
 
 if "$FC_BIN" "${pull_args[@]}" && check_config; then
+    if [[ -n "$version_report" ]]; then
+        onchain_version="$(tr -d '[:space:]' < "$version_report" 2>/dev/null || true)"
+        if [[ "$onchain_version" =~ ^[0-9]+$ ]]; then
+            log "applied configVersion $onchain_version"
+        else
+            log "WARNING: pull reported no usable configVersion; watcher will start with an unset watermark"
+            onchain_version=""
+        fi
+    fi
     if [[ -n "$CACHE_PATH" ]]; then
         # Rotate the outgoing cache to .prev — the previous known-good that
         # manual rollback restores without an RPC round-trip. The new cache
@@ -210,8 +230,6 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
         # name, interleaved writers can publish a spliced file. A cache-write
         # failure (full or read-only volume) must not stop the boot —
         # config.toml is already pulled and validated at this point.
-        cache_tmp=""
-        trap '[[ -n "$cache_tmp" ]] && rm -f "$cache_tmp"' EXIT
         if { mkdir -p "$(dirname "$CACHE_PATH")" \
             && cache_tmp="$(mktemp "$CACHE_PATH.XXXXXX")" \
             && cp "$CONFIG_PATH" "$cache_tmp" \
@@ -219,20 +237,6 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
             log INFO "pull OK; cached last-known-good to $CACHE_PATH"
         else
             log WARN "pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
-        fi
-        # Record which counter value this config corresponds to, so the watch
-        # loop can gate restarts on the counter moving. Same atomicity rules
-        # as the cache; failure costs one no-op restart later, not the boot.
-        if [[ -n "$onchain_version" ]]; then
-            wm_tmp=""
-            trap '[[ -n "$cache_tmp" ]] && rm -f "$cache_tmp"; [[ -n "$wm_tmp" ]] && rm -f "$wm_tmp"' EXIT
-            if { wm_tmp="$(mktemp "$CACHE_PATH.version.XXXXXX")" \
-                && printf '%s\n' "$onchain_version" > "$wm_tmp" \
-                && mv "$wm_tmp" "$CACHE_PATH.version" && wm_tmp=""; }; then
-                log "recorded applied configVersion $onchain_version"
-            else
-                log "WARNING: could not record configVersion watermark; booting anyway"
-            fi
         fi
     else
         log INFO "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"

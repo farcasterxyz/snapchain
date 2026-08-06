@@ -6,17 +6,22 @@
 # Spawned by apply-onchain-config.sh after a successful boot-time pull (or
 # cache fallback); one instance per container, dying with it. Periodically
 # polls the registry's configVersion() counter — a single cheap eth_call —
-# and only when it differs from the recorded watermark does any real work
-# happen: pull the document onto a COPY of the running config, validate it
-# with `snapchain --check-config`, and byte-compare. A document that fails
+# and only when it EXCEEDS the watermark (the counter is strictly monotonic
+# onchain, so a lower observation is a stale RPC view, never a change) does
+# any real work happen: pull the document onto a COPY of the running config,
+# validate it with `snapchain --check-config`, and byte-compare. The pull
+# also reports the version bound to the pulled document (block-pinned inside
+# fc) — only THAT value ever becomes a watermark, so a load-balanced RPC
+# cannot pair a fresh counter with a stale document. A document that fails
 # validation is refused loudly with NO restart (fix it onchain); a version
 # bump that renders the identical document just advances the watermark. Only
 # a validated, genuinely different config triggers a restart — and then only
 # inside this node's stagger window.
 #
 # Stagger: node slots come from `fc config slot` — the node's index in the
-# fetched document's validator-key union, so slots are distinct across the
-# fleet by construction. Node i may only restart during seconds
+# SORTED validator-key union of the fetched document, so slots are distinct
+# across the fleet by construction and a write that merely reorders keys
+# cannot move anyone's window. Node i may only restart during seconds
 # [i*W, (i+1)*W) of a repeating wall-clock cycle of (count+1)*W (the +1 is
 # the sentinel slot for nodes not in the document). Wall-clock alignment
 # (epoch % cycle) means nodes need no coordination and their differing poll
@@ -26,12 +31,17 @@
 # from an evaluation that lands inside its own recomputed window. At most
 # one validator is down at a time; worst-case propagation of a change is one
 # full cycle plus one poll interval — with 8 validators and defaults,
-# ~(8+1)*900s + 300s ≈ 2h20m. Two caveats, accepted and documented: the
+# ~(8+1)*900s + 300s ≈ 2h20m. Caveats, accepted and documented: the
 # sentinel slot is SHARED by every node absent from the document (removing
 # two still-active validators in one registry write can restart them
-# together — remove validators one write at a time), and the union spans the
+# together — remove validators one write at a time); the union spans the
 # full set history (matching what a booting node must parse), so keys
-# retired-but-retained in history each add one idle window to the cycle.
+# retired-but-retained in history each add one idle window to the cycle;
+# and a write that CHANGES MEMBERSHIP while a validator is mid-restart can
+# shift another node's slot into the vacated window — full cross-version
+# exclusion needs registry-assigned slots or a registry-level write
+# cooldown, so until then: one membership write at a time, and wait a full
+# cycle before the next.
 #
 # Restart: `kill -TERM 1`. Every compose file in this repo (and the deployer)
 # sets `init: true`, so PID 1 is docker-init, which forwards the TERM to the
@@ -41,25 +51,26 @@
 # boot is the only apply path.
 #
 # Manual rollback: amend or remove the bad entry onchain — configVersion
-# moves FORWARD and nodes converge on the next cycle (the watermark is
-# compared for inequality, so a revert is just another change). For a local
+# moves FORWARD and nodes converge on the next cycle (a revert is just
+# another version above the watermark). For a local
 # emergency: set ONCHAIN_CONFIG_ENABLED=false and restore
 # $ONCHAIN_CONFIG_CACHE.prev (the previous known-good kept by the apply
 # script) over the cache; run --check-config before trusting either.
 #
 # Usage: onchain-config-watch.sh [config-path]   (default: config.toml)
 #
-# Environment (inherited from apply-onchain-config.sh at spawn):
+# Environment (set/inherited from apply-onchain-config.sh at spawn):
 #   ONCHAIN_WATCH_NETWORK    Network derived by the apply script at boot
 #                            (required; the value the node actually runs with
 #                            until the next restart replaces this watcher).
-#   ONCHAIN_CONFIG_REGISTRY, ONCHAIN_CONFIG_RPC_URL, ONCHAIN_CONFIG_CACHE,
-#   FC_BIN, SNAPCHAIN_BIN    Same contract as apply-onchain-config.sh. The
-#                            watermark file at $ONCHAIN_CONFIG_CACHE.version is
-#                            read once at spawn and then kept in memory (see
-#                            read_watermark); with no cache volume it starts at
-#                            0 and is re-derived (one pull + byte-compare)
-#                            after every restart.
+#   ONCHAIN_WATCH_WATERMARK  The configVersion bound to the document this
+#                            boot applied (from fc's block-pinned
+#                            --report-version). Kept in this process only —
+#                            never a shared file (see read_watermark). Unset
+#                            (fallback boots) -> 0; the first successful pull
+#                            re-derives the truth by content comparison.
+#   ONCHAIN_CONFIG_REGISTRY, ONCHAIN_CONFIG_RPC_URL,
+#   FC_BIN, SNAPCHAIN_BIN    Same contract as apply-onchain-config.sh.
 #   ONCHAIN_CONFIG_POLL_INTERVAL   Seconds between polls (default 300).
 #   ONCHAIN_CONFIG_STAGGER_WINDOW  Per-node restart window W in seconds
 #                            (default 900). Must exceed a full stop + boot +
@@ -105,32 +116,18 @@ fc_version() {
         ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"}
 }
 
-# The watermark is read from disk ONCE, at spawn, and lives in memory after
-# that: it means "the version THIS container verified its config against".
-# Re-reading the shared file every tick would let an overlapping container
-# (deploy replacement, autoheal) advance it under us — this watcher would then
-# see counter == watermark and idle forever while running stale config. The
-# file is only the boot-to-watcher handoff; we still WRITE it on noop
-# advances so the next boot starts from the freshest value.
+# The watermark means "the version THIS container verified its config
+# against". It arrives once, via environment, from the boot that verified it
+# (apply-onchain-config.sh reads it from fc's block-bound --report-version)
+# and lives only in this process — never in a shared file, which an
+# overlapping container (deploy replacement, autoheal) could rewrite under
+# us and park a stale survivor forever.
 read_watermark() {
     echo "${WATERMARK_MEM:-0}"
 }
 
-# Record the counter value whose rendered document the running config now
-# matches. Persisting can fail (full or read-only volume) — that only costs
-# re-detection work next tick, never correctness, so warn and carry on with
-# the in-memory copy.
 write_watermark() {
     WATERMARK_MEM="$1"
-    if [[ -n "$WATERMARK_PATH" ]]; then
-        local tmp=""
-        if ! { tmp="$(mktemp "$WATERMARK_PATH.XXXXXX")" \
-            && printf '%s\n' "$1" > "$tmp" \
-            && mv "$tmp" "$WATERMARK_PATH"; }; then
-            [[ -n "$tmp" ]] && rm -f "$tmp"
-            log "WARNING: could not persist watermark $1 to $WATERMARK_PATH"
-        fi
-    fi
 }
 
 # Fetch and judge the current onchain document against the running config.
@@ -149,17 +146,22 @@ evaluate() {
     EVAL_VERSION=""
     EVAL_INDEX=""
     EVAL_COUNT=""
-    local v tmp slot_out
+    local v wm tmp bound slot_out cmp_rc
     if ! v="$(fc_version)" || ! [[ "$v" =~ ^[0-9]+$ ]]; then
         log "WARNING: configVersion poll failed; will retry in ${POLL_INTERVAL}s"
         return 0
     fi
-    EVAL_VERSION="$v"
-    if [[ "$v" == "$(read_watermark)" ]]; then
+    wm="$(read_watermark)"
+    # The counter is strictly monotonic onchain — even a rollback moves it
+    # FORWARD — so an observed value at or below the watermark can only be
+    # the state we already verified or a stale RPC view (a lagging
+    # load-balanced backend), never a change to apply. Numeric comparison
+    # keeps such a backend from churning pointless pulls.
+    if [[ "$v" -le "$wm" ]]; then
         EVAL=current
         return 0
     fi
-    log "configVersion moved ($(read_watermark) -> $v); fetching and validating the new document"
+    log "configVersion moved ($wm -> $v); fetching and validating the new document"
     if ! tmp="$(umask 077 && mktemp "${TMPDIR:-/tmp}/onchain-config-watch.XXXXXX")" \
         || ! cp "$CONFIG_PATH" "$tmp"; then
         log "WARNING: cannot stage a config copy for validation; will retry"
@@ -167,30 +169,55 @@ evaluate() {
         return 0
     fi
     # Validate on the copy: the running config stays untouched until the
-    # restart re-runs the boot-time pull, the one and only apply path.
+    # restart re-runs the boot-time pull, the one and only apply path. The
+    # pull reports the version bound (same pinned block, inside fc) to the
+    # document it merged — the trigger version above is unbound and must
+    # never be recorded as a watermark.
     if ! "$FC_BIN" --network "$NETWORK" config pull --config "$tmp" \
+        --report-version "$tmp.version" \
         ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"}; then
         log "ERROR: config pull for version $v failed; NOT restarting; will retry"
-        rm -f "$tmp"
+        rm -f "$tmp" "$tmp.version"
         return 0
     fi
+    if ! bound="$(tr -d '[:space:]' < "$tmp.version" 2>/dev/null)" \
+        || ! [[ "$bound" =~ ^[0-9]+$ ]]; then
+        log "ERROR: pull reported no usable configVersion; NOT restarting; will retry"
+        rm -f "$tmp" "$tmp.version"
+        return 0
+    fi
+    if [[ "$bound" -le "$wm" ]]; then
+        log "WARNING: pull landed on a backend at version $bound, at or below watermark $wm (stale RPC view); will retry"
+        rm -f "$tmp" "$tmp.version"
+        return 0
+    fi
+    EVAL_VERSION="$bound"
     if ! "$SNAPCHAIN_BIN" --config-path "$tmp" --check-config; then
-        log "ERROR: version $v renders a config that fails --check-config; NOT restarting (fix it onchain); will retry"
-        rm -f "$tmp"
+        log "ERROR: version $bound renders a config that fails --check-config; NOT restarting (fix it onchain); will retry"
+        rm -f "$tmp" "$tmp.version"
         return 0
     fi
-    if cmp -s "$tmp" "$CONFIG_PATH"; then
-        rm -f "$tmp"
+    # Three-way compare: identical is a no-op, different is a change, and a
+    # comparison ERROR (cmp exit >= 2: I/O failure, vanished file) must not
+    # masquerade as "different" and restart a validator on no evidence.
+    cmp_rc=0
+    cmp -s "$tmp" "$CONFIG_PATH" || cmp_rc=$?
+    if [[ "$cmp_rc" -eq 0 ]]; then
+        rm -f "$tmp" "$tmp.version"
         EVAL=noop
+        return 0
+    elif [[ "$cmp_rc" -ne 1 ]]; then
+        log "WARNING: cannot compare the pulled config against the running one (cmp exit $cmp_rc); NOT restarting; will retry"
+        rm -f "$tmp" "$tmp.version"
         return 0
     fi
     if ! slot_out="$("$FC_BIN" config slot --config "$tmp")" \
         || ! [[ "$slot_out" =~ ^[0-9]+\ [0-9]+$ ]]; then
         log "ERROR: cannot compute stagger slot; NOT restarting; will retry"
-        rm -f "$tmp"
+        rm -f "$tmp" "$tmp.version"
         return 0
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$tmp.version"
     EVAL_INDEX="${slot_out% *}"
     EVAL_COUNT="${slot_out#* }"
     EVAL=change
@@ -214,9 +241,15 @@ tick() {
     # owns that window under the new document. Bounded in practice by the
     # owner not writing continuously; a revert while sleeping downgrades to
     # a watermark update.
-    local delta
+    local delta now
     while :; do
-        delta="$(seconds_until_window "$(date +%s)" "$EVAL_INDEX" "$EVAL_COUNT" "$WINDOW")"
+        # A failed `date` must not fall through as epoch 0 — that computes
+        # slot 0's window as "now" and restarts outside the real window.
+        if ! now="$(date +%s)" || ! [[ "$now" =~ ^[0-9]+$ ]]; then
+            log "WARNING: cannot read the clock; NOT restarting; will retry"
+            return 0
+        fi
+        delta="$(seconds_until_window "$now" "$EVAL_INDEX" "$EVAL_COUNT" "$WINDOW")"
         [[ "$delta" -gt 0 ]] || break
         log "version $EVAL_VERSION changes the config; waiting ${delta}s for restart window (slot $EVAL_INDEX of $((EVAL_COUNT + 1)))"
         sleep "$delta"
@@ -259,12 +292,11 @@ SNAPCHAIN_BIN="${SNAPCHAIN_BIN:-/app/snapchain}"
 POLL_INTERVAL="${ONCHAIN_CONFIG_POLL_INTERVAL:-300}"
 WINDOW="${ONCHAIN_CONFIG_STAGGER_WINDOW:-900}"
 RESTART_CMD="${ONCHAIN_CONFIG_RESTART_CMD:-kill -TERM 1}"
-WATERMARK_PATH="${ONCHAIN_CONFIG_CACHE:+${ONCHAIN_CONFIG_CACHE}.version}"
-# Snapshot once at spawn; never re-read (see read_watermark for why).
-WATERMARK_MEM="0"
-if [[ -n "$WATERMARK_PATH" && -f "$WATERMARK_PATH" ]]; then
-    WATERMARK_MEM="$(cat "$WATERMARK_PATH" 2>/dev/null || echo 0)"
-fi
+# Handed off by the boot that verified it (see read_watermark). Unset or
+# garbage -> 0: the first successful pull re-derives the truth by content
+# comparison, at the cost of one pull.
+WATERMARK_MEM="${ONCHAIN_WATCH_WATERMARK:-0}"
+[[ "$WATERMARK_MEM" =~ ^[0-9]+$ ]] || WATERMARK_MEM="0"
 
 if [[ -z "${ONCHAIN_WATCH_NETWORK:-}" ]]; then
     log "ERROR: ONCHAIN_WATCH_NETWORK not set (apply-onchain-config.sh sets it); exiting"
@@ -291,7 +323,7 @@ if [[ -n "${ONCHAIN_CONFIG_WATCH_ONCE:-}" ]]; then
     exit 0
 fi
 
-log "watching configVersion every ${POLL_INTERVAL}s (stagger window ${WINDOW}s, watermark ${WATERMARK_PATH:-in-memory})"
+log "watching configVersion every ${POLL_INTERVAL}s (stagger window ${WINDOW}s, watermark ${WATERMARK_MEM})"
 
 # One log line an hour proves the loop is alive without flooding the
 # container logs; there is no autoheal for a dead watcher, only this.

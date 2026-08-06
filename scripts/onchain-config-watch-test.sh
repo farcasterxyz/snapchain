@@ -9,11 +9,17 @@
 # Stub contract: fc `config version` consumes one line per call from
 # version-seq (empty/missing file = poll failure); fc `config pull` consumes
 # one line per call from pull-seq ("" or missing = append the merge marker,
-# NOAPPEND = change nothing, EXIT:<n> = fail, anything else = append it); fc
-# `config slot` prints slot.txt (default "0 1"). snapchain --check-config
-# fails iff the config contains "BAD". The date stub pins epoch 0, so a slot
-# with index > 0 always computes a positive stagger wait; the sleep stub logs
-# to sleep.log instead of sleeping. Ticks run via ONCHAIN_CONFIG_WATCH_ONCE.
+# NOAPPEND = change nothing, EXIT:<n> = fail, anything else = append it) and
+# writes the bound version — one line per call from bound-seq, default 42 —
+# to its --report-version path; fc `config slot` consumes slot-seq if
+# present, else prints slot.txt (default "0 1"). snapchain --check-config
+# fails iff the config contains "BAD". The date stub reads the fake clock
+# (starts at epoch 0, advanced by the sleep stub), so a slot with index > 0
+# computes a positive stagger wait deterministically. The watermark is
+# handed in via ONCHAIN_WATCH_WATERMARK per test (unset -> 0); watermark
+# advances are asserted via the "recording watermark" log line, since the
+# watermark deliberately lives only in the watcher's memory. Ticks run via
+# ONCHAIN_CONFIG_WATCH_ONCE.
 
 set -euo pipefail
 
@@ -28,10 +34,12 @@ setup() {
 #!/bin/bash
 subcmd=""
 config=""
+report=""
 prev=""
 for a in "$@"; do
     if [[ "$prev" == "config" ]]; then subcmd="$a"; fi
     if [[ "$prev" == "--config" ]]; then config="$a"; fi
+    if [[ "$prev" == "--report-version" ]]; then report="$a"; fi
     prev="$a"
 done
 here="$(dirname "$0")"
@@ -54,6 +62,10 @@ pull)
         "") echo "# merged-from-registry" >> "$config" ;;
         *) echo "$line" >> "$config" ;;
     esac
+    if [[ -n "$report" ]]; then
+        bound="$(consume "$here/bound-seq" 2>/dev/null || echo 42)"
+        printf '%s\n' "$bound" > "$report"
+    fi
     ;;
 slot)
     if [[ -f "$here/slot-seq" ]]; then
@@ -100,15 +112,14 @@ private_key = "not-a-real-key"
 EOF
 }
 
-# run_tick [env VAR=VAL ...] — one watcher tick in the sandbox. Watermark
-# file: cache/config.toml.version (write it before, inspect it after).
+# run_tick [env VAR=VAL ...] — one watcher tick in the sandbox. Pass the
+# watermark as ONCHAIN_WATCH_WATERMARK=N (the boot-to-watcher handoff).
 run_tick() {
     RC=0
     OUT="$(cd "$DIR" && env \
         PATH="$DIR:$PATH" TMPDIR="$DIR/tmp" \
         FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
         ONCHAIN_WATCH_NETWORK=mainnet \
-        ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml" \
         ONCHAIN_CONFIG_RESTART_CMD="touch $DIR/restarted" \
         ONCHAIN_CONFIG_WATCH_ONCE=1 \
         "$@" \
@@ -130,60 +141,78 @@ check() {
 not() { ! "$@"; }
 
 restarted() { [[ -f "$DIR/restarted" ]]; }
-watermark() { cat "$DIR/cache/config.toml.version" 2>/dev/null || echo missing; }
 no_stray_tmp() { ! find "$DIR/tmp" -mindepth 1 | grep -q .; }
 
 #### counter unchanged → version poll only, nothing else
 setup
 echo 7 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "unchanged: exits 0" [ "$RC" -eq 0 ]
 check "unchanged: no restart" not restarted
 check "unchanged: only the version call" [ "$(cat "$DIR/fc.calls")" = version ]
 
+#### counter BELOW the watermark (stale RPC view) → equally nothing
+setup
+echo 6 > "$DIR/version-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "stale gate: no restart" not restarted
+check "stale gate: no pull either" [ "$(cat "$DIR/fc.calls")" = version ]
+
 #### counter moved, document differs → validated restart
 setup
 echo 8 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+echo 8 > "$DIR/bound-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "change: exits 0" [ "$RC" -eq 0 ]
 check "change: restart triggered" restarted
 check "change: validated before restarting" grep -qx pull "$DIR/fc.calls"
 check "change: names the version and slot" grep -q "config version 8 (slot 0)" <<< "$OUT"
-check "change: watermark untouched (boot records it)" [ "$(watermark)" = 7 ]
+check "change: watermark not advanced (boot re-derives it)" \
+    not grep -q "recording watermark" <<< "$OUT"
 check "change: running config untouched" not grep -q merged-from-registry "$DIR/config.toml"
 check "change: no temp copies left" no_stray_tmp
 
 #### counter moved, document byte-identical → watermark only, no restart
 setup
 echo 8 > "$DIR/version-seq"
+echo 8 > "$DIR/bound-seq"
 echo NOAPPEND > "$DIR/pull-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "noop bump: exits 0" [ "$RC" -eq 0 ]
 check "noop bump: no restart" not restarted
-check "noop bump: watermark advanced" [ "$(watermark)" = 8 ]
-check "noop bump: says so" grep -q "does not change the rendered config" <<< "$OUT"
+check "noop bump: watermark advanced to the bound version" \
+    grep -q "version 8 does not change the rendered config; recording watermark" <<< "$OUT"
+
+#### trigger sees a new version but the pull lands on a stale backend → no watermark advance
+# (The bound version is what the pulled document actually is; recording the
+# unbound trigger version over stale content would swallow the real change.)
+setup
+echo 8 > "$DIR/version-seq"
+echo 7 > "$DIR/bound-seq"
+echo NOAPPEND > "$DIR/pull-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "stale bound: exits 0" [ "$RC" -eq 0 ]
+check "stale bound: no restart" not restarted
+check "stale bound: no watermark advance" not grep -q "recording watermark" <<< "$OUT"
+check "stale bound: names the stale view" grep -q "stale RPC view" <<< "$OUT"
 
 #### deliberately-bad document → caught before any restart
 setup
 echo 8 > "$DIR/version-seq"
+echo 8 > "$DIR/bound-seq"
 echo BAD > "$DIR/pull-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "bad config: exits 0" [ "$RC" -eq 0 ]
 check "bad config: NO restart" not restarted
 check "bad config: refuses loudly" grep -q "fails --check-config" <<< "$OUT"
-check "bad config: watermark untouched" [ "$(watermark)" = 7 ]
+check "bad config: watermark untouched" not grep -q "recording watermark" <<< "$OUT"
 check "bad config: no temp copies left" no_stray_tmp
 
 #### pull failure → no restart, retry later
 setup
 echo 8 > "$DIR/version-seq"
 echo EXIT:3 > "$DIR/pull-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "pull failure: exits 0" [ "$RC" -eq 0 ]
 check "pull failure: no restart" not restarted
 check "pull failure: logs error" grep -q "config pull for version 8 failed" <<< "$OUT"
@@ -191,8 +220,7 @@ check "pull failure: logs error" grep -q "config pull for version 8 failed" <<< 
 #### version poll failure (RPC down) → quiet retry
 setup
 : > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "poll failure: exits 0" [ "$RC" -eq 0 ]
 check "poll failure: no restart" not restarted
 check "poll failure: warns" grep -q "configVersion poll failed" <<< "$OUT"
@@ -200,18 +228,35 @@ check "poll failure: warns" grep -q "configVersion poll failed" <<< "$OUT"
 #### garbage slot output → no restart
 setup
 echo 8 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
 echo banana > "$DIR/slot.txt"
-run_tick
+run_tick ONCHAIN_WATCH_WATERMARK=7
 check "bad slot: no restart" not restarted
 check "bad slot: logs error" grep -q "cannot compute stagger slot" <<< "$OUT"
+
+#### an unreadable clock must not restart as if it were epoch 0
+setup
+echo 8 > "$DIR/version-seq"
+printf '#!/bin/bash\nexit 1\n' > "$DIR/date"
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "clock failure: exits 0" [ "$RC" -eq 0 ]
+check "clock failure: NO restart" not restarted
+check "clock failure: warns" grep -q "cannot read the clock" <<< "$OUT"
+
+#### a cmp I/O error (exit >= 2) must not masquerade as "changed"
+setup
+echo 8 > "$DIR/version-seq"
+printf '#!/bin/bash\nexit 2\n' > "$DIR/cmp" && chmod +x "$DIR/cmp"
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "cmp failure: exits 0" [ "$RC" -eq 0 ]
+check "cmp failure: NO restart" not restarted
+check "cmp failure: warns" grep -q "cannot compare" <<< "$OUT"
 
 #### stagger wait honored, then re-evaluated: counter reverted to watermark
 setup
 printf '8\n7\n' > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-echo "1 2" > "$DIR/slot.txt"   # epoch pinned to 0 → slot 1 waits 1 window
-run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
+echo 8 > "$DIR/bound-seq"
+echo "1 2" > "$DIR/slot.txt"   # fake clock starts at 0 → slot 1 waits 1 window
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
 check "reverted while waiting: exits 0" [ "$RC" -eq 0 ]
 check "reverted while waiting: waited for the window" grep -qx "slept 100" "$DIR/sleep.log"
 check "reverted while waiting: NO restart" not restarted
@@ -220,53 +265,51 @@ check "reverted while waiting: says so" grep -q "no longer applies" <<< "$OUT"
 #### re-evaluation catches a revert to identical content under a NEW version
 setup
 printf '8\n9\n' > "$DIR/version-seq"
+printf '8\n9\n' > "$DIR/bound-seq"
 printf '# merged-from-registry\nNOAPPEND\n' > "$DIR/pull-seq"
-echo 7 > "$DIR/cache/config.toml.version"
 echo "1 2" > "$DIR/slot.txt"
-run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
 check "content revert while waiting: NO restart" not restarted
 check "content revert while waiting: watermark set to the new version" \
-    [ "$(watermark)" = 9 ]
+    grep -q "version 9); recording watermark" <<< "$OUT"
 
 #### a still-standing change survives the re-evaluation and restarts
 setup
 printf '8\n8\n' > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
+printf '8\n8\n' > "$DIR/bound-seq"
 echo "1 2" > "$DIR/slot.txt"
-run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
 check "standing change: waited then restarted" restarted
 check "standing change: exactly one wait" [ "$(wc -l < "$DIR/sleep.log")" -eq 1 ]
 
 #### a mid-wait write that moves this node's slot re-enters the wait loop
 setup
 printf '8\n8\n8\n' > "$DIR/version-seq"
+printf '8\n8\n8\n' > "$DIR/bound-seq"
 printf '1 2\n2 3\n2 3\n' > "$DIR/slot-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick ONCHAIN_CONFIG_STAGGER_WINDOW=100
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_STAGGER_WINDOW=100
 check "slot shift: exits 0" [ "$RC" -eq 0 ]
 check "slot shift: waited once for the old slot, once for the new" \
     [ "$(wc -l < "$DIR/sleep.log")" -eq 2 ]
 check "slot shift: restarted only from the recomputed window" restarted
 check "slot shift: restart names the new slot" grep -q "(slot 2)" <<< "$OUT"
 
-#### restart command failure → loud, watermark untouched, watcher survives
+#### restart command failure → loud, watcher survives
 setup
 echo 8 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick ONCHAIN_CONFIG_RESTART_CMD=false
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_RESTART_CMD=false
 check "restart failure: exits 0" [ "$RC" -eq 0 ]
 check "restart failure: logged loudly" grep -q "restart command failed" <<< "$OUT"
-check "restart failure: watermark untouched" [ "$(watermark)" = 7 ]
+check "restart failure: watermark untouched" not grep -q "recording watermark" <<< "$OUT"
 
 #### loop mode: a failed restart does not silently kill the watcher
 setup
 echo 8 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
 (cd "$DIR" && env \
     PATH="$DIR:$PATH" TMPDIR="$DIR/tmp" \
     FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
     ONCHAIN_WATCH_NETWORK=mainnet \
-    ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml" \
+    ONCHAIN_WATCH_WATERMARK=7 \
     ONCHAIN_CONFIG_RESTART_CMD=false \
     ONCHAIN_CONFIG_POLL_INTERVAL=1 \
     "$SCRIPT" config.toml > "$DIR/loop.log" 2>&1 & echo $! > "$DIR/loop.pid")
@@ -279,18 +322,29 @@ check "loop mode: loop continued past the failure" \
 #### registry/rpc env propagate to the version poll
 setup
 echo 7 > "$DIR/version-seq"
-echo 7 > "$DIR/cache/config.toml.version"
-run_tick ONCHAIN_CONFIG_REGISTRY=0xabc ONCHAIN_CONFIG_RPC_URL=https://rpc.example
+run_tick ONCHAIN_WATCH_WATERMARK=7 \
+    ONCHAIN_CONFIG_REGISTRY=0xabc ONCHAIN_CONFIG_RPC_URL=https://rpc.example
 check "registry args: --registry forwarded" grep -qx 0xabc "$DIR/fc.version.args"
 check "registry args: --rpc-url forwarded" grep -qx https://rpc.example "$DIR/fc.version.args"
 
-#### no watermark file at all (fresh volume) → treated as 0, one catch-up pass
+#### no handoff watermark (fallback boot) → treated as 0, one catch-up pass
 setup
 echo 5 > "$DIR/version-seq"
+echo 5 > "$DIR/bound-seq"
 echo NOAPPEND > "$DIR/pull-seq"
 run_tick
-check "fresh volume: no restart when content already current" not restarted
-check "fresh volume: watermark seeded" [ "$(watermark)" = 5 ]
+check "no handoff: no restart when content already current" not restarted
+check "no handoff: watermark re-derived from the bound pull" \
+    grep -q "version 5 does not change the rendered config" <<< "$OUT"
+
+#### garbage handoff watermark → sanitized to 0, same catch-up
+setup
+echo 5 > "$DIR/version-seq"
+echo 5 > "$DIR/bound-seq"
+echo NOAPPEND > "$DIR/pull-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=banana
+check "garbage handoff: no restart, catch-up ran" \
+    grep -q "recording watermark" <<< "$OUT"
 
 #### missing required network env → refuses to start
 setup

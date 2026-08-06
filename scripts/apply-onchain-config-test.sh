@@ -12,13 +12,12 @@ FAILURES=0
 TESTS=0
 
 # Each test gets a fresh sandbox with stub binaries and a validator config.
-# Stub behavior is content-driven: the fc stub dispatches on the config
-# subcommand — `pull` records argv to fc.args and appends a marker to the
-# config (FC_STUB_APPEND overrides the marker, FC_STUB_NO_APPEND simulates a
-# pull that changes nothing); `version` records argv to fc.version.args and
-# prints FC_STUB_VERSION (default 42; FC_STUB_VERSION_EXIT fails just the
-# version read). FC_STUB_EXIT fails every fc call. Both append the subcommand
-# to fc.calls so tests can assert call order. The snapchain stub fails
+# Stub behavior is content-driven: the fc stub records `config pull` argv to
+# fc.args and appends a marker to the config (FC_STUB_APPEND overrides the
+# marker, FC_STUB_NO_APPEND simulates a pull that changes nothing,
+# FC_STUB_EXIT fails the pull), and writes FC_STUB_BOUND_VERSION (default
+# 42) to the --report-version path unless FC_STUB_NO_REPORT is set. Each
+# call appends its subcommand to fc.calls. The snapchain stub fails
 # --check-config iff the config contains "BAD". The watcher spawn is
 # intercepted by a stub (ONCHAIN_CONFIG_WATCH_BIN) that records its argv and
 # environment to watch.spawned — tests must never start the real watch loop.
@@ -28,20 +27,17 @@ setup() {
 #!/bin/bash
 subcmd=""
 config=""
+report=""
 prev=""
 for a in "$@"; do
     if [[ "$prev" == "config" ]]; then subcmd="$a"; fi
     if [[ "$prev" == "--config" ]]; then config="$a"; fi
+    if [[ "$prev" == "--report-version" ]]; then report="$a"; fi
     prev="$a"
 done
 echo "$subcmd" >> "$(dirname "$0")/fc.calls"
 [[ "${FC_STUB_EXIT:-0}" != 0 ]] && exit "${FC_STUB_EXIT}"
 case "$subcmd" in
-version)
-    printf '%s\n' "$@" > "$(dirname "$0")/fc.version.args"
-    [[ "${FC_STUB_VERSION_EXIT:-0}" != 0 ]] && exit "${FC_STUB_VERSION_EXIT}"
-    echo "${FC_STUB_VERSION:-42}"
-    ;;
 pull)
     printf '%s\n' "$@" > "$(dirname "$0")/fc.args"
     # Mirror real fc: it refuses read_node = true configs in write mode (it
@@ -53,6 +49,9 @@ pull)
     fi
     if [[ -z "${FC_STUB_NO_APPEND:-}" ]]; then
         echo "${FC_STUB_APPEND:-# merged-from-registry}" >> "$config"
+    fi
+    if [[ -n "$report" && -z "${FC_STUB_NO_REPORT:-}" ]]; then
+        printf '%s\n' "${FC_STUB_BOUND_VERSION:-42}" > "$report"
     fi
     ;;
 esac
@@ -69,8 +68,11 @@ echo "config OK"
 EOF
     cat > "$DIR/watch-stub" <<'EOF'
 #!/bin/bash
-{ echo "argv: $*"; echo "network: ${ONCHAIN_WATCH_NETWORK:-}"; } \
-    > "$(dirname "$0")/watch.spawned"
+{
+    echo "argv: $*"
+    echo "network: ${ONCHAIN_WATCH_NETWORK:-}"
+    echo "watermark: ${ONCHAIN_WATCH_WATERMARK:-}"
+} > "$(dirname "$0")/watch.spawned"
 EOF
     chmod +x "$DIR/fc" "$DIR/snapchain" "$DIR/watch-stub"
     cat > "$DIR/config.toml" <<'EOF'
@@ -245,7 +247,7 @@ no_stray_cache_files() {
         [[ -e "$f" ]] || continue # unexpanded glob on an empty dir
         name="$(basename "$f")"
         case "$name" in
-            config.toml | config.toml.version | config.toml.prev) ;;
+            config.toml | config.toml.prev) ;;
             *) return 1 ;;
         esac
     done
@@ -269,33 +271,31 @@ rm "$DIR/config.toml"
 run_script
 check "missing config: exits nonzero" [ "$RC" -ne 0 ]
 
-#### C9: watermark recorded on success, version read strictly before the pull
+#### C9: bound version reported by the pull becomes the watcher handoff
 setup
 run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "watermark: recorded from configVersion" \
-    grep -qx 42 "$DIR/cache/config.toml.version"
-check "watermark: version read before pull" \
-    [ "$(head -1 "$DIR/fc.calls")" = version ]
-check "watermark: version passed the derived network" \
-    grep -qx mainnet "$DIR/fc.version.args"
+check "watermark: pull asked to report the bound version" \
+    grep -qx -- --report-version "$DIR/fc.args"
+check "watermark: applied version logged" grep -q "applied configVersion 42" <<< "$OUT"
+check "watermark: handed to the watcher via env" \
+    grep -q "watermark: 42" "$DIR/watch.spawned"
+check "watermark: single fc call — no separate unbound version read" \
+    [ "$(cat "$DIR/fc.calls")" = pull ]
 
-#### C9: version read fails → boot anyway, no watermark, watcher still runs
+#### C9: pull reports no usable version → boot anyway, empty handoff
 setup
-run_script FC_STUB_VERSION_EXIT=9 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "version-read failure: exits 0" [ "$RC" -eq 0 ]
-check "version-read failure: merge still applied" \
-    grep -q merged-from-registry "$DIR/config.toml"
-check "version-read failure: no watermark written" \
-    not test -f "$DIR/cache/config.toml.version"
-check "version-read failure: warns" grep -q "could not read configVersion" <<< "$OUT"
-check "version-read failure: watcher still spawned" watcher_spawned
+run_script FC_STUB_NO_REPORT=1 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "no-report: exits 0" [ "$RC" -eq 0 ]
+check "no-report: merge still applied" grep -q merged-from-registry "$DIR/config.toml"
+check "no-report: warns" grep -q "no usable configVersion" <<< "$OUT"
+check "no-report: watcher spawned with empty watermark" \
+    grep -qx "watermark: " "$DIR/watch.spawned"
 
-#### C9: no cache configured → no version read at all
+#### C9: no cache configured → handoff still works
 setup
 run_script
-check "no cache: fc never asked for version" \
-    not grep -qx version "$DIR/fc.calls"
 check "no cache: watcher still spawned" watcher_spawned
+check "no cache: watermark still handed off" grep -q "watermark: 42" "$DIR/watch.spawned"
 
 #### C9: previous known-good rotated to .prev when the cache content changes
 setup
