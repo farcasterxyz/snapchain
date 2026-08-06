@@ -4,9 +4,17 @@
 //! node's consensus public key in the ordered, de-duplicated union of
 //! `validator_public_keys` across the config's `consensus.validator_sets`,
 //! and `count` is the size of that union. A node whose key is not in the
-//! document gets the sentinel `index == count` — it is being added before
-//! activation or removed by this very change, so restarting it cannot cost
-//! consensus quorum.
+//! document gets the sentinel `index == count`. The sentinel is SHARED: if
+//! one registry write removes several still-active validators at once, they
+//! all land in the same window and can restart together — operators should
+//! remove validators one write at a time. (In practice removed keys usually
+//! persist in older history entries and keep a real slot; the sentinel bites
+//! on wholesale history rewrites and fleet bootstrap.)
+//!
+//! The union deliberately spans ALL sets, not just the latest: a validator
+//! present only in older entries is still running and restartable, and every
+//! node must derive identical slots from the identical document. The cost is
+//! that retired-but-retained keys each add one idle window to the cycle.
 //!
 //! The rollout watcher (scripts/onchain-config-watch.sh) turns the pair into
 //! a wall-clock restart window: node `i` of `n` may only restart during
@@ -44,10 +52,8 @@ pub fn run(args: ConfigSlotArgs) -> Result<(), BoxedError> {
         .and_then(|c| c.as_table())
         .ok_or("config has no [consensus] table")?;
 
-    let private_key = consensus
-        .get("private_key")
-        .and_then(|k| k.as_str())
-        .ok_or("config has no consensus.private_key")?;
+    let env_key = std::env::var("SNAPCHAIN_CONSENSUS__PRIVATE_KEY").ok();
+    let private_key = effective_private_key(consensus, env_key.as_deref())?;
     let public_key_hex = derive_public_key_hex(private_key)?;
 
     let sets: Vec<ValidatorSetConfig> = consensus
@@ -60,6 +66,27 @@ pub fn run(args: ConfigSlotArgs) -> Result<(), BoxedError> {
     let (index, count) = slot_in_sets(&public_key_hex, &sets)?;
     println!("{index} {count}");
     Ok(())
+}
+
+/// The private key this config will actually run with. The node's figment
+/// loader overlays `SNAPCHAIN_`-prefixed env vars (split on `__`) over the
+/// file (src/cfg.rs), so `SNAPCHAIN_CONSENSUS__PRIVATE_KEY` — when set — is
+/// the node's real identity and must drive the slot; a file-only read would
+/// silently park such a node in the shared sentinel window.
+fn effective_private_key<'a>(
+    consensus: &'a toml::Table,
+    env_key: Option<&'a str>,
+) -> Result<&'a str, BoxedError> {
+    if let Some(key) = env_key {
+        return Ok(key);
+    }
+    consensus
+        .get("private_key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| {
+            "config has no consensus.private_key (and SNAPCHAIN_CONSENSUS__PRIVATE_KEY is unset)"
+                .into()
+        })
 }
 
 /// Derive the 32-byte Ed25519 public key from the config's private key and
@@ -155,9 +182,27 @@ mod tests {
     #[test]
     fn unknown_key_gets_sentinel_trailing_slot() {
         let sets = [set(&["aa", "bb"])];
-        // Not in the set: joining or leaving the fleet, either way its restart
-        // cannot cost quorum — park it in the slot after every member's.
+        // Not in the document: park it in the shared slot after every
+        // member's (see the module doc for the sharing caveat).
         assert_eq!(slot_in_sets(RFC_PUBLIC, &sets).unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn env_overlay_wins_over_file_key() {
+        let consensus: toml::Table =
+            toml::from_str(&format!("private_key = \"{RFC_SEED}\"")).unwrap();
+        let empty = toml::Table::new();
+
+        // Env set: it is the node's real identity, in both directions.
+        assert_eq!(effective_private_key(&consensus, Some("aa")).unwrap(), "aa");
+        assert_eq!(effective_private_key(&empty, Some("aa")).unwrap(), "aa");
+        // Env unset: the file decides; neither is an error naming both.
+        assert_eq!(effective_private_key(&consensus, None).unwrap(), RFC_SEED);
+        let err = effective_private_key(&empty, None).unwrap_err().to_string();
+        assert!(
+            err.contains("SNAPCHAIN_CONSENSUS__PRIVATE_KEY"),
+            "got: {err}"
+        );
     }
 
     #[test]
