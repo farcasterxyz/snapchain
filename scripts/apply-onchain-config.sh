@@ -115,11 +115,16 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
     if [[ -n "$CACHE_PATH" ]]; then
         # The merged config contains consensus.private_key: keep the cache
         # non-world-readable and write it atomically so a crash mid-copy can't
-        # leave a truncated last-known-good.
-        mkdir -p "$(dirname "$CACHE_PATH")"
-        (umask 077 && cp "$CONFIG_PATH" "$CACHE_PATH.tmp")
-        mv "$CACHE_PATH.tmp" "$CACHE_PATH"
-        log "pull OK; cached last-known-good to $CACHE_PATH"
+        # leave a truncated last-known-good. A cache-write failure (full or
+        # read-only volume) must not stop the boot — config.toml is already
+        # pulled and validated at this point.
+        if { mkdir -p "$(dirname "$CACHE_PATH")" \
+            && (umask 077 && cp "$CONFIG_PATH" "$CACHE_PATH.tmp") \
+            && mv "$CACHE_PATH.tmp" "$CACHE_PATH"; }; then
+            log "pull OK; cached last-known-good to $CACHE_PATH"
+        else
+            log "WARNING: pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
+        fi
     else
         log "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"
     fi

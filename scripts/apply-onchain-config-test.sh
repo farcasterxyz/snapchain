@@ -105,6 +105,16 @@ perms="$(stat -c '%A' "$DIR/cache/config.toml" 2>/dev/null \
     || stat -f '%Sp' "$DIR/cache/config.toml")" # GNU stat, BSD fallback
 check "success: cache not world-readable ($perms)" [ "$perms" = "-rw-------" ]
 
+#### cache volume unwritable → warn but still boot (config is already valid)
+setup
+mkdir -p "$DIR/rocache"
+chmod 555 "$DIR/rocache"
+run_script ONCHAIN_CONFIG_CACHE="$DIR/rocache/sub/config.toml"
+chmod 755 "$DIR/rocache"
+check "unwritable cache: exits 0" [ "$RC" -eq 0 ]
+check "unwritable cache: merge still applied" grep -q merged-from-registry "$DIR/config.toml"
+check "unwritable cache: warns" grep -q "failed to write last-known-good" <<< "$OUT"
+
 #### argument construction
 setup
 run_script ONCHAIN_CONFIG_REGISTRY=0xabc ONCHAIN_CONFIG_RPC_URL=https://rpc.example

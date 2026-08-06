@@ -6,5 +6,7 @@
 /Dockerfile
 /Makefile
 README.md
-/scripts
+# Exclude the directory's children individually (not the directory itself) so
+# the negation below works under every .dockerignore matcher implementation.
+/scripts/*
 !/scripts/apply-onchain-config.sh
