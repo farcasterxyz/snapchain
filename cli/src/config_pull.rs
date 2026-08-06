@@ -5,7 +5,14 @@
 //! `farcasterxyz/contracts` (`docs/snapchain-config-registry.md`). This module is
 //! the consumer side: it replaces exactly three keys in the local file —
 //! `consensus.validator_sets`, `gossip.bootstrap_peers`, `gossip.direct_peers` —
-//! and leaves everything else, `consensus.private_key` above all, untouched.
+//! and leaves every other key's *value*, `consensus.private_key` above all,
+//! untouched. The file's *formatting* does not survive: the merge parses into
+//! `toml::Table` and re-serializes, so the first pull strips comments and
+//! re-sorts keys alphabetically. Operators who keep annotations in
+//! `config.toml`, or tooling that greps it by shape, must not point this
+//! command at that file. (Preserving formatting would mean `toml_edit`; the
+//! deploy scripts regenerate the file from a heredoc every boot, so nothing on
+//! the managed path keeps comments to lose.)
 //!
 //! Validation here is structural and covers only the three managed keys.
 //! Full-config validation belongs to the node binary (`snapchain --check-config`),
@@ -146,7 +153,8 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     }
 
     let registry = resolve_registry(args.registry.as_deref(), network)?;
-    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network)?;
+    let env_l1_rpc_url = std::env::var("SNAPCHAIN_L1_RPC_URL").ok();
+    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network, env_l1_rpc_url.as_deref())?;
 
     // Deliberately not printing the RPC URL: hosted-provider URLs carry the
     // API key in the path, and this line lands in log collectors.
@@ -174,7 +182,7 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
         .map_err(|e| sanitized_toml_error("merged config does not re-parse", &merged, &e))?;
 
     if args.dry_run {
-        print!("{}", redact_private_key(local));
+        print!("{}", redact_secrets(local));
         return Ok(());
     }
 
@@ -261,16 +269,32 @@ fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> S
 }
 
 /// Dry-run output goes to stdout, which deployment pipelines capture into log
-/// collectors — mask the private key. The three managed keys, the thing
-/// dry-run exists to inspect, are unaffected.
-fn redact_private_key(mut merged: toml::Table) -> String {
-    if let Some(consensus) = merged.get_mut("consensus").and_then(|c| c.as_table_mut()) {
-        if consensus.contains_key("private_key") {
-            consensus.insert(
-                "private_key".to_string(),
+/// collectors — mask every credential-bearing key the node config can hold,
+/// not just the private key: `l1_rpc_url` carries the provider API key in its
+/// path (the same reason this module never prints the RPC URL), `rpc_auth` /
+/// `admin_rpc_auth` are credentials outright, and `snapshot.aws_*` are AWS
+/// keys. The three managed keys, the thing dry-run exists to inspect, are
+/// unaffected. Keys are redacted only when present and non-empty, so the
+/// output still shows which of them the config sets.
+fn redact_secrets(mut merged: toml::Table) -> String {
+    fn redact(table: &mut toml::Table, key: &str) {
+        let is_set = matches!(table.get(key), Some(toml::Value::String(s)) if !s.is_empty());
+        if is_set {
+            table.insert(
+                key.to_string(),
                 toml::Value::String("<redacted>".to_string()),
             );
         }
+    }
+    for key in ["l1_rpc_url", "rpc_auth", "admin_rpc_auth"] {
+        redact(&mut merged, key);
+    }
+    if let Some(consensus) = merged.get_mut("consensus").and_then(|c| c.as_table_mut()) {
+        redact(consensus, "private_key");
+    }
+    if let Some(snapshot) = merged.get_mut("snapshot").and_then(|c| c.as_table_mut()) {
+        redact(snapshot, "aws_access_key_id");
+        redact(snapshot, "aws_secret_access_key");
     }
     toml::to_string(&merged).expect("table serialized successfully before redaction")
 }
@@ -411,18 +435,31 @@ fn resolve_rpc_url(
     flag: Option<String>,
     local: &toml::Table,
     network: NetworkArg,
+    env_l1_rpc_url: Option<&str>,
 ) -> Result<String, BoxedError> {
     if let Some(url) = flag {
         return Ok(url);
     }
     match network {
-        // Only mainnet may fall back to the config's l1_rpc_url: every node
-        // points that URL at Ethereum mainnet (it exists for ENS resolution),
-        // which is also where the mainnet registry lives.
-        NetworkArg::Mainnet => match local.get("l1_rpc_url").and_then(|v| v.as_str()) {
-            Some(url) if !url.is_empty() => Ok(url.to_string()),
-            _ => Err("no --rpc-url given and the config file sets no l1_rpc_url".into()),
-        },
+        // Only mainnet may fall back to the l1_rpc_url the node runs with:
+        // every node points that URL at Ethereum mainnet (it exists for ENS
+        // resolution), which is also where the mainnet registry lives. The
+        // SNAPCHAIN_L1_RPC_URL env overlay wins over the file value, mirroring
+        // the node's own loader — same rule as the fc_network and read_node
+        // overlays above.
+        NetworkArg::Mainnet => {
+            let from_env = env_l1_rpc_url.filter(|url| !url.is_empty());
+            let from_file = local
+                .get("l1_rpc_url")
+                .and_then(|v| v.as_str())
+                .filter(|url| !url.is_empty());
+            match from_env.or(from_file) {
+                Some(url) => Ok(url.to_string()),
+                None => Err("no --rpc-url given and neither the config file nor \
+                             SNAPCHAIN_L1_RPC_URL sets an l1_rpc_url"
+                    .into()),
+            }
+        }
         NetworkArg::Testnet => Err(
             "the testnet registry lives on Sepolia; pass --rpc-url with a Sepolia endpoint (the \
              config's l1_rpc_url intentionally points at Ethereum mainnet for ENS and is not a \
@@ -442,6 +479,40 @@ fn http_client() -> Result<reqwest::Client, BoxedError> {
         .map_err(|e| format!("cannot build HTTP client: {e}").into())
 }
 
+/// POST a JSON-RPC request and parse the response body, buffering at most
+/// MAX_RESPONSE_BYTES. Every RPC read goes through this cap, not just the
+/// document fetch: this binary runs on the validator boot path, and a broken
+/// or malicious endpoint must not be able to OOM it with an unbounded body.
+/// reqwest errors embed the request URL, which routinely carries an RPC API
+/// key in its path — strip it (without_url) before the message reaches logs.
+async fn post_json_capped(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    request: &serde_json::Value,
+    what: &str,
+) -> Result<serde_json::Value, BoxedError> {
+    let mut http_response = client
+        .post(rpc_url)
+        .json(request)
+        .send()
+        .await
+        .map_err(|e| format!("{what} request failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("{what} HTTP error: {}", e.without_url()))?;
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = http_response
+        .chunk()
+        .await
+        .map_err(|e| format!("{what} read failed: {}", e.without_url()))?
+    {
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(format!("{what} response exceeds {MAX_RESPONSE_BYTES} bytes").into());
+        }
+    }
+    serde_json::from_slice(&body).map_err(|e| format!("{what} response is not JSON: {e}").into())
+}
+
 /// Refuse to read a registry-shaped address on the wrong chain — the one
 /// mistake the mainnet-on-L1 / testnet-on-Sepolia split makes easy.
 async fn check_chain_id(
@@ -455,17 +526,7 @@ async fn check_chain_id(
     let request = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": [],
     });
-    let response: serde_json::Value = client
-        .post(rpc_url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| format!("eth_chainId request failed: {}", e.without_url()))?
-        .error_for_status()
-        .map_err(|e| format!("eth_chainId HTTP error: {}", e.without_url()))?
-        .json()
-        .await
-        .map_err(|e| format!("eth_chainId response is not JSON: {}", e.without_url()))?;
+    let response = post_json_capped(client, rpc_url, &request, "eth_chainId").await?;
     let got = response
         .get("result")
         .and_then(|r| r.as_str())
@@ -498,29 +559,7 @@ async fn fetch_config_toml(
             "latest",
         ],
     });
-    // reqwest errors embed the request URL, which routinely carries an RPC API
-    // key in its path — strip it (without_url) before the message reaches logs.
-    let mut http_response = client
-        .post(rpc_url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| format!("eth_call request failed: {}", e.without_url()))?
-        .error_for_status()
-        .map_err(|e| format!("eth_call HTTP error: {}", e.without_url()))?;
-    let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = http_response
-        .chunk()
-        .await
-        .map_err(|e| format!("eth_call read failed: {}", e.without_url()))?
-    {
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(format!("eth_call response exceeds {MAX_RESPONSE_BYTES} bytes").into());
-        }
-    }
-    let response: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|e| format!("eth_call response is not JSON: {e}"))?;
+    let response = post_json_capped(client, rpc_url, &request, "eth_call").await?;
     if let Some(error) = response.get("error") {
         // Deliberately not echoing the raw error object: providers reflect
         // request details into it, including credential-bearing endpoint URLs.
@@ -626,7 +665,7 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
 
     // Entry 0 seeds the node's active-set scan unconditionally, so it must be
     // the genesis entry: effective_at 0 AND covering every shard the document
-    // mentions (spec §2.3). Operator-owned data, so warn rather than refuse.
+    // mentions (spec §2.3).
     let all_shards: std::collections::BTreeSet<u32> = sets
         .iter()
         .flat_map(|s| s.shard_ids.iter().copied())
@@ -1039,21 +1078,51 @@ bootstrap_peers = "x"
         let local: toml::Table =
             toml::from_str(r#"l1_rpc_url = "https://eth.example.invalid""#).unwrap();
         assert_eq!(
-            resolve_rpc_url(None, &local, NetworkArg::Mainnet).unwrap(),
+            resolve_rpc_url(None, &local, NetworkArg::Mainnet, None).unwrap(),
             "https://eth.example.invalid"
         );
         // l1_rpc_url points at Ethereum mainnet (ENS) on every node — never a
         // valid endpoint for the Sepolia testnet registry.
-        let err = resolve_rpc_url(None, &local, NetworkArg::Testnet)
+        let err = resolve_rpc_url(None, &local, NetworkArg::Testnet, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("Sepolia"), "got: {err}");
-        assert!(resolve_rpc_url(None, &local, NetworkArg::Devnet).is_err());
+        assert!(resolve_rpc_url(None, &local, NetworkArg::Devnet, None).is_err());
         // An explicit flag always wins, on every network.
         assert_eq!(
-            resolve_rpc_url(Some("https://x".into()), &local, NetworkArg::Testnet).unwrap(),
+            resolve_rpc_url(Some("https://x".into()), &local, NetworkArg::Testnet, None).unwrap(),
             "https://x"
         );
+    }
+
+    #[test]
+    fn rpc_url_fallback_honors_the_l1_rpc_url_env_overlay() {
+        // The node's loader lets SNAPCHAIN_L1_RPC_URL override the file value;
+        // the fallback must read the URL the node actually runs with.
+        let local: toml::Table =
+            toml::from_str(r#"l1_rpc_url = "https://stale.example.invalid""#).unwrap();
+        assert_eq!(
+            resolve_rpc_url(
+                None,
+                &local,
+                NetworkArg::Mainnet,
+                Some("https://live.example.invalid")
+            )
+            .unwrap(),
+            "https://live.example.invalid"
+        );
+        // An empty overlay is the node default, not a configured value.
+        let empty = toml::Table::new();
+        assert!(resolve_rpc_url(None, &empty, NetworkArg::Mainnet, Some("")).is_err());
+        // The overlay never turns into a testnet fallback: it points at
+        // Ethereum mainnet just like the file value.
+        assert!(resolve_rpc_url(
+            None,
+            &local,
+            NetworkArg::Testnet,
+            Some("https://live.example.invalid")
+        )
+        .is_err());
     }
 
     /// Pins the sol! signature to the selector `forge inspect` reports for the
@@ -1085,12 +1154,44 @@ bootstrap_peers = "x"
     }
 
     #[test]
-    fn dry_run_output_redacts_private_key() {
-        let merged: toml::Table =
-            toml::from_str(&format!("[consensus]\nprivate_key = \"{PRIVATE_KEY}\"\n")).unwrap();
-        let printed = redact_private_key(merged);
-        assert!(!printed.contains(PRIVATE_KEY));
+    fn dry_run_output_redacts_every_secret_bearing_key() {
+        let merged: toml::Table = toml::from_str(&format!(
+            r#"
+l1_rpc_url = "https://mainnet.example.com/v2/API_KEY_IN_PATH"
+rpc_auth = "user:RPC_SECRET"
+admin_rpc_auth = "admin:ADMIN_SECRET"
+
+[consensus]
+private_key = "{PRIVATE_KEY}"
+
+[snapshot]
+aws_access_key_id = "AKIA_ACCESS_KEY"
+aws_secret_access_key = "AWS_SECRET_VALUE"
+"#
+        ))
+        .unwrap();
+        let printed = redact_secrets(merged);
+        for secret in [
+            PRIVATE_KEY,
+            "API_KEY_IN_PATH",
+            "RPC_SECRET",
+            "ADMIN_SECRET",
+            "AKIA_ACCESS_KEY",
+            "AWS_SECRET_VALUE",
+        ] {
+            assert!(!printed.contains(secret), "leaked {secret}: {printed}");
+        }
         assert!(printed.contains("<redacted>"));
+    }
+
+    #[test]
+    fn dry_run_redaction_leaves_empty_and_absent_secrets_alone() {
+        // Empty strings are the node's defaults for these keys; redacting them
+        // would hide which secrets the config actually sets.
+        let merged: toml::Table = toml::from_str("l1_rpc_url = \"\"\n").unwrap();
+        let printed = redact_secrets(merged);
+        assert!(printed.contains("l1_rpc_url = \"\""), "got: {printed}");
+        assert!(!printed.contains("<redacted>"));
     }
 
     #[test]
