@@ -174,12 +174,13 @@ pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result
 /// Mirrors `ValidatorSetConfig` in `snapchain/src/consensus/consensus.rs`.
 /// Redeclared locally so the CLI doesn't depend on snapchain proper at runtime;
 /// the dev-dependency parity test asserts the two shapes stay identical.
+/// Shared with `config slot`, which reads the same shape out of a merged file.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ValidatorSetConfig {
-    effective_at: u64,
-    validator_public_keys: Vec<String>,
-    shard_ids: Vec<u32>,
+pub(crate) struct ValidatorSetConfig {
+    pub(crate) effective_at: u64,
+    pub(crate) validator_public_keys: Vec<String>,
+    pub(crate) shard_ids: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,7 +347,7 @@ fn effective_read_node(
 /// Render a TOML error without echoing the offending source line. The local
 /// config contains the consensus private key; the default error Display quotes
 /// the source line, which would land verbatim in captured stderr.
-fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> String {
+pub(crate) fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> String {
     match err.span() {
         Some(span) => {
             let line = source[..span.start.min(source.len())].matches('\n').count() + 1;
