@@ -24,8 +24,10 @@
 //!
 //! Scopes are stored as a `repeated int32` list in `KeyAddBody`, but evaluated as a `u64`
 //! bitmask: bit N is set iff `MessageType` value N is allowed. Admission check is one `AND`.
-//! `MessageType` enum values currently top out at 17 (`MESSAGE_TYPE_KEY_REMOVE`), so a `u64`
-//! comfortably fits the full table with headroom.
+//! `MessageType` enum values currently top out at 21 (`MESSAGE_TYPE_CHANNEL_MODERATE`), so a `u64`
+//! comfortably fits the full table with headroom. Only a subset is ever an admissible scope —
+//! `validate_key_add_scopes` denies the custody-level and not-yet-mergeable types — so bits for
+//! those values are never set on a persisted record.
 //!
 //! Mask construction is O(scopes.len()) and runs once per read; the per-message check itself
 //! is O(1). The record is not mutated to cache the mask — `GaslessKeyRecord` intentionally

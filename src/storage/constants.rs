@@ -60,6 +60,16 @@ pub enum RootPrefix {
     /* Gasless-key nonces (user + app counters for KEY_ADD / KEY_REMOVE replay protection).
      * "Gasless" distinguishes these from on-chain signer events and from storage-layer "keys". */
     GaslessKey = 23,
+
+    /* Shard-0 channel slot indexes and per-channel counters. */
+    Channel = 24,
+
+    /* Channel-follow index derived from reactions, on the author's own data shard.
+     * Deliberately NOT a sub-index of `Channel` above: that prefix holds shard-0
+     * channel authority and its data-shard replicas, is scanned wholesale as a test
+     * fixture, and is the natural target of any future "reset the channel replica"
+     * range delete — none of which should touch rows derived from local reactions. */
+    ChannelFollow = 25,
 }
 
 /** Copied from the JS code */
@@ -75,6 +85,10 @@ pub enum UserPostfix {
     UserDataMessage = 6,
     UsernameProofMessage = 7,
     LendStorageMessage = 8,
+    ChannelUpdateMessage = 9,
+    ChannelMemberMessage = 10,
+    ChannelPinMessage = 11,
+    ChannelModerateMessage = 12,
 
     // Add new message types here
     // NOTE: If you add a new message type, make sure that it is only used to store Message protobufs.
@@ -143,6 +157,11 @@ pub enum UserPostfix {
      * counted here — they have their own cap at the L2 KeyRegistry. Absent entry == 0;
      * decrementing to 0 deletes the entry to keep the index sparse. */
     GaslessKeyCountByFid = 107,
+
+    ChannelUpdateAdds = 108,
+    ChannelMemberAdds = 109,
+    ChannelPinAdds = 110,
+    ChannelModerateAdds = 111,
 }
 
 impl UserPostfix {
@@ -162,4 +181,13 @@ pub enum OnChainEventPostfix {
 
     #[allow(dead_code)] // TODO
     IdRegisterByCustodyAddress = 53,
+
+    // Reserved: no by-fid channel index is materialized — the record stores the owner
+    // address only, and resolving it to an fid is left to the read/query layer. Kept to
+    // reserve the discriminant against accidental reuse.
+    #[allow(dead_code)]
+    ChannelRegisterByFid = 54,
+    ChannelRegisterByChannelKey = 55,
+    ChannelRegisterChannelKeyByLabel = 56,
+    ChannelRegisterByOwnerAddress = 57,
 }

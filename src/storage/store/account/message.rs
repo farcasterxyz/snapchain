@@ -74,6 +74,14 @@ pub fn type_to_set_postfix(message_type: MessageType) -> Result<UserPostfix, Hub
         return Ok(UserPostfix::LendStorageMessage);
     }
 
+    match message_type {
+        MessageType::ChannelUpdate => return Ok(UserPostfix::ChannelUpdateMessage),
+        MessageType::ChannelMember => return Ok(UserPostfix::ChannelMemberMessage),
+        MessageType::ChannelPin => return Ok(UserPostfix::ChannelPinMessage),
+        MessageType::ChannelModerate => return Ok(UserPostfix::ChannelModerateMessage),
+        _ => {}
+    }
+
     return Err(HubError {
         code: "internal_error".to_string(),
         message: format!(
@@ -198,6 +206,30 @@ pub fn get_from_db_or_txn(
     }
 }
 
+/// Rejects a `page_token` that does not sit inside `prefix`.
+///
+/// `RocksDB::get_iterator_options` uses the token as the scan's lower bound
+/// (or, when reversed, its upper bound) *instead of* the prefix, so a token from
+/// outside the prefix widens the range rather than narrowing it. The channel and
+/// channel-follow enumerators identify a row by key length alone, and every
+/// channel's keys share a length — so without this check a token minted for one
+/// channel would return a different channel's rows under the requested channel
+/// id — or, on a by-fid index, another fid's rows. An empty token is
+/// out-of-prefix by the same test: it makes the scan start
+/// at the front of the column family. Callers that mean "first page" must pass
+/// `None`; the RPC layer normalizes an empty token to `None` before it gets here.
+pub(crate) fn require_page_token_in_prefix(
+    prefix: &[u8],
+    page_options: &PageOptions,
+) -> Result<(), HubError> {
+    match &page_options.page_token {
+        Some(token) if !token.starts_with(prefix) => Err(HubError::invalid_parameter(
+            "page token does not belong to the requested index",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn get_message_by_key(
     db: &RocksDB,
     txn: &RocksDbTransactionBatch,
@@ -273,7 +305,7 @@ where
         },
     )?;
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key.to_vec())
     } else {
         None
@@ -287,7 +319,7 @@ where
 
 #[inline]
 pub fn message_encode(message: &MessageProto) -> Vec<u8> {
-    if message.data_bytes.is_some() && message.data_bytes.as_ref().unwrap().len() > 0 {
+    if message.data_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
         // Clone the message
         let mut cloned = message.clone();
         cloned.data = None;
@@ -300,7 +332,7 @@ pub fn message_encode(message: &MessageProto) -> Vec<u8> {
 
 #[inline]
 pub fn message_bytes_decode(msg: &mut MessageProto) {
-    if msg.data_bytes.is_some() && msg.data_bytes.as_ref().unwrap().len() > 0 {
+    if msg.data_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
         if let Ok(msg_data) = MessageData::decode(msg.data_bytes.as_ref().unwrap().as_slice()) {
             msg.data = Some(msg_data);
         } else {

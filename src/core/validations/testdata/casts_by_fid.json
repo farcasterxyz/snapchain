@@ -1,0 +1,158 @@
+{
+  "messages": [
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": {
+            "fid": 548,
+            "hash": "0x1178b3a997d99aee5754be582283c98e45db9321"
+          },
+          "parentUrl": null,
+          "text": "Ok when I first saw the name I thought \"oh dear, did someone invent *yet another* web3 dating app?\" 😛",
+          "embeds": [],
+          "mentionsPositions": [],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [
+            231289
+          ],
+          "parentCastId": null,
+          "parentUrl": "https://warpcast.com/~/channel/ama",
+          "text": "Welcome to , co-Executive Director of the Ethereum Foundation!\n\nHe's kindly agreed to do an AMA — starts in ~1 hour at 4:00pm ET.\n\nReply with your questions below!",
+          "embeds": [
+            {
+              "url": "https://imagedelivery.net/BXluQx4ige9GuW0Ia56BHw/a9a52611-310a-4624-6ba3-fc043f00eb00/original"
+            }
+          ],
+          "mentionsPositions": [
+            11
+          ],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": null,
+          "parentUrl": null,
+          "text": "anybody has an etherscan link to this?\n\nhttps://blockworks.co/news/boc-investment-arm-tokenized-notes",
+          "embeds": [
+            {
+              "url": "https://blockworks.co/news/boc-investment-arm-tokenized-notes"
+            }
+          ],
+          "mentionsPositions": [],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": {
+            "fid": 1,
+            "hash": "0x1299c0c4aac7f8559fda004b61f9e499821ff186"
+          },
+          "parentUrl": null,
+          "text": "https://warpcast.com/farcaster/0xdd7d151a",
+          "embeds": [
+            {
+              "castId": {
+                "fid": 1,
+                "hash": "0xdd7d151a3814c0c3b320ff19df3a43051bd2d494"
+              }
+            }
+          ],
+          "mentionsPositions": [],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": {
+            "fid": 1,
+            "hash": "0x1299c0c4aac7f8559fda004b61f9e499821ff186"
+          },
+          "parentUrl": null,
+          "text": "We'd also like to thank Solana Name Service for sponsoring the first 10 transactions for 10K+ Farcaster users.\n\nA bit more about SNS: Solana Name Service (SNS) maps .sol domain names to on-chain data, making it easy to humanize your transactions within the Solana ecosystem. Swap confusing wallet addresses for simple, memorable names like \"farcaster.sol.\" Claim your unique .sol name today and make your mark in the Solana ecosystem with https://sns.id\n\nTwitter: https://x.com/sns\nDiscord: https://discord.sns.id",
+          "embeds": [
+            {
+              "url": "https://sns.id"
+            }
+          ],
+          "mentionsPositions": [],
+          "type": "LONG_CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [
+            4995
+          ],
+          "parentCastId": {
+            "fid": 472,
+            "hash": "0x9d2aeefe38dd45c1fb4eda9f473d3ca64e8dfd64"
+          },
+          "parentUrl": null,
+          "text": "im a big xmtp fan, texting people via lens or converse from  from time to time",
+          "embeds": [],
+          "mentionsPositions": [
+            60
+          ],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": null,
+          "parentUrl": null,
+          "text": "This is a test fweet (or whatever term the farcaster marketing department came up with to make its tweets sound like something different and original)\n\nHullo world!",
+          "embeds": [],
+          "mentionsPositions": [],
+          "type": "CAST"
+        }
+      }
+    },
+    {
+      "data": {
+        "castAddBody": {
+          "embedsDeprecated": [],
+          "mentions": [],
+          "parentCastId": {
+            "fid": 532378,
+            "hash": "0x8d9d685813639c1270b139b83718ad69254116f7"
+          },
+          "parentUrl": null,
+          "text": "I'm not trying to be sassy, I was just trying to understand your question! always happy to answer questions, and clear up confusion. i tagged them bc they run the Clanker Ecosystem Fund, so any questions related to the funding should be answered by them. \n\nto clarify, the dev of that project reached out to dish on X about their project. dish included me in their first meeting bc he knew he was about to step back from clanker (dish, myself, and quazia all take these types of meetings pretty frequently, I did 3 today and am about to go into another one). a bit after that we had another meeting with the dev, that was me and quazia, where we encouraged them to bring their project to Farcaster since it was X only at that point. we demoed their project, helped them get a beta testing cohort on farcaster, and have worked with them to get better reach on both farcaster and X, all things we happily do for all Clanker Projects. \n\nwe intentionally made Adrienne and Nounish the stewards of the fund so that there was separation between the internal team and who was making the funding decisions.",
+          "embeds": [],
+          "mentionsPositions": [],
+          "type": "TEN_K_CAST"
+        }
+      }
+    }
+  ]
+}

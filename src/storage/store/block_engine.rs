@@ -1,20 +1,26 @@
 use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
     HeartbeatEventBody, HubEvent, MergeMessageBody, MessageType, OnChainEvent, ShardChunkWitness,
-    Transaction,
+    StoreType, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
+    make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberState,
+    ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef,
+    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef,
+    DerivedIndexGate, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, StoreOptions,
+    VerificationStore, VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
+use crate::storage::store::stores::{Limits, StoreLimits};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
@@ -22,6 +28,8 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::u32;
 use thiserror::Error;
@@ -65,6 +73,9 @@ pub enum MessageValidationError {
     #[error("invalid message type")]
     InvalidMessageType,
 
+    #[error("verification timestamp predates shard-zero activation")]
+    VerificationTimestampBeforeActivation,
+
     #[error("insufficient storage")]
     InsufficientStorage,
 
@@ -73,6 +84,226 @@ pub enum MessageValidationError {
 
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
+}
+
+// WHY SHARD-0 VERIFICATION TOMBSTONES ARE PERMANENT, AND THEREFORE WHY THEY NEED A CAP.
+//
+// Unlike the data shard's pruned store, shard 0 never reclaims a tombstone. Do not "clean this
+// up" by aging, pruning, or reclaiming them: dropping a tombstone empties the address's logical
+// key, which lets anyone re-gossip the owner's old post-V21-signed add. Shard 0 merges it (LWW
+// against nothing), fans it out, and force-override replay re-imposes it on the data shard
+// unconditionally — resurrecting a verification its owner deliberately removed. Pre-V21 pruning
+// had the same hole bounded by plain LWW; force-override amplifies it. Permanent-but-bounded is
+// the design, and the bound is what keeps "permanent" affordable.
+//
+// Legacy verification limits ran into the hundreds, so this floor lets a fid shed a large
+// pre-V21 verification set. Larger storage allocations scale the bound through `max_messages`.
+// The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
+// shard-0 rows.
+const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
+const CHANNEL_MODERATOR_CAP: u32 = 10;
+
+/// The complete author-role axis of T1. `Other` includes both a never-seen author and a removed
+/// or banned author; those states carry no authority except through an explicit self rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelAuthorRole {
+    Owner,
+    Moderator,
+    Member,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelAuthorityDecision {
+    Allowed,
+    Unauthorized,
+    InvalidTargetState,
+    Banned,
+    OwnerUnbannable,
+}
+
+/// Author fid == target fid. Must stay a distinct type from `TargetIsOwner`: the two are both
+/// boolean and sit in nearby argument slots of `channel_member_authority`, and transposing them
+/// disarms the owner-unbannable floor — `target_is_owner` would then read "author banned itself",
+/// admitting a moderator's ban of the channel owner. Tests cannot backstop this: the only
+/// end-to-end owner-ban case is a self-ban, where both values are `true` and a swap is invisible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IsSelf(pub bool);
+
+/// Target fid == the registry-resolved owner fid. See `IsSelf` for why this is not a bare `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TargetIsOwner(pub bool);
+
+enum ChannelAdmissionBody<'a> {
+    Update(&'a proto::ChannelUpdateBody),
+    Member(&'a proto::ChannelMemberBody),
+    Pin(&'a proto::ChannelPinBody),
+    Moderate(&'a proto::ChannelModerateBody),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelMergeDispatch {
+    Update,
+    Member,
+    Pin,
+    Moderate,
+}
+
+impl ChannelAdmissionBody<'_> {
+    fn channel_id(&self) -> &[u8] {
+        match self {
+            Self::Update(body) => &body.channel_id,
+            Self::Member(body) => &body.channel_id,
+            Self::Pin(body) => &body.channel_id,
+            Self::Moderate(body) => &body.channel_id,
+        }
+    }
+}
+
+/// T1, encoded as a total function over every member action, author role, target state, and the
+/// two explicit self exceptions. The exhaustive matrix test iterates this input space directly.
+/// In particular, a moderator target is owner-only for BAN, REMOVE_MODERATOR is the only normal
+/// demotion path, and self-leave is the sole REMOVE_MEMBER exception for a moderator target.
+pub(crate) fn channel_member_authority(
+    action: proto::ChannelMemberAction,
+    author_role: ChannelAuthorRole,
+    target_state: Option<ChannelMemberState>,
+    IsSelf(is_self): IsSelf,
+    membership_mode: proto::MembershipMode,
+    TargetIsOwner(target_is_owner): TargetIsOwner,
+) -> ChannelAuthorityDecision {
+    use proto::ChannelMemberAction::{
+        AddMember, AddModerator, Ban, None as NoAction, RemoveMember, RemoveModerator, Unban,
+    };
+
+    if action == NoAction {
+        return ChannelAuthorityDecision::InvalidTargetState;
+    }
+    // NOTE: `target_is_owner` is false whenever the owner fid is unresolvable (the channel is
+    // "parked"), so this floor alone does NOT hold in that window. It is made total by the
+    // admission-level freeze in `validate_channel_message`: while parked, the only action that
+    // reaches this table is self-leave, which is never a Ban — so every Ban evaluated here has a
+    // resolved owner behind `target_is_owner`. That freeze is load-bearing for this guard; do not
+    // weaken it without revisiting this rule.
+    if action == Ban && target_is_owner {
+        return ChannelAuthorityDecision::OwnerUnbannable;
+    }
+    if target_state == Some(ChannelMemberState::Banned) && action != Unban {
+        return ChannelAuthorityDecision::Banned;
+    }
+
+    let owner = author_role == ChannelAuthorRole::Owner;
+    let moderator = author_role == ChannelAuthorRole::Moderator;
+    match action {
+        AddMember => {
+            if !matches!(target_state, None | Some(ChannelMemberState::Removed)) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator || (is_self && membership_mode == proto::MembershipMode::Open) {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        RemoveMember => match target_state {
+            Some(ChannelMemberState::Member) if owner || moderator || is_self => {
+                ChannelAuthorityDecision::Allowed
+            }
+            Some(ChannelMemberState::Moderator) if is_self => ChannelAuthorityDecision::Allowed,
+            Some(ChannelMemberState::Moderator) => ChannelAuthorityDecision::InvalidTargetState,
+            _ => ChannelAuthorityDecision::InvalidTargetState,
+        },
+        AddModerator => {
+            if !matches!(
+                target_state,
+                None | Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Member)
+            ) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        RemoveModerator => {
+            if target_state != Some(ChannelMemberState::Moderator) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        Ban => {
+            if target_state == Some(ChannelMemberState::Moderator) {
+                return if owner {
+                    ChannelAuthorityDecision::Allowed
+                } else {
+                    ChannelAuthorityDecision::Unauthorized
+                };
+            }
+            if !matches!(
+                target_state,
+                None | Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Member)
+            ) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        Unban => {
+            if target_state != Some(ChannelMemberState::Banned) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        NoAction => unreachable!(),
+    }
+}
+
+/// How many permanent tombstone rows a fid may mint, given its live-add allowance.
+fn verification_tombstone_cap(max_messages: u32) -> u32 {
+    if max_messages == 0 {
+        0
+    } else {
+        max_messages.max(VERIFICATION_TOMBSTONE_CAP_FLOOR)
+    }
+}
+
+/// The hard bound on a fid's TOTAL permanent shard-0 verification rows (adds + tombstones).
+/// Because rows are never reclaimed, this is a lifetime bound on distinct addresses, not a
+/// concurrent one: a fid that reaches it can still replace rows it already has, but can never
+/// admit a new address again.
+fn verification_row_cap(max_messages: u32) -> u32 {
+    max_messages.saturating_add(verification_tombstone_cap(max_messages))
+}
+
+#[derive(Clone, Copy, Default)]
+struct VerificationMessageCounts {
+    live_adds: u32,
+    tombstones: u32,
+}
+
+impl VerificationMessageCounts {
+    /// The counter a message of `msg_type` belongs to, or `None` if it is not a verification type.
+    /// The single place that maps type -> counter: callers supply their own error for `None`, so
+    /// this mapping cannot drift between the trie read and the in-transaction delta.
+    fn counter_mut(&mut self, msg_type: MessageType) -> Option<&mut u32> {
+        match msg_type {
+            MessageType::VerificationAddEthAddress => Some(&mut self.live_adds),
+            MessageType::VerificationRemove => Some(&mut self.tombstones),
+            _ => None,
+        }
+    }
 }
 
 // `merge_key_add` / `merge_key_remove` in `account::gasless_key_merge` return the
@@ -102,6 +333,16 @@ pub struct BlockStores {
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub verification_store: Store<VerificationStoreDef>,
+    // AUTHORITY. These four are the only channel stores an admission decision may
+    // consult, and the only ones a read should serve from — the identically typed
+    // and named fields on `Stores` are per-data-shard replicas of them. Shard 0 is
+    // where the registry fold and the verification replica live, so it is the only
+    // place channel authority is computable.
+    pub channel_update_store: Store<ChannelUpdateStoreDef>,
+    pub channel_member_store: Store<ChannelMemberStoreDef>,
+    pub channel_pin_store: Store<ChannelPinStoreDef>,
+    pub channel_moderate_store: Store<ChannelModerateStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
@@ -110,12 +351,50 @@ pub struct BlockStores {
 
 impl BlockStores {
     pub fn new(db: Arc<RocksDB>, trie: MerkleTrie, network: FarcasterNetwork) -> Self {
+        Self::new_with_opts(db, trie, network, StoreOptions::default())
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        trie: MerkleTrie,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         let store_event_handler = StoreEventHandler::new();
         BlockStores {
             block_store: BlockStore::new(db.clone()),
             block_event_store: BlockEventStore { db: db.clone() },
             onchain_event_store: OnchainEventStore::new(db.clone(), store_event_handler.clone()),
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
+            verification_store: VerificationStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
+            channel_update_store: ChannelUpdateStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts.clone(),
+            ),
+            channel_member_store: ChannelMemberStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts.clone(),
+            ),
+            channel_pin_store: ChannelPinStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts.clone(),
+            ),
+            channel_moderate_store: ChannelModerateStore::new_with_opts(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+                store_opts,
+            ),
             network,
             db: db.clone(),
             trie,
@@ -132,9 +411,50 @@ impl BlockStores {
             .ok()?
     }
 
+    /// Resolves the current shard-0 verification replica for merge-time channel authority.
+    /// The by-address index is candidate-only, so every entry is revalidated against the primary
+    /// add through the same transaction before applying the shared deterministic winner rule.
+    pub fn resolve_channel_owner_fid(
+        &self,
+        owner_address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<u64>, HubError> {
+        let candidates = VerificationStore::get_verifications_by_address(
+            &self.verification_store,
+            owner_address,
+            maybe_txn,
+        )?;
+        let mut authoritative = Vec::new();
+        for (fid, _indexed_ts_hash) in candidates {
+            let Some(primary_add) = VerificationStore::get_verification_add(
+                &self.verification_store,
+                fid,
+                owner_address,
+                maybe_txn,
+            )?
+            else {
+                continue;
+            };
+            let Some(data) = primary_add.data.as_ref() else {
+                // A data-integrity anomaly, not an expected state: log it rather than silently
+                // under-reporting the owner as parked. The RPC reads delegate here, so this
+                // is the only site that needs to log it.
+                warn!(
+                    fid = fid,
+                    address = hex::encode(owner_address),
+                    "VerificationAdd is missing message data; skipping owner candidate"
+                );
+                continue;
+            };
+            authoritative.push((fid, make_ts_hash(data.timestamp, &primary_add.hash)?));
+        }
+        Ok(select_verification_address_winner(authoritative))
+    }
+
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        engine_version: EngineVersion,
         pending_onchain_events: &Vec<OnChainEvent>,
         count_lent_storage: bool,
         count_borrowed_storage: bool,
@@ -155,6 +475,7 @@ impl BlockStores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                engine_version,
                 pending_onchain_events.as_slice(),
                 &lent_storage,
                 &borrowed_storage,
@@ -182,18 +503,68 @@ pub struct BlockStateChange {
     pub events: Vec<BlockEvent>,
 }
 
+pub(crate) fn block_engine_system_messages_for_replay<'a>(
+    system_messages: &'a [proto::ValidatorMessage],
+    version: EngineVersion,
+) -> Cow<'a, [proto::ValidatorMessage]> {
+    if !version.is_enabled(ProtocolFeature::SortedBlockEngineEvents) {
+        return Cow::Borrowed(system_messages);
+    }
+
+    let mut sorted_system_messages = system_messages.to_vec();
+    // CONSENSUS-CRITICAL: the ordering semantics here must stay identical to ShardEngine's
+    // comparator in engine.rs (`replay_snapchain_txn`, its `sorted_system_messages.sort_by`
+    // block). Both engines replay the same onchain events and must canonicalize their order
+    // the same way; if the two diverge, block-shard and data-shard replay fold shard-0 state
+    // differently. Change both together, or extract a shared comparator.
+    sorted_system_messages.sort_by(|a, b| {
+        match (&a.on_chain_event, &b.on_chain_event) {
+            (Some(event_a), Some(event_b)) => {
+                // Both are OnChainEvents: order by block_number then log_index.
+                (event_a.block_number, event_a.log_index)
+                    .cmp(&(event_b.block_number, event_b.log_index))
+            }
+            (Some(_), None) => Ordering::Less, // OnChainEvents sort before other system messages.
+            (None, Some(_)) => Ordering::Greater, // Other system messages sort after OnChainEvents.
+            (None, None) => Ordering::Equal, // Neither is an OnChainEvent; keep input order (stable sort).
+        }
+    });
+
+    Cow::Owned(sorted_system_messages)
+}
+
 impl BlockEngine {
     pub fn new(
-        mut trie: MerkleTrie,
+        trie: MerkleTrie,
         statsd_client: StatsdClientWrapper,
         db: Arc<RocksDB>,
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         network: FarcasterNetwork,
     ) -> Self {
+        Self::new_with_opts(
+            trie,
+            statsd_client,
+            db,
+            max_messages_per_block,
+            messages_request_tx,
+            network,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        mut trie: MerkleTrie,
+        statsd_client: StatsdClientWrapper,
+        db: Arc<RocksDB>,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        network: FarcasterNetwork,
+        store_opts: StoreOptions,
+    ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            stores: BlockStores::new(db.clone(), trie, network),
+            stores: BlockStores::new_with_opts(db.clone(), trie, network, store_opts),
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,
@@ -237,6 +608,13 @@ impl BlockEngine {
         }
     }
 
+    /// Single-message convenience wrapper. TEST-ONLY BY CONSTRUCTION: it derives the verification
+    /// quota counters by reading the trie, which is correct only at the START of a transaction.
+    /// Block-engine trie updates are staged after the user-message loop, so a mid-loop caller
+    /// would silently read a pre-transaction count and admit past the cap. Production must go
+    /// through `replay_snapchain_txn`, which threads the transaction-local count instead. Keeping
+    /// this `cfg(test)` stops a future caller from reaching for the shorter name.
+    #[cfg(test)]
     pub fn validate_user_message(
         &self,
         message: &proto::Message,
@@ -245,6 +623,307 @@ impl BlockEngine {
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
+        let verification_counts = self.verification_message_counts(message.fid(), txn_batch)?;
+        self.validate_user_message_with_verification_counts(
+            message,
+            storage_slot,
+            timestamp,
+            version,
+            txn_batch,
+            verification_counts,
+        )
+        .map(|_| ())
+    }
+
+    /// Counts the fid's live adds and tombstones separately from the trie. The message types come
+    /// from the same store-type mapping used by data-shard accounting, while keeping the shard-0
+    /// quota semantics explicit per type.
+    fn verification_message_counts(
+        &self,
+        fid: u64,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<VerificationMessageCounts, HubError> {
+        let mut counts = VerificationMessageCounts::default();
+        for msg_type in Limits::store_type_to_message_types(StoreType::Verifications) {
+            let count = self
+                .stores
+                .trie
+                .get_count(
+                    &self.stores.db,
+                    txn_batch,
+                    &TrieKey::for_message_type(fid, msg_type.into_u8()),
+                )
+                .map_err(|err| {
+                    HubError::internal_db_error(&format!(
+                        "unable to count shard-0 verifications: {err}"
+                    ))
+                })?;
+            let count = u32::try_from(count)
+                .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))?;
+            let target = counts.counter_mut(msg_type).ok_or_else(|| {
+                HubError::internal_db_error(
+                    "verification store mapping contains a non-verification type",
+                )
+            })?;
+            *target = target
+                .checked_add(count)
+                .ok_or_else(|| HubError::internal_db_error("verification count overflow"))?;
+        }
+        Ok(counts)
+    }
+
+    /// The type of the fid's existing primary record for `address`, if any. Callers must branch on
+    /// the TYPE, not merely on presence: which counter an incoming message grows depends on what it
+    /// replaces (see the transition match in `validate_user_message_with_verification_counts`).
+    fn verification_logical_key_type(
+        &self,
+        fid: u64,
+        address: &[u8],
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<Option<MessageType>, MessageValidationError> {
+        let add_exists = VerificationStore::get_verification_add(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .is_some();
+        if add_exists {
+            return Ok(Some(MessageType::VerificationAddEthAddress));
+        }
+        Ok(VerificationStore::get_verification_remove_with_txn(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .map(|_| MessageType::VerificationRemove))
+    }
+
+    fn channel_validation_error(reason: &str) -> MessageValidationError {
+        MessageValidationError::HubError(HubError::validation_failure(reason))
+    }
+
+    fn channel_author_role(
+        &self,
+        channel_id: &[u8],
+        author_fid: u64,
+        owner_fid: Option<u64>,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<ChannelAuthorRole, MessageValidationError> {
+        if owner_fid == Some(author_fid) {
+            return Ok(ChannelAuthorRole::Owner);
+        }
+        let state = ChannelMemberStore::member_state(
+            &self.stores.channel_member_store,
+            channel_id,
+            author_fid,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?;
+        Ok(match state {
+            Some(ChannelMemberState::Moderator) => ChannelAuthorRole::Moderator,
+            Some(ChannelMemberState::Member) => ChannelAuthorRole::Member,
+            Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Banned) | None => {
+                ChannelAuthorRole::Other
+            }
+        })
+    }
+
+    fn validate_channel_message(
+        &self,
+        message_data: &proto::MessageData,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<ChannelMergeDispatch, MessageValidationError> {
+        use proto::message_data::Body;
+
+        let msg_type = MessageType::try_from(message_data.r#type)
+            .map_err(|_| MessageValidationError::InvalidMessageType)?;
+        // Type/body agreement is the first channel-specific decision. Routing and merge dispatch
+        // use the type while this arm sees the body, so accepting a mismatch would acknowledge a
+        // message that no merge arm can store.
+        let body = match (msg_type, message_data.body.as_ref()) {
+            (MessageType::ChannelUpdate, Some(Body::ChannelUpdateBody(body))) => {
+                ChannelAdmissionBody::Update(body)
+            }
+            (MessageType::ChannelMember, Some(Body::ChannelMemberBody(body))) => {
+                ChannelAdmissionBody::Member(body)
+            }
+            (MessageType::ChannelPin, Some(Body::ChannelPinBody(body))) => {
+                ChannelAdmissionBody::Pin(body)
+            }
+            (MessageType::ChannelModerate, Some(Body::ChannelModerateBody(body))) => {
+                ChannelAdmissionBody::Moderate(body)
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        };
+
+        let channel_id = body.channel_id();
+        if channel_id.len() != CHANNEL_ID_LENGTH {
+            return Err(Self::channel_validation_error(
+                "channel id must be 32 bytes",
+            ));
+        }
+        if let ChannelAdmissionBody::Moderate(moderate) = &body {
+            if moderate.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+                return Err(Self::channel_validation_error(
+                    "channel moderate cast hash must be 20 bytes",
+                ));
+            }
+            let action = proto::ChannelModerateAction::try_from(moderate.action)
+                .map_err(|_| Self::channel_validation_error("invalid channel moderate action"))?;
+            if action == proto::ChannelModerateAction::None {
+                return Err(Self::channel_validation_error(
+                    "invalid channel moderate action",
+                ));
+            }
+        }
+
+        // D10: every hop reads the caller's transaction. The label index resolves the channel
+        // key; the primary record supplies the owner address; the shard-0 verification replica
+        // resolves that address under the shared deterministic winner rule. Expiry is
+        // intentionally not consulted (D7), and there is no clock input anywhere in this chain.
+        let channel_key = self
+            .stores
+            .onchain_event_store
+            .get_channel_key_by_label(channel_id, Some(txn_batch))
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::internal_db_error(&err.to_string()))
+            })?
+            .ok_or_else(|| Self::channel_validation_error("unknown channel"))?;
+        let channel_owner = self
+            .stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, Some(txn_batch))
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::internal_db_error(&err.to_string()))
+            })?
+            .ok_or_else(|| Self::channel_validation_error("unknown channel"))?;
+        let owner_fid = self
+            .stores
+            .resolve_channel_owner_fid(&channel_owner.owner_address, Some(txn_batch))
+            .map_err(MessageValidationError::HubError)?;
+        // FREEZE WHILE PARKED. `None` means this node cannot prove who the owner is: the
+        // registry names an owner address, but no live shard-0 verification binds it to a fid.
+        // Reject authority-bearing writes outright instead of evaluating them against the
+        // authority table — evaluated as-is, the parked state is strictly MORE permissive than
+        // the resolved one (`target_is_owner` collapses to false, disarming owner-ban immunity,
+        // while moderators keep every power). The sole exception is self-leave, the one action
+        // whose authority is self-contained (author == target, no owner grant involved);
+        // freezing it would let an owner trap members' public membership rows indefinitely by
+        // deliberately unverifying. Self-add is NOT exempt even under OPEN: that mode is the
+        // owner's standing grant, unaccountable while parked, and joins mint permanent
+        // member-slot rows that a frozen moderator set cannot police.
+        if owner_fid.is_none() {
+            let is_self_leave = match &body {
+                ChannelAdmissionBody::Member(member) => {
+                    proto::ChannelMemberAction::try_from(member.action)
+                        == Ok(proto::ChannelMemberAction::RemoveMember)
+                        && member.fid == message_data.fid
+                }
+                _ => false,
+            };
+            if !is_self_leave {
+                return Err(Self::channel_validation_error("channel is parked"));
+            }
+        }
+        let author_role =
+            self.channel_author_role(channel_id, message_data.fid, owner_fid, txn_batch)?;
+        let dispatch = match &body {
+            ChannelAdmissionBody::Update(_) => ChannelMergeDispatch::Update,
+            ChannelAdmissionBody::Member(_) => ChannelMergeDispatch::Member,
+            ChannelAdmissionBody::Pin(_) => ChannelMergeDispatch::Pin,
+            ChannelAdmissionBody::Moderate(_) => ChannelMergeDispatch::Moderate,
+        };
+
+        match body {
+            ChannelAdmissionBody::Update(_) => {
+                if author_role != ChannelAuthorRole::Owner {
+                    return Err(Self::channel_validation_error(
+                        "unauthorized channel action",
+                    ));
+                }
+            }
+            ChannelAdmissionBody::Pin(_) | ChannelAdmissionBody::Moderate(_) => {
+                if !matches!(
+                    author_role,
+                    ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                ) {
+                    return Err(Self::channel_validation_error(
+                        "unauthorized channel action",
+                    ));
+                }
+            }
+            ChannelAdmissionBody::Member(member) => {
+                let action = proto::ChannelMemberAction::try_from(member.action)
+                    .map_err(|_| Self::channel_validation_error("invalid channel member action"))?;
+                let target_state = ChannelMemberStore::member_state(
+                    &self.stores.channel_member_store,
+                    channel_id,
+                    member.fid,
+                    Some(txn_batch),
+                )
+                .map_err(MessageValidationError::HubError)?;
+                let membership_mode = ChannelUpdateStore::get_channel_update(
+                    &self.stores.channel_update_store,
+                    channel_id,
+                    Some(txn_batch),
+                )
+                .map_err(MessageValidationError::HubError)?
+                .map(|state| state.membership_mode)
+                .unwrap_or(proto::MembershipMode::Approval);
+                let decision = channel_member_authority(
+                    action,
+                    author_role,
+                    target_state,
+                    IsSelf(message_data.fid == member.fid),
+                    membership_mode,
+                    TargetIsOwner(owner_fid == Some(member.fid)),
+                );
+                let reason = match decision {
+                    ChannelAuthorityDecision::Allowed => None,
+                    ChannelAuthorityDecision::Unauthorized => Some("unauthorized channel action"),
+                    ChannelAuthorityDecision::InvalidTargetState => {
+                        Some("invalid channel target state")
+                    }
+                    ChannelAuthorityDecision::Banned => Some("channel member is banned"),
+                    ChannelAuthorityDecision::OwnerUnbannable => {
+                        Some("channel owner cannot be banned")
+                    }
+                };
+                if let Some(reason) = reason {
+                    return Err(Self::channel_validation_error(reason));
+                }
+                if action == proto::ChannelMemberAction::AddModerator
+                    && ChannelMemberStore::live_moderator_count(
+                        &self.stores.channel_member_store,
+                        channel_id,
+                        Some(txn_batch),
+                    )
+                    .map_err(MessageValidationError::HubError)?
+                        >= CHANNEL_MODERATOR_CAP
+                {
+                    return Err(Self::channel_validation_error(
+                        "channel moderator cap reached",
+                    ));
+                }
+            }
+        }
+
+        Ok(dispatch)
+    }
+
+    fn validate_user_message_with_verification_counts(
+        &self,
+        message: &proto::Message,
+        storage_slot: &StorageSlot,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &mut RocksDbTransactionBatch,
+        verification_counts: VerificationMessageCounts,
+    ) -> Result<Option<ChannelMergeDispatch>, MessageValidationError> {
         // Ensure message data is present
         let message_data = message
             .data
@@ -317,15 +996,49 @@ impl BlockEngine {
             }
         }
 
+        let mut channel_dispatch = None;
         match message_data
             .body
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?
         {
+            // BOTH halves of this `||` are load-bearing; do not "simplify" it to a body-only
+            // match. A message's `r#type` and its body are independent on the wire, and this arm
+            // must claim a message if EITHER looks channel-shaped:
+            //   - body-only: a `{type: ChannelUpdate, body: LendStorageBody}` message would fall
+            //     into the LendStorage arm, validate as a lend, and return `Ok(None)` — then the
+            //     merge arm below, which dispatches on `msg_type`, hits the channel branch with
+            //     no dispatch token and hard-errors, aborting the whole transaction replay.
+            //   - type-only: a `{type: LendStorage, body: ChannelUpdateBody}` message would skip
+            //     channel validation entirely.
+            // Claiming both directions here lets `validate_channel_message` reject the mismatch
+            // as `InvalidMessageType`, which is the only outcome that is safe on every path.
+            body if matches!(
+                msg_type,
+                MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate
+            ) || matches!(
+                body,
+                crate::proto::message_data::Body::ChannelUpdateBody(_)
+                    | crate::proto::message_data::Body::ChannelMemberBody(_)
+                    | crate::proto::message_data::Body::ChannelPinBody(_)
+                    | crate::proto::message_data::Body::ChannelModerateBody(_)
+            ) =>
+            {
+                if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
+                // D9: channel slots resolve by shard-0 consensus order, not timestamp LWW.
+                // Embedded timestamps are inert, and these types did not exist before V21, so
+                // the verification activation floor has no channel analogue.
+                channel_dispatch = Some(self.validate_channel_message(message_data, txn_batch)?);
+            }
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
                 let total_storage_purchased = self
                     .stores
-                    .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
+                    .get_storage_slot_for_fid(message_data.fid, version, &vec![], false, false)
                     .ok_or(MessageValidationError::InsufficientStorage)?;
 
                 // Restricts who can lend storage to some reasonable set of users. Don't enforce this limit in devnet and testnet so we can test with fewer storage units.
@@ -354,6 +1067,118 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_)
                 if version.is_enabled(ProtocolFeature::GaslessSigners) => {}
+            body @ (crate::proto::message_data::Body::VerificationAddAddressBody(_)
+            | crate::proto::message_data::Body::VerificationRemoveBody(_))
+                if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                // A message's `r#type` and its body are independent on the wire; routing and the
+                // merge path dispatch on `r#type` while this match dispatches on the body. Without
+                // an agreement check, a KEY_ADD-typed message carrying a verification body routes
+                // to shard 0 and would be admitted here — accepted and gossiped by submit_message
+                // even though merge (dispatching on `r#type`) can never merge it. Require
+                // agreement so such a message stays rejected exactly as before these arms existed.
+                let (expected_type, is_add, address) = match body {
+                    crate::proto::message_data::Body::VerificationAddAddressBody(body) => (
+                        MessageType::VerificationAddEthAddress,
+                        true,
+                        body.address.as_slice(),
+                    ),
+                    crate::proto::message_data::Body::VerificationRemoveBody(body) => (
+                        MessageType::VerificationRemove,
+                        false,
+                        body.address.as_slice(),
+                    ),
+                    // Unreachable: the arm's pattern binds only the two bodies above.
+                    _ => return Err(MessageValidationError::InvalidMessageType),
+                };
+                if msg_type != expected_type {
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
+                let embedded_version = EngineVersion::version_for(
+                    &FarcasterTime::new(message_data.timestamp as u64),
+                    self.network,
+                );
+                if !embedded_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                    // Reject a verification minted before this feature existed, even inside a
+                    // block that has it. Such a message already lives on the fid shard, and this
+                    // replica starts empty at activation, so it holds no history to judge the
+                    // message against.
+                    //
+                    // The hazard is for machinery that does not exist yet, which is why this
+                    // rejects rather than merges: if a later change fans shard-0 verification
+                    // merges out to fid shards, an add admitted here could carry an older
+                    // `ts_hash` than a remove the fid shard has already applied. Should that
+                    // replay overwrite local state instead of re-running the CRDT compare in
+                    // `Store::merge_add`, it would resurrect the add and undo the remove.
+                    // Refusing old-regime messages here means such a replay can never encounter
+                    // one. Dropping this check is a one-line revert if that fan-out lands with
+                    // conflict-free replay semantics instead.
+                    return Err(MessageValidationError::VerificationTimestampBeforeActivation);
+                }
+
+                // Production always constructs `Stores`/`BlockStores` with `StoreLimits::default()`,
+                // so the live-add limit matches the data shard's limit exactly. If store limits
+                // ever become configurable, this must read the same injected value the data-shard
+                // prune uses or the two sides will enforce different caps on the same message.
+                let max_messages =
+                    StoreLimits::default().max_messages(storage_slot, StoreType::Verifications);
+                // With no active storage, adds are never admitted, including replacements. This
+                // is the spam gate for shard 0's otherwise gasless verification write path.
+                if max_messages == 0 && is_add {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+                // Admission is decided per TRANSITION, against the quantity each one actually
+                // grows. Two rules a reader may be tempted to collapse back into one, both of
+                // which are unsound — each was a live hole caught in review:
+                //
+                //   1. A type-blind "any existing row supersedes, so admit" carve-out lets an add
+                //      land on a tombstone, skipping the live-add cap while refunding a tombstone
+                //      slot. `remove addr; add addr` then cycles forever.
+                //   2. Gating only the counter a transition grows is still not enough, because
+                //      rows are PERMANENT while the counters are not. `add addr_i; remove addr_i`
+                //      returns `live_adds` to 0 every cycle and leaves a tombstone behind, so any
+                //      rule written purely over current counter state never engages.
+                //
+                // Rows appear ONLY in the two `None` arms, and both check `total_rows`. That makes
+                // the bound locally provable here: no fid can ever exceed
+                // `max_messages + tombstone_cap` permanent replica rows, for any message sequence.
+                let tombstone_cap = verification_tombstone_cap(max_messages);
+                let row_cap = verification_row_cap(max_messages);
+                let total_rows = verification_counts
+                    .live_adds
+                    .saturating_add(verification_counts.tombstones);
+                let existing =
+                    self.verification_logical_key_type(message_data.fid, address, txn_batch)?;
+                match (is_add, existing) {
+                    // Replacing an add with an add: net-zero on both counters, always admitted.
+                    (true, Some(MessageType::VerificationAddEthAddress)) => {}
+                    // Re-adding a tombstoned address. Row-neutral, but it grows `live_adds`.
+                    (true, Some(_)) => {
+                        if verification_counts.live_adds >= max_messages {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                    // Mints a new add row.
+                    (true, None) => {
+                        if verification_counts.live_adds >= max_messages || total_rows >= row_cap {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                    // A remove over any existing row turns an add row into a tombstone row, or
+                    // replaces a tombstone with a newer one. Row-neutral either way, and
+                    // deliberately admitted even past `tombstone_cap`: a fid at cap, or one whose
+                    // storage lapsed, must always be able to shed live state.
+                    (false, Some(_)) => {}
+                    // Mints a new tombstone row. This is the pre-V21-address remove case: the
+                    // replica has never seen the address, so the row is new.
+                    (false, None) => {
+                        if verification_counts.tombstones >= tombstone_cap || total_rows >= row_cap
+                        {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                }
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
 
@@ -374,13 +1199,51 @@ impl BlockEngine {
             .map_err(MessageValidationError::HubError)?;
         }
 
-        Ok(())
+        Ok(channel_dispatch)
+    }
+
+    fn merge_channel_message(
+        &self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        dispatch: ChannelMergeDispatch,
+        channel_messages_enabled: bool,
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
+        // `dispatch` is minted only by the gated validation arm after type/body agreement. Merge
+        // does not re-read a version or re-dispatch on the wire type, so those decisions are
+        // structurally unable to disagree.
+        let gate = DerivedIndexGate::when_channel_messages_enabled(channel_messages_enabled);
+        let event = match dispatch {
+            ChannelMergeDispatch::Update => ChannelUpdateStore::merge(
+                &self.stores.channel_update_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
+            ChannelMergeDispatch::Member => ChannelMemberStore::merge(
+                &self.stores.channel_member_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
+            ChannelMergeDispatch::Pin => {
+                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch, gate)?
+            }
+            ChannelMergeDispatch::Moderate => ChannelModerateStore::merge(
+                &self.stores.channel_moderate_store,
+                message,
+                txn_batch,
+                gate,
+            )?,
+        };
+        Ok(vec![event])
     }
 
     fn merge_message(
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        block_version: EngineVersion,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let msg_type = message.msg_type();
         let gasless_enabled = if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
@@ -395,17 +1258,31 @@ impl BlockEngine {
             false
         };
         match msg_type {
-            MessageType::LendStorage => Ok(StorageLendStore::merge(
-                &self.stores.storage_lend_store,
-                message,
-                txn_batch,
-            )?),
+            MessageType::LendStorage => {
+                let ts = message
+                    .data
+                    .as_ref()
+                    .ok_or(MessageValidationError::NoMessageData)?
+                    .timestamp;
+                let version =
+                    EngineVersion::version_for(&FarcasterTime::new(ts as u64), self.network);
+                let ctx = MergeContext { version };
+                Ok(StorageLendStore::merge(
+                    &self.stores.storage_lend_store,
+                    message,
+                    txn_batch,
+                    &ctx,
+                )?)
+            }
             MessageType::KeyAdd if gasless_enabled => {
+                // BlockEngine is the admission path — full validation, including the
+                // request_fid IdRegister + custody match.
                 Ok(vec![crate::storage::store::account::merge_key_add(
                     &self.stores.db,
                     &self.stores.onchain_event_store,
                     message,
                     txn_batch,
+                    false,
                 )?])
             }
             MessageType::KeyRemove if gasless_enabled => {
@@ -416,8 +1293,99 @@ impl BlockEngine {
                     txn_batch,
                 )?])
             }
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                if block_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                // Two different version notions meet here, deliberately. The arm's gate uses the
+                // *block* version, because whether shard 0 may host verifications at all is a
+                // property of the block being replayed. The `MergeContext` carries the message's
+                // *embedded* version, because merge semantics are a property of the message.
+                //
+                // Be precise about what that context does today: nothing. `Store::merge` forwards
+                // `ctx` only to `merge_compact_state`, and `VerificationStoreDef` has no compact
+                // state, so verification adds/removes never read it. It is derived this way so it
+                // agrees by construction with how `ShardEngine::merge_message` builds the context
+                // for this same store, *if* `VerificationStoreDef` ever gates a merge decision on
+                // version (as `LinkStoreDef` already does). Do not read this as a live
+                // constraint, and do not "simplify" it to the block version — that would
+                // silently diverge from the fid shard the moment it starts mattering.
+                //
+                // Only the context half mirrors `ShardEngine`: it has no block-version notion at
+                // all, because a data shard needs no feature gate to host its own verifications.
+                // Do not go looking there for the gate above.
+                let ts = message
+                    .data
+                    .as_ref()
+                    .ok_or(MessageValidationError::NoMessageData)?
+                    .timestamp;
+                // Named apart from `block_version` on purpose: both are `EngineVersion`, so only
+                // the names keep the gate and the merge context from being swapped by a refactor.
+                let embedded_version =
+                    EngineVersion::version_for(&FarcasterTime::new(ts as u64), self.network);
+                let ctx = MergeContext {
+                    version: embedded_version,
+                };
+                Ok(vec![self
+                    .stores
+                    .verification_store
+                    .merge(message, txn_batch, &ctx)?])
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
+    }
+
+    /// Applies one successful merge to the transaction-local verification counters. Block-engine
+    /// trie updates are staged only after the user-message loop, so re-reading the trie mid-loop
+    /// would miss earlier merges. Applying every deleted message before the merged message makes
+    /// the event itself enforce all add/remove replacement transitions.
+    fn apply_verification_count_delta(
+        mut counts: VerificationMessageCounts,
+        merge_message_body: &MergeMessageBody,
+    ) -> Result<VerificationMessageCounts, BlockEngineError> {
+        for deleted in &merge_message_body.deleted_messages {
+            let target = counts.counter_mut(deleted.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge deleted a non-verification row",
+                ))
+            })?;
+            *target = target.checked_sub(1).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count underflow",
+                ))
+            })?;
+        }
+
+        if let Some(message) = &merge_message_body.message {
+            let target = counts.counter_mut(message.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge added a non-verification row",
+                ))
+            })?;
+            *target = target.checked_add(1).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count overflow",
+                ))
+            })?;
+        }
+
+        Ok(counts)
+    }
+
+    /// Mirrors `HubEventExt::from_validation_error`, which cannot be reused directly because it is
+    /// typed on `engine::MessageValidationError` rather than this module's error enum.
+    fn merge_failure_event(message: &proto::Message, err: &MessageValidationError) -> HubEvent {
+        let merge_error = match err {
+            MessageValidationError::HubError(hub_error) => hub_error.clone(),
+            _ => HubError::validation_failure(&err.to_string()),
+        };
+        HubEvent::new_event(
+            proto::HubEventType::MergeFailure,
+            proto::hub_event::Body::MergeFailure(proto::MergeFailureBody {
+                message: Some(message.clone()),
+                code: merge_error.code,
+                reason: merge_error.message,
+            }),
+        )
     }
 
     fn on_merge_message(
@@ -463,8 +1431,21 @@ impl BlockEngine {
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), BlockEngineError> {
         let mut hub_events = vec![];
         let mut validation_errors = vec![];
-        for message in &snapchain_txn.system_messages {
+        let system_messages =
+            block_engine_system_messages_for_replay(&snapchain_txn.system_messages, version);
+        for message in system_messages.as_ref() {
             if let Some(ref onchain_event) = message.on_chain_event {
+                if onchain_event.r#type() == proto::OnChainEventType::EventTypeChannelRegister
+                    && !version.is_enabled(ProtocolFeature::ChannelRegistrations)
+                {
+                    warn!(
+                        block_number = onchain_event.block_number,
+                        log_index = onchain_event.log_index,
+                        chain_id = onchain_event.chain_id,
+                        "Saw channel register event while feature isn't active"
+                    );
+                    continue;
+                }
                 match self
                     .stores
                     .onchain_event_store
@@ -482,25 +1463,77 @@ impl BlockEngine {
         }
 
         let mut storage_slot = self
-            .storage_slot_for_transaction(snapchain_txn, true, false)
+            .storage_slot_for_transaction(snapchain_txn, version, true, false)
             .unwrap();
+        // Lending validation must exclude borrowed units, but verification quota must include
+        // them exactly as data-shard StoreLimits does. Keep two views and apply any successful
+        // lend in this transaction to both so later verification admission sees the same net
+        // slot on proposal, validation, and commit replay.
+        //
+        // Both are derived up front rather than lazily at the first verification, because the
+        // slot must be snapshotted before any in-transaction lend mutates it via
+        // `on_merge_message`. Shard 0 carries every key rotation and lend, so the prescan keeps
+        // verification-free transactions off the extra storage-rent scan and trie reads.
+        let has_verification = version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
+            && snapchain_txn.user_messages.iter().any(|message| {
+                matches!(
+                    message.msg_type(),
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                )
+            });
+        let mut verification_storage_slot = if has_verification {
+            // Deliberately not `.unwrap()` like the slot above: that call passes
+            // count_borrowed_storage=false and never reads the lend store, while this one does.
+            // `get_storage_slot_for_fid` collapses a RocksDB error into `None`, so unwrapping
+            // would turn a transient local read failure into a panic on the propose/validate/
+            // commit paths. Surface it as an error instead, matching the data shard, whose
+            // equivalent read maps to `EngineError::UsageCountError` rather than aborting.
+            self.storage_slot_for_transaction(snapchain_txn, version, true, true)
+                .ok_or_else(|| {
+                    BlockEngineError::HubError(HubError::internal_db_error(
+                        "unable to read storage slot for shard-0 verification quota",
+                    ))
+                })?
+        } else {
+            storage_slot.clone()
+        };
+        let mut verification_counts = if has_verification {
+            self.verification_message_counts(snapchain_txn.fid, txn_batch)
+                .map_err(BlockEngineError::HubError)?
+        } else {
+            VerificationMessageCounts::default()
+        };
 
         for message in &snapchain_txn.user_messages {
-            match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
-            {
-                Ok(()) => match message.msg_type() {
+            let validation_storage_slot = match message.msg_type() {
+                MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                    &verification_storage_slot
+                }
+                _ => &storage_slot,
+            };
+            match self.validate_user_message_with_verification_counts(
+                message,
+                validation_storage_slot,
+                timestamp,
+                version,
+                txn_batch,
+                verification_counts,
+            ) {
+                Ok(channel_dispatch) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 for event in &events {
-                                    match event.body.as_ref().unwrap() {
-                                        proto::hub_event::Body::MergeMessageBody(
-                                            merge_message_body,
-                                        ) => self.on_merge_message(
-                                            &mut storage_slot,
-                                            &merge_message_body,
-                                        )?,
-                                        _ => {}
+                                    if let Some(proto::hub_event::Body::MergeMessageBody(body)) =
+                                        event.body.as_ref()
+                                    {
+                                        // Both views must see the same lend, or verification
+                                        // admission and lend validation drift apart.
+                                        self.on_merge_message(&mut storage_slot, body)?;
+                                        self.on_merge_message(
+                                            &mut verification_storage_slot,
+                                            body,
+                                        )?;
                                     }
                                 }
                                 hub_events.extend(events);
@@ -512,8 +1545,131 @@ impl BlockEngine {
                         // storage units. Emitted MergeMessageBody propagates to shards via
                         // BlockEvent so their local DBs can replay the same merge.
                         if version.is_enabled(ProtocolFeature::GaslessSigners) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 hub_events.extend(events);
+                            }
+                        }
+                    }
+                    // THE live path for verifications once V21 is enabled: routing sends them
+                    // here, admission has already applied the timestamp floor and the replica
+                    // quota, and successful merges fan out as BlockEvents for force-override
+                    // replay onto every data shard. Below V21 this arm is unreachable —
+                    // `validate_user_message` rejects verification bodies outright, so the merge
+                    // is never attempted and nothing here can perturb pre-V21 streams.
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                        if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                            match self.merge_message(message, txn_batch, version) {
+                                Ok(events) => {
+                                    for event in &events {
+                                        if let Some(proto::hub_event::Body::MergeMessageBody(
+                                            body,
+                                        )) = event.body.as_ref()
+                                        {
+                                            verification_counts =
+                                                Self::apply_verification_count_delta(
+                                                    verification_counts,
+                                                    body,
+                                                )?;
+                                        }
+                                    }
+                                    hub_events.extend(events)
+                                }
+                                Err(err) => {
+                                    // Surfaced rather than swallowed, unlike the arms above, and
+                                    // the asymmetry is deliberate. For those types the routine
+                                    // rejections are caught in `validate_user_message`, so a merge
+                                    // error is near-unreachable. A verification's rejections --
+                                    // duplicate, add superseded by a newer remove, stale add after
+                                    // a remove -- are all detected *here*, because the validation
+                                    // arm above checks only signatures and the version floor. Drop
+                                    // them and `simulate_message`, which reports success when
+                                    // `validation_errors` is empty, would tell a submitter their
+                                    // verification was accepted while it was never stored.
+                                    //
+                                    // Consensus is unaffected either way: both consensus callers
+                                    // of `replay_snapchain_txn` discard `validation_errors`, and
+                                    // neither the trie nor block events are touched when no merge
+                                    // event is produced. Only `simulate_message` reads this.
+                                    warn!(
+                                        fid = message.fid(),
+                                        hash = message.hex_hash(),
+                                        "Error merging shard-0 verification: {:?}",
+                                        err
+                                    );
+                                    let mut merge_failure =
+                                        Self::merge_failure_event(message, &err);
+                                    // Event-id assignment is a pure function of block content, so
+                                    // a failure here is identical on every node — the event drops
+                                    // from the stream network-wide rather than diverging.
+                                    // MergeFailure is trie-inert and never becomes a BlockEvent,
+                                    // so neither the state root nor events_hash is affected.
+                                    if let Err(event_err) = self
+                                        .stores
+                                        .event_handler
+                                        .commit_transaction(txn_batch, &mut merge_failure)
+                                    {
+                                        error!(
+                                            fid = message.fid(),
+                                            hash = message.hex_hash(),
+                                            "Failed to persist shard-0 verification merge failure event: {:?}",
+                                            event_err
+                                        );
+                                    }
+                                    hub_events.push(merge_failure);
+                                    validation_errors.push(err);
+                                }
+                            }
+                        }
+                    }
+                    MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate => {
+                        // Invariant guard, not routine error handling: the gated validation arm
+                        // claims every channel-typed message (see the `||` guard there), so a
+                        // channel `msg_type` always yields `Some(dispatch)` or an error. This is
+                        // unreachable today and fails closed on purpose — the alternative to a
+                        // loud abort is silently skipping the merge of an admitted message.
+                        let dispatch = channel_dispatch.ok_or_else(|| {
+                            BlockEngineError::HubError(HubError::invalid_internal_state(
+                                "validated channel message is missing merge dispatch",
+                            ))
+                        })?;
+                        match self.merge_channel_message(
+                            message,
+                            txn_batch,
+                            dispatch,
+                            version.is_enabled(ProtocolFeature::ChannelMessages),
+                        ) {
+                            Ok(events) => hub_events.extend(events),
+                            Err(err) => {
+                                // State-aware admission catches ordinary authority failures,
+                                // but duplicate/current-incumbent and store-integrity errors
+                                // arise only during merge. Surface and persist them with the
+                                // same deterministic MERGE_FAILURE behavior as shard-0
+                                // verifications so simulate_message cannot report success for
+                                // a message that was not stored.
+                                warn!(
+                                    fid = message.fid(),
+                                    hash = message.hex_hash(),
+                                    "Error merging shard-0 channel message: {:?}",
+                                    err
+                                );
+                                let mut merge_failure = Self::merge_failure_event(message, &err);
+                                if let Err(event_err) = self
+                                    .stores
+                                    .event_handler
+                                    .commit_transaction(txn_batch, &mut merge_failure)
+                                {
+                                    error!(
+                                            fid = message.fid(),
+                                            hash = message.hex_hash(),
+                                            "Failed to persist shard-0 channel merge failure event: {:?}",
+                                            event_err
+                                        );
+                                }
+                                hub_events.push(merge_failure);
+                                validation_errors.push(err);
                             }
                         }
                     }
@@ -570,6 +1726,7 @@ impl BlockEngine {
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let version = EngineVersion::version_for(timestamp, self.network);
         let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+        let channel_messages_enabled = version.is_enabled(ProtocolFeature::ChannelMessages);
         let mut events = vec![];
         let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
         for hub_event in hub_events {
@@ -585,14 +1742,14 @@ impl BlockEngine {
                         match msg_type {
                             MessageType::LendStorage
                             | MessageType::KeyAdd
-                            | MessageType::KeyRemove => {
+                            | MessageType::KeyRemove
+                            | MessageType::VerificationAddEthAddress
+                            | MessageType::VerificationRemove => {
                                 // All shard-0-hosted user messages propagate the same way:
                                 // wrap the original message in a MergeMessageEvent so shards
                                 // 1..N can replay the merge into their local DBs via
-                                // ShardEngine::handle_block_event. For KEY_ADD / KEY_REMOVE
-                                // this is what makes gasless-key records visible on every
-                                // shard for scope enforcement, TTL checks, and last_used_at
-                                // bumps (NEYN-10575, NEYN-10576).
+                                // ShardEngine::handle_block_event. Upstream merge gates decide
+                                // whether a feature's messages can reach this allowlist.
                                 max_block_event_seqnum += 1;
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,
@@ -609,9 +1766,64 @@ impl BlockEngine {
                                 let event = Self::build_block_event(data);
                                 events.push(event);
                             }
+                            MessageType::ChannelUpdate
+                            | MessageType::ChannelMember
+                            | MessageType::ChannelPin
+                            | MessageType::ChannelModerate
+                                if channel_messages_enabled =>
+                            {
+                                // Channel rows fan out only after the same feature gate that admits
+                                // them on shard 0. Data shards replay the original message in this
+                                // consensus order and derive superseded rows locally.
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::MergeMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::MergeMessageEventBody(
+                                        proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                events.push(Self::build_block_event(data));
+                            }
                             _ => {}
                         }
                     }
+                }
+                proto::hub_event::Body::MergeOnChainEventBody(merge_on_chain_event_body) => {
+                    // Shard 0 fans channel-register onchain events to every data shard so
+                    // their replica folds can rebuild the ownership indexes and emit hints
+                    // (ShardEngine::handle_block_event). Carry the whole original event,
+                    // mirroring the MergeMessage template above. Only channel registers fan
+                    // out, and only once the feature is active; every other onchain event is
+                    // skipped silently, mirroring the pre-feature gasless-key gate.
+                    let Some(on_chain_event) = merge_on_chain_event_body.on_chain_event else {
+                        continue;
+                    };
+                    if on_chain_event.r#type() != proto::OnChainEventType::EventTypeChannelRegister
+                        || !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents)
+                    {
+                        continue;
+                    }
+                    max_block_event_seqnum += 1;
+                    let data = BlockEventData {
+                        seqnum: max_block_event_seqnum,
+                        r#type: BlockEventType::MergeOnChainEvent as i32,
+                        block_number: height.block_number,
+                        event_index: events.len() as u64,
+                        block_timestamp: timestamp.to_u64(),
+                        body: Some(block_event_data::Body::MergeOnChainEventEventBody(
+                            proto::MergeOnChainEventEventBody {
+                                on_chain_event: Some(on_chain_event),
+                            },
+                        )),
+                    };
+                    let event = Self::build_block_event(data);
+                    events.push(event);
                 }
                 _ => {}
             }
@@ -659,6 +1871,7 @@ impl BlockEngine {
     fn storage_slot_for_transaction(
         &self,
         snapchain_txn: &Transaction,
+        engine_version: EngineVersion,
         count_lent_storage: bool,
         count_borrowed_storage: bool,
     ) -> Option<StorageSlot> {
@@ -670,6 +1883,7 @@ impl BlockEngine {
 
         self.stores.get_storage_slot_for_fid(
             snapchain_txn.fid,
+            engine_version,
             &pending_onchain_events,
             count_lent_storage,
             count_borrowed_storage,
@@ -694,7 +1908,8 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let storage_slot = self.storage_slot_for_transaction(&transaction, true, true)?;
+                let storage_slot =
+                    self.storage_slot_for_transaction(&transaction, version, true, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {
@@ -776,6 +1991,77 @@ impl BlockEngine {
             .time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
         self.metrics.count("propose.invoked", 1, vec![]);
+        state_change
+    }
+
+    /// Test-only proposal path for scenarios that must pin both valid cross-fid transaction
+    /// orderings. Production proposal order is intentionally proposer-chosen via HashMap
+    /// grouping, so tests cannot request a particular order through `propose_state_change`.
+    #[cfg(test)]
+    pub(crate) fn propose_state_change_with_transaction_order_for_test(
+        &mut self,
+        messages: Vec<MempoolMessage>,
+        ordered_fids: &[u64],
+        height: Height,
+        timestamp: FarcasterTime,
+    ) -> BlockStateChange {
+        let version = EngineVersion::version_for(&timestamp, self.network);
+        assert!(version.is_enabled(ProtocolFeature::WriteDataToShardZero));
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)
+            .unwrap()
+            .into_iter()
+            .filter_map(|mut transaction| {
+                let storage_slot =
+                    self.storage_slot_for_transaction(&transaction, version, true, true)?;
+                if !storage_slot.is_active() {
+                    transaction.user_messages.clear();
+                }
+                (!transaction.system_messages.is_empty() || !transaction.user_messages.is_empty())
+                    .then_some(transaction)
+            })
+            .collect_vec();
+        let mut actual_fids = snapchain_txns
+            .iter()
+            .map(|transaction| transaction.fid)
+            .collect_vec();
+        actual_fids.sort_unstable();
+        let mut expected_fids = ordered_fids.to_vec();
+        expected_fids.sort_unstable();
+        assert_eq!(actual_fids, expected_fids);
+        snapchain_txns.sort_by_key(|transaction| {
+            ordered_fids
+                .iter()
+                .position(|fid| *fid == transaction.fid)
+                .unwrap()
+        });
+
+        self.set_height(&version, height);
+        let mut all_hub_events = Vec::new();
+        for snapchain_txn in &mut snapchain_txns {
+            let (account_root, hub_events, _) = self
+                .replay_snapchain_txn(
+                    &merkle_trie::Context::new(),
+                    snapchain_txn,
+                    &mut txn_batch,
+                    &timestamp,
+                    version,
+                )
+                .unwrap();
+            snapchain_txn.account_root = account_root;
+            all_hub_events.extend(hub_events);
+        }
+        let (events, events_hash) =
+            self.generate_block_events(height, &timestamp, all_hub_events, &mut txn_batch);
+        let state_change = BlockStateChange {
+            timestamp,
+            new_state_root: self.stores.trie.root_hash().unwrap(),
+            events_hash,
+            transactions: snapchain_txns,
+            events,
+        };
+        self.stores.trie.reload(&self.db).unwrap();
         state_change
     }
 
@@ -1092,6 +2378,75 @@ impl BlockEngine {
 }
 
 #[cfg(test)]
+mod verification_cap_tests {
+    use super::{verification_row_cap, verification_tombstone_cap};
+
+    // Pinned as pure functions because the interesting input -- an allowance ABOVE the 256 floor,
+    // which takes ~52 storage units -- is impractical to reach through the commit path.
+    #[test]
+    fn tombstone_cap_floors_at_the_constant_and_then_scales() {
+        // No storage: storage-free fids must not mint permanent rows at all.
+        assert_eq!(verification_tombstone_cap(0), 0);
+        assert_eq!(verification_row_cap(0), 0);
+
+        // Below the floor (one 2025 unit is 5), the floor dominates so a whale shedding a large
+        // pre-V21 set is not blocked by its own small live allowance.
+        assert_eq!(verification_tombstone_cap(5), 256);
+        assert_eq!(verification_row_cap(5), 261);
+
+        // Above the floor, the allowance scales instead -- this is the `.max(max_messages)` term.
+        assert_eq!(verification_tombstone_cap(300), 300);
+        assert_eq!(verification_row_cap(300), 600);
+    }
+
+    #[test]
+    fn row_cap_saturates_rather_than_overflowing() {
+        assert_eq!(verification_row_cap(u32::MAX), u32::MAX);
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::block_engine_system_messages_for_replay;
+    use crate::proto::{OnChainEvent, ValidatorMessage};
+    use crate::version::version::EngineVersion;
+
+    fn validator_message(block_number: u32, log_index: u32) -> ValidatorMessage {
+        ValidatorMessage {
+            on_chain_event: Some(OnChainEvent {
+                block_number,
+                log_index,
+                ..Default::default()
+            }),
+            fname_transfer: None,
+            block_event: None,
+        }
+    }
+
+    fn log_indexes(messages: &[ValidatorMessage]) -> Vec<u32> {
+        messages
+            .iter()
+            .map(|message| message.on_chain_event.as_ref().unwrap().log_index)
+            .collect()
+    }
+
+    #[test]
+    fn sorted_block_engine_events_gate_controls_system_message_order() {
+        let messages = vec![
+            validator_message(7, 20),
+            validator_message(7, 10),
+            validator_message(6, 30),
+        ];
+
+        let off = block_engine_system_messages_for_replay(&messages, EngineVersion::V19);
+        assert_eq!(log_indexes(off.as_ref()), vec![20, 10, 30]);
+
+        let on = block_engine_system_messages_for_replay(&messages, EngineVersion::V21);
+        assert_eq!(log_indexes(on.as_ref()), vec![30, 10, 20]);
+    }
+}
+
+#[cfg(test)]
 mod error_conversion_tests {
     //! Lock down `From<engine::MessageValidationError> for block_engine::MessageValidationError`.
     //!
@@ -1191,5 +2546,140 @@ mod error_conversion_tests {
             }
             other => panic!("expected HubError fallthrough, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_message_gate_tests {
+    use super::{ChannelMergeDispatch, MessageValidationError};
+    use crate::core::util::FarcasterTime;
+    use crate::core::validations::error::ValidationError;
+    use crate::proto::MessageType;
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::StorageSlot;
+    use crate::storage::store::block_engine_test_helpers;
+    use crate::utils::factory::messages_factory;
+    use crate::version::version::EngineVersion;
+
+    /// Pre-feature channel bodies still die in stateless validation. With V21 active they reach
+    /// the channel arm and fail because the fixture's channel is intentionally unregistered.
+    #[test]
+    fn channel_messages_are_gated_and_require_a_registered_channel() {
+        let (mut engine, _tmpdir) = block_engine_test_helpers::setup();
+        let fid = 1234;
+        block_engine_test_helpers::register_user(
+            fid,
+            block_engine_test_helpers::default_signer(),
+            block_engine_test_helpers::default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(fid, message_type, body, None, None);
+            let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+            let active = engine.validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &timestamp,
+                EngineVersion::V21,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                active,
+                Err(MessageValidationError::HubError(ref error))
+                    if error.message == "unknown channel"
+            ));
+            let pre_feature = engine.validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                pre_feature,
+                Err(MessageValidationError::MessageValidationError(
+                    ValidationError::InvalidMessageType
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn channel_validation_dispatch_covers_all_four_stores() {
+        let (engine, _tmpdir) = block_engine_test_helpers::setup();
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let dispatch = match message_type {
+                MessageType::ChannelUpdate => ChannelMergeDispatch::Update,
+                MessageType::ChannelMember => ChannelMergeDispatch::Member,
+                MessageType::ChannelPin => ChannelMergeDispatch::Pin,
+                MessageType::ChannelModerate => ChannelMergeDispatch::Moderate,
+                _ => unreachable!(),
+            };
+            let active = engine.merge_channel_message(
+                &message,
+                &mut RocksDbTransactionBatch::new(),
+                dispatch,
+                true,
+            );
+            assert!(
+                active.is_ok(),
+                "{message_type:?} dispatch failed: {active:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_engine_channel_width_checks_remain_independent() {
+        use crate::proto::message_data::Body;
+
+        let (engine, _tmpdir) = block_engine_test_helpers::setup();
+        let txn = RocksDbTransactionBatch::new();
+
+        let mut update = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![1; 31],
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel id must be 32 bytes"
+        ));
+
+        if let Some(Body::ChannelUpdateBody(body)) =
+            update.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.channel_id = vec![1; 32];
+        }
+        update.data.as_mut().unwrap().r#type = MessageType::ChannelModerate as i32;
+        update.data.as_mut().unwrap().body = Some(Body::ChannelModerateBody(
+            crate::proto::ChannelModerateBody {
+                channel_id: vec![1; 32],
+                cast_hash: vec![2; 19],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            },
+        ));
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel moderate cast hash must be 20 bytes"
+        ));
     }
 }

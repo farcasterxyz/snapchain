@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-07-16
+
+### 🚀 Features
+
+- *(link)* Block links (FIP-263) with V19-gated type-scoped compaction (#946)
+
+### 🐛 Bug Fixes
+
+- Subscribe read nodes to MEMPOOL_TOPIC (#866)
+- Confirm block events against the store, not just the broadcast (#949)
+- Wait for shard-chunk replication in read-node relay test (#952)
+- *(test)* Use rolling timestamp for default_storage_event grant (#962)
+- Pin unit test timestamp for protocol-version cutover test (#967)
+
+### ⚙️ Miscellaneous Tasks
+
+- Cache cargo artifacts in verify workflow (#951)
+- Reuse cached malachite artifacts in verify workflow (#966)
+
+## [0.13.2] - 2026-06-24
+
+### ⚙️ Miscellaneous Tasks
+
+- Add erebor node as bootstrap peer (#942)
+
+## [0.13.1] - 2026-06-24
+
+### ⚙️ Miscellaneous Tasks
+
+- Add Degen Validator (#939)
+
+## [0.13.0] - 2026-06-12
+
+### 🚀 Features
+
+- Extend storage expiry by one year (#906)
+- *(gossip)* Per-peer/per-topic gossip metrics (prometheus-client) (#926)
+- *(mesh)* Local mesh view endpoint `/v1/mesh` (#927)
+- *(mesh)* Network-wide topology crawl over the gossip port (#928)
+
+### 🐛 Bug Fixes
+
+- *(test)* Flaky test should accomodate 10k char-length casts (#908)
+- Handle direct peers correctly in mesh observability endpoint (#930)
+
+### 📚 Documentation
+
+- Add GitHub release publishing step
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ci caching logic to accomodate branches and 5 commits on main (#907)
+
+## [0.12.0] - 2026-05-20
+
+### 🚀 Features
+
+- Add FIP-268 LIVE_AT user data support behind protocol version V17.
+
 ## [0.11.3] - 2026-01-20
 
 ### 🐛 Bug Fixes

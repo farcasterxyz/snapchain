@@ -15,6 +15,7 @@ export default defineConfig({
           { text: 'What is Snapchain?', link: '/' },
           { text: 'Getting started', link: '/getting-started' },
           { text: 'Whitepaper', link: '/whitepaper' },
+          { text: 'Validators', link: '/validators' },
         ],
       },
       {

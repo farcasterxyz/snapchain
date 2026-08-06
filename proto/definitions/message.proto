@@ -45,6 +45,10 @@ message MessageData {
     LendStorageBody lend_storage_body = 18;
     KeyAddBody key_add_body = 19;
     KeyRemoveBody key_remove_body = 20;
+    ChannelUpdateBody channel_update_body = 21;
+    ChannelMemberBody channel_member_body = 22;
+    ChannelPinBody channel_pin_body = 23;
+    ChannelModerateBody channel_moderate_body = 24;
   } // Properties specific to the MessageType
 }
 
@@ -82,6 +86,10 @@ enum MessageType {
   MESSAGE_TYPE_LEND_STORAGE = 15;
   MESSAGE_TYPE_KEY_ADD = 16; // Register an Ed25519 key via custody-authenticated message
   MESSAGE_TYPE_KEY_REMOVE = 17; // Revoke an Ed25519 key via custody signature or self-revocation
+  MESSAGE_TYPE_CHANNEL_UPDATE = 18;
+  MESSAGE_TYPE_CHANNEL_MEMBER = 19;
+  MESSAGE_TYPE_CHANNEL_PIN = 20;
+  MESSAGE_TYPE_CHANNEL_MODERATE = 21;
 }
 
 /** Farcaster network the message is intended for */
@@ -113,6 +121,7 @@ enum UserDataType {
   USER_DATA_PRIMARY_ADDRESS_ETHEREUM = 11; // Primary address for the user on Ethereum
   USER_DATA_PRIMARY_ADDRESS_SOLANA = 12; // Primary address for the user on Solana
   USER_DATA_TYPE_PROFILE_TOKEN = 13; // Profile token in CAIP-19 format
+  USER_DATA_TYPE_LIVE_AT = 14; // URL of the user's live activity
 }
 
 message Embed {
@@ -252,4 +261,101 @@ message KeyRemoveBody {
   uint32 signature_type = 3; // 1 = custody (EIP-712), 2 = self (Ed25519)
   uint32 deadline = 4; // Farcaster epoch timestamp after which the signature is invalid
   uint32 nonce = 5; // Monotonically increasing nonce (user nonce for custody, app nonce for self)
+}
+
+/**
+ * ADVISORY metadata only: the protocol accepts casts into a channel regardless
+ * of mode, and never enforces it at cast merge. Clients may enforce it.
+ */
+enum CastingMode {
+  CASTING_MODE_NONE = 0;
+  CASTING_MODE_EVERYONE = 1;
+  CASTING_MODE_MEMBERS_ONLY = 2;
+  CASTING_MODE_RECOMMENDED = 3;
+}
+
+/**
+ * Protocol-relevant, unlike CastingMode: this gates whether an fid may add
+ * itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
+ * whose fid equals the sending message's fid).
+ *
+ * Under OPEN an fid may self-add, but only from no membership at all or from
+ * REMOVED: a banned fid stays banned, and one already MEMBER or MODERATOR is
+ * rejected rather than re-added. Under APPROVAL the add must come from the
+ * channel OWNER or a MODERATOR — an owner satisfies it directly and does not
+ * need a moderator role. Either mode still rejects an add whose target is
+ * banned.
+ *
+ * NONE is the proto3 zero value, not a third policy: an absent or explicitly
+ * zero mode folds to APPROVAL, so a cosmetic-only ChannelUpdate closes
+ * membership rather than opening it.
+ *
+ * Enforced at shard-0 admission wherever channel messages are active (they are
+ * version-gated and inert on networks below that version).
+ */
+enum MembershipMode {
+  MEMBERSHIP_MODE_NONE = 0;
+  MEMBERSHIP_MODE_OPEN = 1;
+  MEMBERSHIP_MODE_APPROVAL = 2;
+}
+
+enum ChannelMemberAction {
+  CHANNEL_MEMBER_ACTION_NONE = 0;
+  CHANNEL_MEMBER_ACTION_ADD_MEMBER = 1;
+  CHANNEL_MEMBER_ACTION_REMOVE_MEMBER = 2;
+  CHANNEL_MEMBER_ACTION_ADD_MODERATOR = 3;
+  CHANNEL_MEMBER_ACTION_REMOVE_MODERATOR = 4;
+  CHANNEL_MEMBER_ACTION_BAN = 5;
+  CHANNEL_MEMBER_ACTION_UNBAN = 6;
+}
+
+enum ChannelModerateAction {
+  CHANNEL_MODERATE_ACTION_NONE = 0;
+  CHANNEL_MODERATE_ACTION_HIDE = 1;
+  CHANNEL_MODERATE_ACTION_UNHIDE = 2;
+}
+
+// WHOLE-REPLACE, NOT MERGE-PATCH. The winning ChannelUpdate is the channel's
+// entire configuration: a field omitted here reads as unset, it is NOT inherited
+// from the update this one supersedes. Sending `{channel_id, name}` to rename a
+// channel therefore CLEARS its description, image_url, header, rules, and both
+// modes (which fold back to the restrictive defaults). Clients must send the
+// full desired state on every update, not just the fields they are changing.
+message ChannelUpdateBody {
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto
+  // — the join key tying a channel's registry events and messages together.
+  bytes channel_id = 1;
+  optional string name = 2;
+  optional string description = 3;
+  optional string image_url = 4;
+  optional string header = 5;
+  optional string rules = 6;
+  optional CastingMode casting_mode = 7;
+  optional MembershipMode membership_mode = 8;
+}
+
+message ChannelMemberBody {
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
+  uint64 fid = 2;
+  ChannelMemberAction action = 3;
+}
+
+/** A single pin per channel; a new pin replaces the previous one. */
+message ChannelPinBody {
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
+  // The pinned cast. An empty cast_hash unpins.
+  bytes cast_hash = 2;
+}
+
+message ChannelModerateBody {
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
+  bytes cast_hash = 2;
+  ChannelModerateAction action = 3;
 }

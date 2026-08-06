@@ -1,2 +1,2 @@
 #[cfg(test)]
-mod cfg_test;
+mod cfg_tests;

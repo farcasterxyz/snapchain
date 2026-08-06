@@ -53,8 +53,9 @@ pub mod events_factory {
     use super::*;
     use crate::{
         proto::{
-            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
-            MergeMessageEventBody, StorageUnitType, TierPurchaseBody, TierType,
+            self, BlockEvent, BlockEventData, BlockEventType, ChannelRegisterBody,
+            ChannelRegisterEventType, HeartbeatEventBody, MergeMessageEventBody,
+            MergeOnChainEventEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -101,6 +102,36 @@ pub mod events_factory {
         }
     }
 
+    // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V21) is
+    // active; tests construct it directly to exercise the receiver-side admission arm. The
+    // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
+    // network (devnet -> V21 active; mainnet -> pre-V21 inactive), mirroring the KEY_ADD tests.
+    pub fn create_merge_on_chain_event_event(
+        on_chain_event: OnChainEvent,
+        seqnum: u64,
+    ) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::MergeOnChainEvent as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::MergeOnChainEventEventBody(
+                MergeOnChainEventEventBody {
+                    on_chain_event: Some(on_chain_event),
+                },
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {
             r#type: OnChainEventType::EventTypeIdRegister as i32,
@@ -129,7 +160,10 @@ pub mod events_factory {
         match unit_type {
             StorageUnitType::UnitTypeLegacy => {
                 if expired {
-                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - (3 * one_year_in_seconds);
+                    // Legacy units are valid for up to 4 years once StorageExpiryExtension2026
+                    // (V18) is enabled, so back-date far enough that the slot is expired under
+                    // both the pre- and post-extension multipliers.
+                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - (4 * one_year_in_seconds);
                 } else {
                     timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - 1;
                 }
@@ -275,6 +309,38 @@ pub mod events_factory {
                     for_days,
                     tier_type: TierType::Pro as i32,
                     payer: rand::random::<[u8; 32]>().to_vec(),
+                },
+            )),
+        }
+    }
+
+    pub fn create_channel_register_event(
+        channel_key: &str,
+        label: Vec<u8>,
+        owner_address: Vec<u8>,
+        expiry: u64,
+        event_type: ChannelRegisterEventType,
+        block_number: u32,
+        log_index: u32,
+    ) -> OnChainEvent {
+        OnChainEvent {
+            r#type: OnChainEventType::EventTypeChannelRegister as i32,
+            chain_id: 8453,
+            block_number,
+            block_hash: vec![],
+            block_timestamp: block_number as u64,
+            transaction_hash: rand::random::<[u8; 32]>().to_vec(),
+            log_index,
+            fid: 0,
+            tx_index: 0,
+            version: 1,
+            body: Some(proto::on_chain_event::Body::ChannelRegisterEventBody(
+                ChannelRegisterBody {
+                    channel_key: channel_key.to_string(),
+                    expiry,
+                    owner_address,
+                    event_type: event_type as i32,
+                    label,
                 },
             )),
         }
@@ -593,6 +659,254 @@ pub mod messages_factory {
                 timestamp,
                 private_key,
             )
+        }
+    }
+
+    pub mod keys {
+        //! Factories for KEY_ADD / KEY_REMOVE messages with real EIP-712 signatures and a real
+        //! Ed25519 envelope. Used by engine-level integration tests; the store-level merge tests
+        //! also lean on `create_key_add` so signing logic lives in exactly one place.
+        use super::*;
+        use crate::core::validations::key::{
+            key_add_typed_data, key_remove_typed_data, signed_key_request_typed_data,
+            KeyAddPayload, KeyRemovePayload, ETH_MAINNET_CHAIN_ID,
+            METADATA_TYPE_SIGNED_KEY_REQUEST,
+        };
+        use crate::proto::{KeyAddBody, KeyRemoveBody};
+        use alloy_primitives::{Bytes, U256};
+        use alloy_signer_local::PrivateKeySigner;
+        use alloy_sol_types::{sol, SolValue};
+
+        // Mirror of the on-chain `SignedKeyRequestValidator.SignedKeyRequestMetadata` ABI struct.
+        // The production type lives in `core::validations::key` (and is also redeclared in
+        // `connectors::onchain_events`); redeclaring a factory-local copy avoids exporting an
+        // ABI-bearing `pub` surface from the validations module just for tests.
+        sol! {
+            struct SignedKeyRequestMetadata {
+                uint256 requestFid;
+                address requestSigner;
+                bytes signature;
+                uint256 deadline;
+            }
+        }
+
+        const KEY_TYPE_ED25519: u32 = 1;
+
+        /// Builds an ABI-encoded `SignedKeyRequestMetadata` signed by `app_custody` for
+        /// `(request_fid, key, deadline)`. The custody address on file for `request_fid` must
+        /// match `app_custody.address()` for `merge_key_add` to accept it.
+        fn build_signed_metadata_bytes(
+            app_custody: &PrivateKeySigner,
+            request_fid: u64,
+            key: &[u8],
+            deadline: u64,
+        ) -> Vec<u8> {
+            let typed_data =
+                signed_key_request_typed_data(request_fid, key, deadline, ETH_MAINNET_CHAIN_ID)
+                    .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let sig: Vec<u8> = app_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+            SignedKeyRequestMetadata {
+                requestFid: U256::from(request_fid),
+                requestSigner: app_custody.address(),
+                signature: Bytes::from(sig),
+                deadline: U256::from(deadline),
+            }
+            .abi_encode()
+        }
+
+        /// Constructs a wire-valid KEY_ADD message: real EIP-712 metadata signature, real EIP-712
+        /// custody signature on the inner `KeyAdd` payload, and a real Ed25519 envelope signed by
+        /// `envelope_signer` (which must be the new key being added — `body.key`).
+        ///
+        /// `fid_custody` must be the `IdRegister.to` address recorded for `fid`, and `app_custody`
+        /// must be the same for `request_fid`. The factory does not register custody addresses on
+        /// any store; callers must do that separately (e.g. via `register_user_with_custody`).
+        pub fn create_key_add(
+            fid: u64,
+            fid_custody: &PrivateKeySigner,
+            request_fid: u64,
+            app_custody: &PrivateKeySigner,
+            envelope_signer: &SigningKey,
+            scopes: Vec<MessageType>,
+            ttl: u32,
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let key_bytes: [u8; 32] = envelope_signer.verifying_key().to_bytes();
+            let scopes_i32: Vec<i32> = scopes.iter().map(|s| *s as i32).collect();
+
+            let payload = KeyAddPayload {
+                fid,
+                key: &key_bytes,
+                key_type: KEY_TYPE_ED25519,
+                scopes: &scopes_i32,
+                ttl,
+                nonce,
+                deadline,
+            };
+            let typed_data = key_add_typed_data(&payload, ETH_MAINNET_CHAIN_ID)
+                .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let custody_sig: Vec<u8> = fid_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+
+            let metadata =
+                build_signed_metadata_bytes(app_custody, request_fid, &key_bytes, deadline as u64);
+
+            let body = KeyAddBody {
+                key: key_bytes.to_vec(),
+                key_type: KEY_TYPE_ED25519,
+                custody_signature: custody_sig,
+                deadline,
+                nonce,
+                metadata,
+                metadata_type: METADATA_TYPE_SIGNED_KEY_REQUEST,
+                registration_tx_hash: vec![],
+                scopes: scopes_i32,
+                ttl,
+            };
+
+            create_message_with_data(
+                fid,
+                MessageType::KeyAdd,
+                message::message_data::Body::KeyAddBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+
+        /// KEY_REMOVE with `signature_type = Custody` (EIP-712 by `fid_custody`). The envelope
+        /// `Message` is signed by `envelope_signer`, which must be any active Ed25519 key on
+        /// `fid` (the engine-level active-signer bypass exists for KEY_REMOVE too — see
+        /// NEYN-10580).
+        pub fn create_key_remove_custody(
+            fid: u64,
+            fid_custody: &PrivateKeySigner,
+            envelope_signer: &SigningKey,
+            target_key: &[u8; 32],
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let payload = KeyRemovePayload {
+                fid,
+                key: target_key,
+                nonce,
+                deadline,
+            };
+            let typed_data = key_remove_typed_data(&payload, ETH_MAINNET_CHAIN_ID)
+                .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let custody_sig: Vec<u8> = fid_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+
+            let body = KeyRemoveBody {
+                key: target_key.to_vec(),
+                signature: custody_sig,
+                signature_type: 1, // Custody
+                deadline,
+                nonce,
+            };
+
+            create_message_with_data(
+                fid,
+                MessageType::KeyRemove,
+                message::message_data::Body::KeyRemoveBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+
+        /// KEY_REMOVE with `signature_type = SelfRevoke`. The `envelope_signer` IS the key being
+        /// revoked — the envelope's Ed25519 signature stands in for the inner signature, and the
+        /// merge code asserts `msg.signer == body.key`. `body.signature` is left empty.
+        pub fn create_key_remove_self_revoke(
+            fid: u64,
+            envelope_signer: &SigningKey,
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let key_bytes: [u8; 32] = envelope_signer.verifying_key().to_bytes();
+            let body = KeyRemoveBody {
+                key: key_bytes.to_vec(),
+                signature: vec![],
+                signature_type: 2, // SelfRevoke
+                deadline,
+                nonce,
+            };
+            create_message_with_data(
+                fid,
+                MessageType::KeyRemove,
+                message::message_data::Body::KeyRemoveBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+    }
+
+    pub mod channels {
+        //! Bodies for the channel message types. Shared by the ShardEngine and BlockEngine
+        //! channel tests so both pin the same shapes: two copies of this fixture could drift
+        //! apart while still looking identical, leaving one engine asserting a property for a
+        //! body that no longer matches the wire format. BlockEngine now admits and merges these
+        //! under `ProtocolFeature::ChannelMessages`; ShardEngine rejects their direct admission
+        //! and merges them only via shard-0 replay and replication.
+        use super::*;
+        use message::{ChannelMemberBody, ChannelModerateBody, ChannelPinBody, ChannelUpdateBody};
+
+        /// One representative body per channel message type, paired with its `MessageType`.
+        pub fn all_message_bodies() -> Vec<(MessageType, message::message_data::Body)> {
+            let channel_id = vec![0x11; 32];
+            let cast_hash = vec![0x22; 20];
+            vec![
+                (
+                    MessageType::ChannelUpdate,
+                    message::message_data::Body::ChannelUpdateBody(ChannelUpdateBody {
+                        channel_id: channel_id.clone(),
+                        name: Some("pets".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    MessageType::ChannelMember,
+                    message::message_data::Body::ChannelMemberBody(ChannelMemberBody {
+                        channel_id: channel_id.clone(),
+                        fid: 42,
+                        action: message::ChannelMemberAction::AddMember as i32,
+                    }),
+                ),
+                (
+                    MessageType::ChannelPin,
+                    message::message_data::Body::ChannelPinBody(ChannelPinBody {
+                        channel_id: channel_id.clone(),
+                        cast_hash: cast_hash.clone(),
+                    }),
+                ),
+                (
+                    MessageType::ChannelModerate,
+                    message::message_data::Body::ChannelModerateBody(ChannelModerateBody {
+                        channel_id,
+                        cast_hash,
+                        action: message::ChannelModerateAction::Hide as i32,
+                    }),
+                ),
+            ]
         }
     }
 

@@ -274,7 +274,7 @@ impl TrieNode {
         mut keys: Vec<Vec<u8>>,
         current_index: usize,
     ) -> Result<Vec<bool>, TrieError> {
-        if keys.len() == 0 {
+        if keys.is_empty() {
             return Err(TrieError::NoKeysToInsert);
         }
 
@@ -636,7 +636,7 @@ impl TrieNode {
         child_hashes: &mut HashMap<u8, Vec<u8>>,
         prefix: &[u8],
     ) -> Result<(), TrieError> {
-        if prefix.len() > 0 {
+        if !prefix.is_empty() {
             let char = prefix[prefix.len() - 1];
             let hash = self.hash();
 

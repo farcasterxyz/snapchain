@@ -1,15 +1,17 @@
 use crate::cfg::Config as AppConfig;
-use crate::proto::TierPurchaseBody;
+use crate::proto::{
+    ChannelRegisterBody, ChannelRegisterEventType, FarcasterNetwork, TierPurchaseBody,
+};
 use crate::storage::store::node_local_state;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
-use alloy_provider::{Provider, ProviderBuilder, RootProvider};
+use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent, SolType};
-use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
-use foundry_common::ens::EnsResolver::EnsResolverInstance;
-use foundry_common::ens::{namehash, EnsError, EnsRegistry};
+use ens::EnsResolver::EnsResolverInstance;
+use ens::{namehash, EnsError, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,6 +37,8 @@ use crate::{
     storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
+
+pub(crate) mod ens;
 
 sol!(
     #[allow(missing_docs)]
@@ -63,6 +67,47 @@ sol!(
     TierRegistryAbi,
     "src/connectors/onchain_events/tier_registry_abi.json"
 );
+
+sol!(
+    /// Farcaster channel registry events. Channel names are registered as ERC-721
+    /// NFTs whose tokenId is `uint256(keccak256(channel name))`. The connector
+    /// consumes three events and emits each as an `EVENT_TYPE_CHANNEL_REGISTER`
+    /// onchain event — but they come from TWO contracts, which is why
+    /// `contracts()` watches two addresses:
+    ///
+    /// * `NameRegistered` (initial registration) and `NameRenewed` (expiry
+    ///   extension) are emitted by the **RegistrarController**, which is the
+    ///   address an operator configures. Only the controller's events carry the
+    ///   plaintext channel name.
+    /// * The ERC-721 `Transfer` (ownership change) is emitted by the
+    ///   **BaseRegistrar**, the token contract. It is derived from the controller
+    ///   at startup — see `Subscriber::resolve_channel_registrar_token`.
+    ///
+    /// Watching only one of the two silently drops the other's events: no error,
+    /// no metric, just an event type that never fires (NEYN-12914).
+    ///
+    /// The mainnet controller address is added as a constant once the contract
+    /// deploys; until then it is only watched when
+    /// `override_channel_registrar_address` is set (see `contracts()`).
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    ChannelRegistrarAbi,
+    "src/connectors/onchain_events/channel_registrar_abi.json"
+);
+
+sol! {
+    /// The one RegistrarController *call* the connector makes. The vendored ABI
+    /// JSON above carries events only, and `RegistrarController.base` — which
+    /// would hand us the ERC-721 directly — is `immutable` but not `public`, so
+    /// no getter for it exists. `rootNode()` is the way in: the deploy transfers
+    /// that ENS node to the BaseRegistrar, so the node's owner IS the token
+    /// contract.
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    contract ChannelRegistrarController {
+        function rootNode() view returns (bytes32);
+    }
+}
 
 sol! {
     /// SignedKeyRequest metadata structure as defined in the Farcaster contracts.
@@ -98,6 +143,17 @@ pub struct Config {
     pub start_block_number: Option<u64>,
     pub stop_block_number: Option<u64>,
     pub override_tier_registry_address: Option<String>, // For testing
+    pub override_channel_registrar_address: Option<String>, // For testing
+    /// The ENS registry used to derive the channel registry's ERC-721 from its
+    /// controller. Defaults to the canonical ENS registry address, which is what
+    /// the Sepolia channel-registry deployment sits under.
+    ///
+    /// Configurable rather than derived from `chain` because nothing guarantees
+    /// the registry address: it happens to match across Ethereum mainnet and
+    /// Sepolia as an artifact of ENS's deploy history, and the chain the channel
+    /// registry ends up on for mainnet is not settled. A wrong address here
+    /// fails loudly at startup, so an operator finds out immediately.
+    pub override_ens_registry_address: Option<String>,
 }
 
 impl Default for Config {
@@ -107,6 +163,8 @@ impl Default for Config {
             start_block_number: None,
             stop_block_number: None,
             override_tier_registry_address: None,
+            override_channel_registrar_address: None,
+            override_ens_registry_address: None,
         };
     }
 }
@@ -143,6 +201,12 @@ pub enum SubscribeError {
     #[error("Empty rpc url")]
     EmptyRpcUrl,
 
+    #[error("Invalid override contract address: {0}")]
+    InvalidOverrideAddress(String),
+
+    #[error("Could not resolve the channel registry's ERC-721 from its controller: {0}")]
+    ChannelRegistrarTokenUnresolved(String),
+
     #[error("Log missing block hash")]
     LogMissingBlockHash,
 
@@ -177,7 +241,7 @@ pub fn get_request_fid_from_signer_event(signer_event_body: &SignerEventBody) ->
         return None;
     }
 
-    match SignedKeyRequestMetadata::abi_decode(&signer_event_body.metadata, true) {
+    match SignedKeyRequestMetadata::abi_decode(&signer_event_body.metadata) {
         Ok(decoded) => {
             // Convert U256 to u64, returning None if it doesn't fit
             decoded.requestFid.try_into().ok()
@@ -268,7 +332,7 @@ impl ChainClients {
 }
 
 pub struct RealL1Client {
-    provider: RootProvider<Http<Client>>,
+    provider: RootProvider,
     ens_resolver_address: Option<Address>,
 }
 
@@ -281,7 +345,7 @@ impl RealL1Client {
             return Err(SubscribeError::EmptyRpcUrl);
         }
         let url = rpc_url.parse()?;
-        let provider = ProviderBuilder::new().on_http(url);
+        let provider = RootProvider::new_http(url);
         Ok(RealL1Client {
             provider,
             ens_resolver_address,
@@ -292,7 +356,8 @@ impl RealL1Client {
 #[async_trait]
 impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
-        // Copied from foundry_common::ens so we can support both ETH and Base mainnet
+        // Adapted from the ens module (originally foundry_common::ens) so we can support
+        // both ETH and Base mainnet
         let node = namehash(name.as_str());
         let ens_resolver_address = self.ens_resolver_address.ok_or(EnsError::ResolverNotFound(
             "no resolver address configured for chain".to_string(),
@@ -302,8 +367,7 @@ impl ChainAPI for RealL1Client {
             .resolver(node)
             .call()
             .await
-            .map_err(EnsError::Resolver)?
-            ._0;
+            .map_err(EnsError::Resolver)?;
         if address == Address::ZERO {
             return Err(EnsError::ResolverNotFound(name.to_string()));
         }
@@ -315,8 +379,7 @@ impl ChainAPI for RealL1Client {
             .map_err(EnsError::Resolve)
             .inspect_err(|e| {
                 warn!("Failed to resolve ens name {name}: {}", e);
-            })?
-            ._0;
+            })?;
         Ok(addr)
     }
 
@@ -335,6 +398,12 @@ pub enum ContractKind {
     StorageRegistry,
     KeyRegistry,
     IdRegistry,
+    /// The RegistrarController: `NameRegistered` / `NameRenewed`, the only events
+    /// carrying the plaintext channel name. This is the address operators set.
+    ChannelRegistrarController,
+    /// The BaseRegistrar ERC-721: channel-ownership `Transfer`. Derived from the
+    /// controller rather than configured, so the two cannot drift apart.
+    ChannelRegistrarToken,
 }
 #[derive(Clone)]
 pub struct Contract {
@@ -377,6 +446,9 @@ impl Contract {
             ContractKind::StorageRegistry => "storage",
             ContractKind::KeyRegistry => "key",
             ContractKind::IdRegistry => "id",
+            ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken => {
+                "channel"
+            }
         }
     }
 
@@ -420,12 +492,19 @@ impl Contract {
                         .topic3(U256::from(fid)),
                 ]
             }
+            // Channel registrar events are keyed by label/owner address onchain, not
+            // by fid (the connector always emits fid = 0 and resolution happens at
+            // read time, via GetChannelOwner), so there is no per-fid retry filter.
+            // Retry by block range.
+            ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken => {
+                vec![]
+            }
         }
     }
 }
 
 pub struct Subscriber {
-    provider: RootProvider<Http<Client>>,
+    provider: RootProvider,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     start_block_number: Option<u64>,
     stop_block_number: Option<u64>,
@@ -433,7 +512,30 @@ pub struct Subscriber {
     local_state_store: LocalStateStore,
     onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
     chain: node_local_state::Chain,
-    override_tier_registry_address: Option<String>,
+    /// Only used to decide whether a channel-registry misconfiguration is fatal.
+    /// See `resolve_channel_registrar_token`.
+    network: FarcasterNetwork,
+    override_tier_registry_address: Option<Address>,
+    override_channel_registrar_address: Option<Address>,
+    /// The ENS registry the channel registry's root 2LD lives under. Resolved at
+    /// construction from config, defaulting to the canonical ENS address.
+    ens_registry_address: Address,
+    /// The BaseRegistrar ERC-721, resolved from the controller at the start of
+    /// `run()`. `None` until then, and permanently `None` when no channel
+    /// registrar is configured at all.
+    ///
+    /// Not config: deriving it is what guarantees the token contract belongs to
+    /// the same deployment as the controller. Two independently configured
+    /// addresses could name unrelated contracts with nothing to catch it.
+    channel_registrar_token: Option<Address>,
+}
+
+/// Parses an override contract address from config once, at construction, so a
+/// malformed value surfaces as a structured startup error instead of a panic
+/// when the contract list is first built.
+fn parse_override_address(address: &str) -> Result<Address, SubscribeError> {
+    Address::from_str(address)
+        .map_err(|err| SubscribeError::InvalidOverrideAddress(format!("{}: {}", address, err)))
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -441,6 +543,7 @@ impl Subscriber {
     pub fn new(
         config: &Config,
         chain: node_local_state::Chain,
+        network: FarcasterNetwork,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
@@ -450,7 +553,7 @@ impl Subscriber {
             return Err(SubscribeError::EmptyRpcUrl);
         }
         let url = config.rpc_url.parse()?;
-        let provider = ProviderBuilder::new().on_http(url);
+        let provider = RootProvider::new_http(url);
         Ok(Subscriber {
             local_state_store,
             provider,
@@ -462,8 +565,82 @@ impl Subscriber {
             statsd_client,
             onchain_events_request_rx,
             chain,
-            override_tier_registry_address: config.override_tier_registry_address.clone(),
+            network,
+            override_tier_registry_address: config
+                .override_tier_registry_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?,
+            override_channel_registrar_address: config
+                .override_channel_registrar_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?,
+            ens_registry_address: config
+                .override_ens_registry_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?
+                .unwrap_or(ETH_L1_ENS_REGISTRY),
+            channel_registrar_token: None,
         })
+    }
+
+    /// Whether the engine is currently accepting channel-register events.
+    ///
+    /// Gates how loudly a failed registry resolution is reported: before
+    /// activation the events are rejected anyway, so an unresolvable registry is
+    /// a warning; after, it means silent data loss and is fatal.
+    fn channel_registrations_active(&self) -> bool {
+        EngineVersion::current(self.network).is_enabled(ProtocolFeature::ChannelRegistrations)
+    }
+
+    /// Derives the channel registry's ERC-721 from its controller.
+    ///
+    /// `RegistrarController.base` holds the address we want but is `immutable`
+    /// and not `public`, so there is no getter. The route in is the ENS registry:
+    /// deploying the registry transfers the root 2LD to the BaseRegistrar, so
+    ///
+    ///   `ENSRegistry.owner(controller.rootNode()) == BaseRegistrar`
+    ///
+    /// which the deployment doc verifies explicitly ("2LD handoff succeeded").
+    ///
+    /// Two RPC calls at startup, and a hard failure if either fails or the answer
+    /// is the zero address. Degrading to "watch the controller only" would put us
+    /// back in the exact silent state this exists to prevent — registrations
+    /// ingesting while every ownership transfer is dropped.
+    async fn resolve_channel_registrar_token(
+        &self,
+        controller: Address,
+    ) -> Result<Address, SubscribeError> {
+        let root_node = ChannelRegistrarController::new(controller, &self.provider)
+            .rootNode()
+            .call()
+            .await
+            .map_err(|err| {
+                SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                    "rootNode() on controller {controller}: {err}"
+                ))
+            })?;
+
+        let registry = self.ens_registry_address;
+        let token = ens::EnsRegistry::new(registry, &self.provider)
+            .owner(root_node)
+            .call()
+            .await
+            .map_err(|err| {
+                SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                    "owner({root_node}) on ENS registry {registry}: {err}"
+                ))
+            })?;
+
+        if token.is_zero() {
+            return Err(SubscribeError::ChannelRegistrarTokenUnresolved(format!(
+                "ENS registry {registry} reports no owner for root node {root_node}; \
+                 controller {controller} is not a live channel registry on this chain"
+            )));
+        }
+        Ok(token)
     }
 
     fn contracts(&self) -> Vec<Contract> {
@@ -473,13 +650,37 @@ impl Subscriber {
                 Contract::key_registry(),
                 Contract::id_registry(),
             ],
-            node_local_state::Chain::Base => vec![match &self.override_tier_registry_address {
-                None => Contract::tier_registry(),
-                Some(tier_registry_address) => Contract {
-                    address: Address::from_str(&tier_registry_address).unwrap(),
-                    kind: ContractKind::TierRegistry,
-                },
-            }],
+            node_local_state::Chain::Base => {
+                let mut contracts = vec![match self.override_tier_registry_address {
+                    None => Contract::tier_registry(),
+                    Some(address) => Contract {
+                        address,
+                        kind: ContractKind::TierRegistry,
+                    },
+                }];
+                // The mainnet controller address is added as a constant once the
+                // contract deploys. Until then it is only watched when the override
+                // is configured (tests + the testnet acceptance run), so the
+                // connector is a no-op on mainnet even after this code ships.
+                //
+                // BOTH addresses are pushed: the controller emits NameRegistered /
+                // NameRenewed, the token contract emits the ERC-721 Transfer. The
+                // token address is resolved in `run()`, so a `contracts()` call
+                // before that (none exist today) would watch the controller only.
+                if let Some(address) = self.override_channel_registrar_address {
+                    contracts.push(Contract {
+                        address,
+                        kind: ContractKind::ChannelRegistrarController,
+                    });
+                }
+                if let Some(address) = self.channel_registrar_token {
+                    contracts.push(Contract {
+                        address,
+                        kind: ContractKind::ChannelRegistrarToken,
+                    });
+                }
+                contracts
+            }
         }
     }
 
@@ -575,6 +776,9 @@ impl Subscriber {
             OnChainEventType::EventTypeTierPurchase => {
                 self.count("num_tier_purchase_events", 1, vec![]);
             }
+            OnChainEventType::EventTypeChannelRegister => {
+                self.count("num_channel_register_events", 1, vec![]);
+            }
         };
         match &event.body {
             Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {
@@ -642,11 +846,7 @@ impl Subscriber {
     async fn get_block_timestamp(&self, block_hash: FixedBytes<32>) -> Result<u64, SubscribeError> {
         let mut retry_count = 0;
         loop {
-            match self
-                .provider
-                .get_block_by_hash(block_hash, alloy_rpc_types::BlockTransactionsKind::Hashes)
-                .await
-            {
+            match self.provider.get_block_by_hash(block_hash).await {
                 Ok(Some(block)) => {
                     return Ok(block.header.timestamp);
                 }
@@ -693,6 +893,12 @@ impl Subscriber {
         // TODO(aditi): Cache these queries for timestamp to optimize rpc calls.
         // [block_timestamp] exists on [Log], however it's never populated in practice.
         let block_timestamp = self.get_block_timestamp(block_hash).await?;
+        // Cloned up front so the channel-registrar arms can emit a warn + metric on a
+        // dropped log: the `add_event` closure below borrows `self` mutably for the whole
+        // match, which would otherwise conflict with `self.count`/`self.chain` in an arm.
+        let statsd_client = self.statsd_client.clone();
+        let chain = self.chain.clone();
+        let chain_name = chain.to_string();
         let add_event = |fid, event_type, event_body| async move {
             self.add_onchain_event(
                 fid,
@@ -740,19 +946,51 @@ impl Subscriber {
                 Ok(())
             }
             Some(&IdRegistryAbi::Transfer::SIGNATURE_HASH) => {
-                let IdRegistryAbi::Transfer { from, to, id } = event.log_decode()?.inner.data;
-                let fid = id.try_into()?;
-                add_event(
-                    fid,
-                    OnChainEventType::EventTypeIdRegister,
-                    on_chain_event::Body::IdRegisterEventBody(IdRegisterEventBody {
-                        event_type: IdRegisterEventType::Transfer as i32,
-                        to: to.to_vec(),
-                        from: from.to_vec(),
-                        recovery_address: vec![],
-                    }),
-                )
-                .await;
+                // Transfer(address,address,uint256) is emitted by BOTH the OP IdRegistry
+                // (an fid custody transfer) and the Base channel registrar (an ERC-721
+                // channel NFT transfer); the two share a topic0. The subscriber is
+                // per-chain and these contracts are chain-disjoint (no Base contract we
+                // watch otherwise emits Transfer), so we dispatch on the chain. Revisit if
+                // a second Transfer-emitting contract is ever watched on the same chain.
+                match chain {
+                    node_local_state::Chain::Base => {
+                        // ERC-721 Transfer carries only the tokenId; the store learns the
+                        // tokenId -> channel_key mapping from the REGISTER event. tokenId
+                        // == uint256(label), so the tokenId's big-endian bytes reproduce
+                        // `label` exactly. `to` is the receiving address, resolved to an
+                        // fid at read time (see GetChannelOwner); fid is always 0 here.
+                        let ChannelRegistrarAbi::Transfer { from: _, to, id } =
+                            event.log_decode()?.inner.data;
+                        add_event(
+                            0,
+                            OnChainEventType::EventTypeChannelRegister,
+                            on_chain_event::Body::ChannelRegisterEventBody(ChannelRegisterBody {
+                                channel_key: String::new(),
+                                expiry: 0,
+                                owner_address: to.to_vec(),
+                                event_type: ChannelRegisterEventType::Transfer as i32,
+                                label: id.to_be_bytes::<32>().to_vec(),
+                            }),
+                        )
+                        .await;
+                    }
+                    node_local_state::Chain::Optimism => {
+                        let IdRegistryAbi::Transfer { from, to, id } =
+                            event.log_decode()?.inner.data;
+                        let fid = id.try_into()?;
+                        add_event(
+                            fid,
+                            OnChainEventType::EventTypeIdRegister,
+                            on_chain_event::Body::IdRegisterEventBody(IdRegisterEventBody {
+                                event_type: IdRegisterEventType::Transfer as i32,
+                                to: to.to_vec(),
+                                from: from.to_vec(),
+                                recovery_address: vec![],
+                            }),
+                        )
+                        .await;
+                    }
+                }
                 Ok(())
             }
             Some(&IdRegistryAbi::ChangeRecoveryAddress::SIGNATURE_HASH) => {
@@ -870,6 +1108,99 @@ impl Subscriber {
                 .await;
                 Ok(())
             }
+            Some(&ChannelRegistrarAbi::NameRegistered::SIGNATURE_HASH) => {
+                // A non-UTF-8 name is registrable onchain (the registry validates length
+                // only) but cannot be represented in the proto3 `string` channel_key, so
+                // ABI decode fails. Drop just this log with a warn + metric — one hostile
+                // registration must never stall ingestion of subsequent events. (The
+                // BaseRegistrar's same-named `NameRegistered(uint256,...)` has a different
+                // topic0 and falls through to the silent `_` arm.) fid is always 0; the
+                // owner address is resolved to an fid at read time (see GetChannelOwner).
+                //
+                // NOTE: we decode with `decode_log_validate` (unlike plain `decode_log`,
+                // which would lossily replace non-UTF-8 bytes with U+FFFD and silently mint
+                // a corrupted channel_key). `decode_log_validate` routes an invalid UTF-8
+                // name to the Err arm below so it is dropped, honoring the proto's
+                // "non-UTF-8 names are never minted as events" invariant.
+                match ChannelRegistrarAbi::NameRegistered::decode_log_validate(&event.inner) {
+                    Ok(decoded) => {
+                        let ChannelRegistrarAbi::NameRegistered {
+                            name,
+                            label,
+                            owner,
+                            expires,
+                        } = decoded.data;
+                        add_event(
+                            0,
+                            OnChainEventType::EventTypeChannelRegister,
+                            on_chain_event::Body::ChannelRegisterEventBody(ChannelRegisterBody {
+                                channel_key: name,
+                                expiry: expires.try_into()?,
+                                owner_address: owner.to_vec(),
+                                event_type: ChannelRegisterEventType::Register as i32,
+                                label: label.to_vec(),
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        warn!(
+                            chain = chain_name.as_str(),
+                            tx_hash = hex::encode(transaction_hash),
+                            log_index,
+                            "Skipping channel NameRegistered log with undecodable (likely non-UTF-8) name: {}",
+                            err
+                        );
+                        statsd_client.count(
+                            "onchain_events.channel_register_decode_failures",
+                            1,
+                            vec![("event", "name_registered")],
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Some(&ChannelRegistrarAbi::NameRenewed::SIGNATURE_HASH) => {
+                // Same non-UTF-8 drop rule as NameRegistered (decode_log_validate; see there).
+                // NameRenewed carries no owner (`expires` is absolute — the store
+                // overwrites, never adds duration).
+                match ChannelRegistrarAbi::NameRenewed::decode_log_validate(&event.inner) {
+                    Ok(decoded) => {
+                        let ChannelRegistrarAbi::NameRenewed {
+                            name,
+                            label,
+                            expires,
+                        } = decoded.data;
+                        add_event(
+                            0,
+                            OnChainEventType::EventTypeChannelRegister,
+                            on_chain_event::Body::ChannelRegisterEventBody(ChannelRegisterBody {
+                                channel_key: name,
+                                expiry: expires.try_into()?,
+                                owner_address: vec![],
+                                event_type: ChannelRegisterEventType::Renew as i32,
+                                label: label.to_vec(),
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        warn!(
+                            chain = chain_name.as_str(),
+                            tx_hash = hex::encode(transaction_hash),
+                            log_index,
+                            "Skipping channel NameRenewed log with undecodable (likely non-UTF-8) name: {}",
+                            err
+                        );
+                        statsd_client.count(
+                            "onchain_events.channel_register_decode_failures",
+                            1,
+                            vec![("event", "name_renewed")],
+                        );
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -985,10 +1316,11 @@ impl Subscriber {
 
     // We're running into issues using getFilterChanges for this, possibly because the events are
     // so rare. Or perhaps due to an alchemy issue. We weren't getting any events. So swtich to raw
-    // polling. We're only seeing a few events per day, so this should be fine.
-    async fn poll_tier_registry_events(
+    // polling. We're only seeing a few events per day, so this should be fine. Used for all Base
+    // contracts (tier registry, channel registrar); OP contracts still stream.
+    async fn poll_registry_events(
         &mut self,
-        tier_registry: &Contract,
+        contract: &Contract,
         from_block: &mut u64,
     ) -> Result<(), SubscribeError> {
         // Get the current block number
@@ -1004,9 +1336,9 @@ impl Subscriber {
             // Paginate through blocks in batches
             to_block = to_block.min(*from_block + BASE_BLOCK_PAGE_SIZE);
 
-            // Create filter for tier_registry events
+            // Create filter for this contract's events
             let filter = Filter::new()
-                .address(tier_registry.address)
+                .address(contract.address)
                 .from_block(*from_block)
                 .to_block(to_block);
 
@@ -1014,20 +1346,25 @@ impl Subscriber {
                 from_block = *from_block,
                 to_block,
                 chain = self.chain.to_string(),
-                "Polling tier_registry events"
+                event_kind = contract.event_kind(),
+                "Polling registry events"
             );
 
             // Get and process logs
-            match self.get_logs(&filter, tier_registry.event_kind()).await {
+            match self.get_logs(&filter, contract.event_kind()).await {
                 Ok(_) => {
-                    // Update the last processed block
+                    // Advance only this contract's in-memory cursor. The stored
+                    // block number is chain-wide, so it is persisted by the caller
+                    // as the minimum across all polled contracts' cursors — see
+                    // the poll loop in sync_live_events.
                     *from_block = to_block + 1;
-                    self.record_block_number(to_block);
                 }
                 Err(err) => {
                     error!(
                         chain = self.chain.to_string(),
-                        "Error getting tier_registry logs: {}", err
+                        event_kind = contract.event_kind(),
+                        "Error getting registry logs: {}",
+                        err
                     );
                     return Err(err);
                 }
@@ -1042,10 +1379,7 @@ impl Subscriber {
         loop {
             match self
                 .provider
-                .get_block_by_number(
-                    alloy_rpc_types::BlockNumberOrTag::Latest,
-                    alloy_rpc_types::BlockTransactionsKind::Hashes,
-                )
+                .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Latest)
                 .await
             {
                 Ok(block) => {
@@ -1082,24 +1416,27 @@ impl Subscriber {
             "Starting live sync"
         );
 
-        // Separate tier_registry from other contracts
-        let mut tier_registry_contract: Option<Contract> = None;
-        let mut other_contracts: Vec<Contract> = Vec::new();
+        // Base contracts (tier registry, channel registrar) are polled; OP contracts are
+        // streamed. See poll_registry_events for why Base uses raw polling.
+        let mut polled_contracts: Vec<Contract> = Vec::new();
+        let mut streamed_contracts: Vec<Contract> = Vec::new();
 
         for contract in self.contracts() {
             match contract.kind {
-                ContractKind::TierRegistry => {
-                    tier_registry_contract = Some(contract);
+                ContractKind::TierRegistry
+                | ContractKind::ChannelRegistrarController
+                | ContractKind::ChannelRegistrarToken => {
+                    polled_contracts.push(contract);
                 }
                 _ => {
-                    other_contracts.push(contract);
+                    streamed_contracts.push(contract);
                 }
             }
         }
 
-        // Set up streaming for non-tier_registry contracts if any exist
-        let mut stream = if !other_contracts.is_empty() {
-            let contract_addresses: Vec<Address> = other_contracts
+        // Set up streaming for streamed contracts if any exist
+        let mut stream = if !streamed_contracts.is_empty() {
+            let contract_addresses: Vec<Address> = streamed_contracts
                 .iter()
                 .map(|contract| contract.address)
                 .collect();
@@ -1118,15 +1455,15 @@ impl Subscriber {
             None
         };
 
-        // Set up polling for tier_registry if it exists
-        let mut tier_registry_poll_interval = if tier_registry_contract.is_some() {
+        // Set up polling for polled contracts if any exist
+        let mut poll_interval = if !polled_contracts.is_empty() {
             Some(tokio::time::interval(tokio::time::Duration::from_secs(30)))
         } else {
             None
         };
 
-        // Track the last block polled for tier_registry
-        let mut tier_registry_last_block = start_block_number;
+        // Track the last block polled per polled contract (parallel to polled_contracts)
+        let mut polled_last_blocks: Vec<u64> = vec![start_block_number; polled_contracts.len()];
 
         loop {
             tokio::select! {
@@ -1157,20 +1494,33 @@ impl Subscriber {
                     }
                  }
                  _ = async {
-                     if let Some(ref mut interval) = tier_registry_poll_interval {
+                     if let Some(ref mut interval) = poll_interval {
                          interval.tick().await;
                      } else {
-                         // If no tier_registry, wait forever
+                         // If no polled contracts, wait forever
                          futures_util::future::pending::<()>().await;
                      }
                  } => {
-                     if let Some(ref tier_registry) = tier_registry_contract {
-                         // Poll tier_registry events
-                         if let Err(err) = self.poll_tier_registry_events(tier_registry, &mut tier_registry_last_block).await {
+                     // Poll each Base contract in turn, advancing its own block cursor.
+                     for (contract, last_block) in polled_contracts.iter().zip(polled_last_blocks.iter_mut()) {
+                         if let Err(err) = self.poll_registry_events(contract, last_block).await {
                              error!(
                                  chain = self.chain.to_string(),
-                                 "Error polling tier_registry events: {}", err
+                                 event_kind = contract.event_kind(),
+                                 "Error polling registry events: {}", err
                              );
+                         }
+                     }
+                     // Persist the lowest cursor across polled contracts. The stored
+                     // block number is chain-wide, so recording any single contract's
+                     // progress would make a restart resume every contract from the
+                     // most-advanced one and silently skip a lagging contract's gap.
+                     // Resuming from the minimum re-polls blocks the faster contracts
+                     // already processed, which is safe (onchain event merges are
+                     // idempotent); skipped blocks are not recoverable.
+                     if let Some(min_next_block) = polled_last_blocks.iter().min() {
+                         if *min_next_block > 0 {
+                             self.record_block_number(min_next_block - 1);
                          }
                      }
                  }
@@ -1254,6 +1604,55 @@ impl Subscriber {
     }
 
     pub async fn run(&mut self) -> Result<(), SubscribeError> {
+        // Before any filter is built: the channel registry emits from two
+        // contracts, and only one of them is configured. Resolving here rather
+        // than in `new()` because it costs two RPC calls, and `new()` is sync.
+        //
+        // A failure is only fatal once channel registrations are actually being
+        // consumed. Before `ChannelRegistrations` activates, the engine rejects
+        // channel-register events regardless, so an unreachable or misconfigured
+        // registry costs nothing and must not stop a node from booting — a
+        // half-configured registry on a pre-activation network is a normal state
+        // to be in while the registry is still being deployed. After activation
+        // the same failure means every ownership transfer is being dropped, which
+        // is the silent-loss case this whole change exists to prevent.
+        //
+        // Wall-clock gating is deliberate and safe here: this is node-local
+        // startup behavior, not a consensus decision. Nothing downstream re-derives
+        // it, and two nodes disagreeing about whether to boot has no effect on
+        // state. Contrast the follow index, which must gate on a message clock.
+        if let Some(controller) = self.override_channel_registrar_address {
+            match self.resolve_channel_registrar_token(controller).await {
+                Ok(token) => {
+                    info!(
+                        controller = controller.to_string(),
+                        token = token.to_string(),
+                        chain = self.chain.to_string(),
+                        "Resolved channel registry ERC-721 from its controller"
+                    );
+                    self.channel_registrar_token = Some(token);
+                }
+                Err(err) if !self.channel_registrations_active() => {
+                    // Deliberately loud despite being non-fatal: whoever is
+                    // standing up the registry needs to see this before the
+                    // activation boundary makes it fatal. Note the node is NOT
+                    // re-checked after activation while it keeps running — it
+                    // picks the failure up on its next restart.
+                    warn!(
+                        controller = controller.to_string(),
+                        chain = self.chain.to_string(),
+                        network = self.network.as_str_name(),
+                        "Could not resolve the channel registry ERC-721, continuing because \
+                         channel registrations are not active yet. Channel ownership transfers \
+                         will NOT be ingested. Error: {:#?}",
+                        err
+                    );
+                    self.count("onchain_events.channel_registrar_unresolved", 1, vec![]);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
         let latest_block_on_chain = self.latest_block_on_chain().await?;
         let latest_block_in_db = self.latest_block_in_db();
         info!(
@@ -1329,6 +1728,7 @@ impl Subscriber {
 #[cfg(test)]
 mod tests {
     use crate::connectors::onchain_events;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -1344,6 +1744,8 @@ mod tests {
                 start_block_number: None,
                 stop_block_number: None,
                 override_tier_registry_address: None,
+                override_channel_registrar_address: None,
+                override_ens_registry_address: None,
             },
             ..Default::default()
         };
@@ -1391,5 +1793,280 @@ mod tests {
         let result = get_request_fid_from_signer_event(&signer_event);
 
         assert_eq!(result, Some(9152));
+    }
+
+    #[test]
+    fn test_channel_name_registered_round_trip() {
+        // Verifies the ABI json shape (indexed flags + types) decodes as expected and that
+        // tokenId == uint256(label) — the join key the store uses to tie a Transfer
+        // (tokenId only) back to a channel_key.
+        let label = FixedBytes::<32>::from([0xAB; 32]);
+        let owner = address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1");
+        let expires = U256::from(1_800_000_000u64);
+        let encoded = ChannelRegistrarAbi::NameRegistered {
+            name: "pets".to_string(),
+            label,
+            owner,
+            expires,
+        }
+        .encode_log_data();
+
+        let decoded =
+            ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&encoded).unwrap();
+        assert_eq!(decoded.name, "pets");
+        assert_eq!(decoded.label, label);
+        assert_eq!(decoded.owner, owner);
+        assert_eq!(decoded.expires, expires);
+
+        // The connector stores label == the tokenId's big-endian bytes.
+        let token_id = U256::from_be_bytes(label.0);
+        assert_eq!(token_id.to_be_bytes::<32>().to_vec(), label.to_vec());
+    }
+
+    #[test]
+    fn test_channel_transfer_round_trip() {
+        // ERC-721 Transfer is all-indexed; the connector reads `to` (receiving address)
+        // and reproduces `label` from the tokenId.
+        let from = Address::ZERO; // mint fires from 0x0
+        let to = address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1");
+        let id = U256::from_be_bytes([0x11u8; 32]);
+        let encoded = ChannelRegistrarAbi::Transfer { from, to, id }.encode_log_data();
+
+        let decoded = ChannelRegistrarAbi::Transfer::decode_log_data_validate(&encoded).unwrap();
+        assert_eq!(decoded.to, to);
+        assert_eq!(decoded.id, id);
+        assert_eq!(decoded.id.to_be_bytes::<32>().to_vec(), vec![0x11u8; 32]);
+    }
+
+    #[test]
+    fn test_transfer_topic0_collision_is_intentional() {
+        // The Base channel-registrar ERC-721 Transfer and the OP IdRegistry Transfer share
+        // an identical signature, hence the same topic0. process_log cannot tell them apart
+        // by topic0 and dispatches on the chain instead; this is the regression guard for
+        // that collision (if it ever stops holding, the chain-dispatch can be revisited).
+        assert_eq!(
+            ChannelRegistrarAbi::Transfer::SIGNATURE_HASH,
+            IdRegistryAbi::Transfer::SIGNATURE_HASH
+        );
+        // NameRegistered(string,...) does not collide with the IdRegistry Register event.
+        assert_ne!(
+            ChannelRegistrarAbi::NameRegistered::SIGNATURE_HASH,
+            IdRegistryAbi::Register::SIGNATURE_HASH
+        );
+    }
+
+    #[test]
+    fn test_channel_name_non_utf8_dropped_only_with_validation() {
+        use alloy_primitives::{Bytes, LogData};
+
+        // A non-UTF-8 name is registrable onchain (length-only contract check) but cannot
+        // be represented in the proto3 string channel_key. Hand-build a NameRegistered log
+        // whose non-indexed data tuple (string name, uint256 expires) holds a single 0xFF
+        // byte as the name.
+        let label = FixedBytes::<32>::from([0x11; 32]);
+        let owner = address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1");
+        let mut data = Vec::new();
+        data.extend_from_slice(&U256::from(0x40).to_be_bytes::<32>()); // offset to string
+        data.extend_from_slice(&U256::ZERO.to_be_bytes::<32>()); // expires = 0
+        data.extend_from_slice(&U256::from(1).to_be_bytes::<32>()); // string length = 1
+        let mut name_word = [0u8; 32];
+        name_word[0] = 0xFF; // invalid UTF-8
+        data.extend_from_slice(&name_word);
+
+        let topics = vec![
+            ChannelRegistrarAbi::NameRegistered::SIGNATURE_HASH,
+            label,
+            owner.into_word(),
+        ];
+        let log_data = LogData::new_unchecked(topics, Bytes::from(data));
+
+        // `decode_log_data` (non-validating) is what plain `Log::decode_log` uses. It
+        // lossily replaces the bad byte with U+FFFD and succeeds — precisely why the
+        // connector must NOT use that path: it would mint a corrupted channel_key whose
+        // keccak no longer equals `label`.
+        let lossy = ChannelRegistrarAbi::NameRegistered::decode_log_data(&log_data).unwrap();
+        assert!(lossy.name.contains('\u{FFFD}'));
+
+        // `decode_log_data_validate` is the connector's path: the invalid name is rejected,
+        // so the log is dropped (warn + metric) rather than minted — honoring the proto
+        // invariant.
+        assert!(ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&log_data).is_err());
+    }
+
+    /// Builds a Subscriber without touching the network. The RPC URL is never
+    /// dialled by the assertions below — they only exercise `contracts()`, which
+    /// is pure over the resolved addresses.
+    fn offline_subscriber(
+        chain: node_local_state::Chain,
+        controller: Option<Address>,
+        token: Option<Address>,
+    ) -> Subscriber {
+        offline_subscriber_on(chain, FarcasterNetwork::Devnet, controller, token)
+    }
+
+    fn offline_subscriber_on(
+        chain: node_local_state::Chain,
+        network: FarcasterNetwork,
+        controller: Option<Address>,
+        token: Option<Address>,
+    ) -> Subscriber {
+        let (mempool_tx, _mempool_rx) = mpsc::channel(1);
+        let (_tx, onchain_events_request_rx) = broadcast::channel(1);
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(crate::storage::db::RocksDB::new(
+            dir.path().join("test.db").to_str().unwrap(),
+        ));
+        db.open().unwrap();
+        Subscriber {
+            provider: RootProvider::new_http("http://127.0.0.1:1".parse().unwrap()),
+            mempool_tx,
+            start_block_number: None,
+            stop_block_number: None,
+            statsd_client: StatsdClientWrapper::new(
+                cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+                true,
+            ),
+            local_state_store: LocalStateStore::new(db),
+            onchain_events_request_rx,
+            chain,
+            network,
+            override_tier_registry_address: None,
+            override_channel_registrar_address: controller,
+            ens_registry_address: ETH_L1_ENS_REGISTRY,
+            channel_registrar_token: token,
+        }
+    }
+
+    /// The Sepolia deployment (`channel-registry/deployments/11155111.md`).
+    const SEPOLIA_CONTROLLER: Address = address!("0x90fc42187729ee3aebe48ce177e390fb67a565a8");
+    const SEPOLIA_BASE_REGISTRAR: Address = address!("0x7dd80c661ded9bfc8d4440224a0b39b345a91be4");
+
+    fn channel_addresses(subscriber: &Subscriber) -> Vec<Address> {
+        subscriber
+            .contracts()
+            .into_iter()
+            .filter(|contract| {
+                matches!(
+                    contract.kind,
+                    ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken
+                )
+            })
+            .map(|contract| contract.address)
+            .collect()
+    }
+
+    #[test]
+    fn watches_both_channel_registry_contracts_once_the_token_is_resolved() {
+        // The bug this fixes: one configured address, but NameRegistered/
+        // NameRenewed come from the controller while the ERC-721 Transfer comes
+        // from the BaseRegistrar. Watching one silently drops the other's events.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            Some(SEPOLIA_BASE_REGISTRAR),
+        );
+        assert_eq!(
+            channel_addresses(&subscriber),
+            vec![SEPOLIA_CONTROLLER, SEPOLIA_BASE_REGISTRAR]
+        );
+    }
+
+    #[test]
+    fn watches_the_controller_alone_before_resolution() {
+        // `contracts()` is pure, so it cannot resolve; `run()` does that first.
+        // This pins that the pre-resolution state is controller-only rather than
+        // panicking or dropping the controller too.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            None,
+        );
+        assert_eq!(channel_addresses(&subscriber), vec![SEPOLIA_CONTROLLER]);
+    }
+
+    #[test]
+    fn watches_no_channel_contracts_when_none_is_configured() {
+        // Mainnet today: no controller constant yet, so the connector stays a
+        // no-op even with this code shipped.
+        let subscriber = offline_subscriber(node_local_state::Chain::Base, None, None);
+        assert!(channel_addresses(&subscriber).is_empty());
+    }
+
+    #[test]
+    fn both_channel_contracts_report_the_same_metric_kind() {
+        // `event_kind` tags metrics. The split into two ContractKinds is an
+        // internal distinction and must not fork the "channel" metric series.
+        let subscriber = offline_subscriber(
+            node_local_state::Chain::Base,
+            Some(SEPOLIA_CONTROLLER),
+            Some(SEPOLIA_BASE_REGISTRAR),
+        );
+        for contract in subscriber.contracts() {
+            if matches!(
+                contract.kind,
+                ContractKind::ChannelRegistrarController | ContractKind::ChannelRegistrarToken
+            ) {
+                assert_eq!(contract.event_kind(), "channel");
+            }
+        }
+    }
+
+    #[test]
+    fn the_base_registrar_emits_a_different_name_registered_than_the_controller() {
+        // Now that the token contract is watched, its logs reach `process_log`
+        // too. BaseRegistrar has its own `NameRegistered(uint256,address,uint256)`
+        // — if that collided with the controller's
+        // `NameRegistered(string,bytes32,address,uint256)` the decoder would
+        // mint channel registrations with a garbage channel_key. Different
+        // signature hashes are what make the unmatched-topic `_ => Ok(())` arm
+        // the correct outcome for it.
+        use alloy_primitives::keccak256;
+        let base_registrar_name_registered = keccak256(b"NameRegistered(uint256,address,uint256)");
+        assert_ne!(
+            base_registrar_name_registered,
+            ChannelRegistrarAbi::NameRegistered::SIGNATURE_HASH,
+        );
+        let base_registrar_name_renewed = keccak256(b"NameRenewed(uint256,uint256)");
+        assert_ne!(
+            base_registrar_name_renewed,
+            ChannelRegistrarAbi::NameRenewed::SIGNATURE_HASH,
+        );
+    }
+
+    #[test]
+    fn a_registry_misconfiguration_is_only_fatal_once_registrations_are_active() {
+        // Before ChannelRegistrations activates, the engine rejects
+        // channel-register events anyway, so an unresolvable registry costs
+        // nothing and must not stop a node from booting — the registry is still
+        // being deployed. After activation the same failure silently drops every
+        // ownership transfer, so it has to be fatal.
+        let devnet = offline_subscriber_on(
+            node_local_state::Chain::Base,
+            FarcasterNetwork::Devnet,
+            Some(SEPOLIA_CONTROLLER),
+            None,
+        );
+        assert!(
+            devnet.channel_registrations_active(),
+            "devnet activates channel registrations at genesis, so a bad registry is fatal there"
+        );
+
+        // Mainnet and testnet have no V21 entry scheduled yet. Asserted via
+        // `channel_registrations_active` rather than a pinned version so this
+        // starts reporting `true` — correctly — the moment V21 is scheduled,
+        // rather than failing.
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let subscriber = offline_subscriber_on(
+                node_local_state::Chain::Base,
+                network,
+                Some(SEPOLIA_CONTROLLER),
+                None,
+            );
+            assert_eq!(
+                subscriber.channel_registrations_active(),
+                EngineVersion::current(network).is_enabled(ProtocolFeature::ChannelRegistrations),
+                "{network:?} must track the schedule, not a hardcoded answer"
+            );
+        }
     }
 }

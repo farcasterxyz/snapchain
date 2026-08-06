@@ -1,3 +1,4 @@
+pub mod channel_uri;
 pub mod error;
 pub mod message;
 pub mod types;

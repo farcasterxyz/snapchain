@@ -1,6 +1,7 @@
 pub use self::active_key::*;
 pub use self::block_event_store::*;
 pub use self::cast_store::*;
+pub use self::channel_store::*;
 pub use self::event::*;
 pub use self::gasless_key_merge::*;
 pub use self::key_add_store::*;
@@ -18,6 +19,7 @@ pub use self::username_proof_store::*;
 pub use self::verification_store::*;
 
 mod cast_store;
+mod channel_store;
 mod event;
 mod link_store;
 mod message;
@@ -38,25 +40,27 @@ mod username_proof_store;
 mod verification_store;
 
 #[cfg(test)]
-mod cast_store_test;
+mod cast_store_tests;
 #[cfg(test)]
-mod gasless_key_merge_test;
+mod channel_store_tests;
 #[cfg(test)]
-mod key_add_store_test;
+mod gasless_key_merge_tests;
 #[cfg(test)]
-mod key_last_used_at_store_test;
+mod key_add_store_tests;
 #[cfg(test)]
-mod key_nonce_store_test;
+mod key_last_used_at_store_tests;
 #[cfg(test)]
-mod onchain_event_store_test;
+mod key_nonce_store_tests;
 #[cfg(test)]
-mod reaction_store_test;
+mod onchain_event_store_tests;
 #[cfg(test)]
-mod user_data_store_test;
+mod reaction_store_tests;
 #[cfg(test)]
-mod verification_store_test;
+mod user_data_store_tests;
+#[cfg(test)]
+mod verification_store_tests;
 
 #[cfg(test)]
-mod link_store_test;
+mod link_store_tests;
 #[cfg(test)]
-mod username_proof_store_test;
+mod username_proof_store_tests;

@@ -426,7 +426,7 @@ impl CastStore {
             ..Default::default()
         };
 
-        store.get_remove(&partial_message)
+        store.get_remove(&partial_message, None)
     }
 
     pub fn get_cast_adds_by_fid(
@@ -479,7 +479,7 @@ impl CastStore {
         )?;
 
         let messages = get_many_messages(store.db().borrow(), message_keys)?;
-        let next_page_token = if last_key.len() > 0 {
+        let next_page_token = if !last_key.is_empty() {
             Some(last_key.to_vec())
         } else {
             None
@@ -525,7 +525,7 @@ impl CastStore {
         )?;
 
         let messages_bytes = get_many_messages(store.db().borrow(), message_keys)?;
-        let next_page_token = if last_key.len() > 0 {
+        let next_page_token = if !last_key.is_empty() {
             Some(last_key.to_vec())
         } else {
             None

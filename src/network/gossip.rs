@@ -4,6 +4,8 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::network::mesh::diagnostics;
+use crate::network::mesh::metrics::GossipMetrics;
 use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
     GossipMessage,
@@ -20,19 +22,23 @@ use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
 use informalsystems_malachitebft_sync::{self as sync};
 use libp2p::identity::ed25519::Keypair;
-use libp2p::request_response::{InboundRequestId, OutboundRequestId};
+use libp2p::request_response::{self, InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{
-    gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
+    gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId,
+    Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
+use parking_lot::Mutex;
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
@@ -41,11 +47,22 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
-const CONSENSUS_TOPIC: &str = "consensus";
-const MEMPOOL_TOPIC: &str = "mempool";
+pub(crate) const CONSENSUS_TOPIC: &str = "consensus";
+pub(crate) const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
+
+/// All gossip topics this node may participate in. The single source of truth
+/// for valid topic names — used to bound the per-peer gossip-metrics
+/// sampler/eviction and to validate the mesh view's `?topics=` selection.
+pub(crate) const ALL_TOPICS: [&str; 5] = [
+    CONSENSUS_TOPIC,
+    MEMPOOL_TOPIC,
+    DECIDED_VALUES,
+    READ_NODE_PEER_STATUSES,
+    CONTACT_INFO,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -137,6 +154,13 @@ impl Config {
         }
     }
 
+    pub fn with_direct_peers(self, direct_peers: String) -> Self {
+        Config {
+            direct_peers,
+            ..self
+        }
+    }
+
     pub fn bootstrap_addrs(&self) -> Vec<String> {
         self.bootstrap_peers
             .split(',')
@@ -166,7 +190,21 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
-    GetConnectedPeers(oneshot::Sender<Vec<ContactInfoBody>>),
+    /// Source-tagged connected peers: COLLECTED (peer-attested `ContactInfoBody`)
+    /// and DERIVED (PeerId + observed address) entries, the latter so connected
+    /// peers we have no contact info for (e.g. validators) are still surfaced.
+    GetConnectedPeers(oneshot::Sender<Vec<proto::ConnectedPeer>>),
+    /// This node's local mesh view (peer facts only — validator classification
+    /// is applied by the RPC layer, which holds the validator set + height).
+    GetMeshView(oneshot::Sender<proto::MeshView>),
+    /// Send a mesh-view request to a specific peer over the diagnostics
+    /// request-response behaviour (the crawl) and resolve the oneshot with that
+    /// peer's raw `MeshView` (or an error string on failure/timeout).
+    SendMeshViewRequest(
+        PeerId,
+        proto::GetMeshViewRequest,
+        oneshot::Sender<Result<proto::MeshView, String>>,
+    ),
 }
 
 pub enum GossipTopic {
@@ -182,6 +220,9 @@ pub enum GossipTopic {
 pub struct SnapchainBehavior {
     pub gossipsub: gossipsub::Behaviour,
     pub rpc: sync::Behaviour,
+    /// Mesh diagnostics request-response (the crawl). Sibling to `rpc` so it can
+    /// evolve independently of Malachite's consensus sync protocol.
+    pub diagnostics: diagnostics::Behaviour,
     pub connection_limits: libp2p_connection_limits::Behaviour,
 }
 
@@ -202,6 +243,66 @@ pub struct SnapchainGossip {
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
     peers: BTreeMap<PeerId, ContactInfoBody>,
+    /// Optional set of peers whose inbound gossip messages will be silently
+    /// dropped. Empty in production. Tests inject peer ids here to simulate a
+    /// network partition without tearing down libp2p connections.
+    peer_blocklist: Arc<Mutex<HashSet<PeerId>>>,
+    /// Parsed `config.direct_peers` cached as a HashSet for fast membership
+    /// checks during the per-tick mesh self-heal sweep.
+    direct_peers: HashSet<PeerId>,
+    /// Topics this node has subscribed to during `create()`, in the order they
+    /// were subscribed. Used by the boot one-shot to issue a paired
+    /// unsubscribe+subscribe cycle for each topic, forcing fresh control
+    /// messages to peers that may have raced with our connection establish.
+    local_topics: Vec<gossipsub::IdentTopic>,
+    /// Set to true after the boot one-shot fires for the first direct-peer
+    /// `ConnectionEstablished` event. Once true, the cycle never fires again
+    /// for the lifetime of this process. Wrapped in an `Arc<AtomicBool>` so
+    /// tests can clone a handle (`boot_resub_done_handle`) and observe the
+    /// flip from outside the spawned `start()` task. Production cost is one
+    /// atomic load per ConnectionEstablished event — negligible.
+    boot_resub_done: Arc<AtomicBool>,
+    /// Per-peer last-bounce timestamp. Used to rate-limit targeted
+    /// disconnects from the periodic mesh self-heal sweep so a misbehaving
+    /// peer can't be put into a tight bounce loop.
+    last_force_bounce_at: HashMap<PeerId, Instant>,
+    /// Per-peer "first observed connected" timestamp. Used by the periodic
+    /// sweep to skip peers that have been connected for less than the
+    /// SUBSCRIBE round-trip settle time — `gossipsub.all_peers()` reports a
+    /// peer the moment libp2p sees `ConnectionEstablished`, before any
+    /// control RPCs have been exchanged, so a sweep that fires inside that
+    /// window would mistake healthy mid-handshake peers for the bug
+    /// condition. Cleared on the final `ConnectionClosed` for the peer.
+    peer_connected_at: HashMap<PeerId, Instant>,
+    /// Lifetime accumulator of `direct_peer_force_bounce` events. Mirrors
+    /// the statsd counter so tests can observe bounces without needing a
+    /// custom statsd recorder. Wrapped in `Arc<AtomicU64>` for the same
+    /// reason as `boot_resub_done`.
+    direct_peer_force_bounce_count: Arc<AtomicU64>,
+    /// Prometheus-style per-peer/per-topic gossip counters + rate sampler.
+    /// Cumulative counters are the store of record; rates are derived. Cloned
+    /// into `main` for registration into the shared registry. See
+    /// [`GossipMetrics`].
+    metrics: GossipMetrics,
+    /// Authoritative, conflict-free per-peer address: the remote address of the
+    /// live libp2p connection (`ConnectionEstablished` endpoint), independent of
+    /// any self-announced/self-detected IP. Kept SEPARATE from `peers` (which
+    /// holds only peer-attested `ContactInfoBody`) so derived data is never
+    /// conflated with collected contact info. Cleared on full disconnect.
+    observed_addrs: HashMap<PeerId, Multiaddr>,
+    /// In-flight outbound mesh-diagnostics requests (the crawl): maps the
+    /// `OutboundRequestId` returned by `send_request` to the oneshot the crawler
+    /// is awaiting. Resolved on the matching inbound `Response` or on
+    /// `OutboundFailure`. Mirrors `sync_channels` but for the diagnostics
+    /// behaviour.
+    diagnostics_requests:
+        HashMap<OutboundRequestId, oneshot::Sender<Result<proto::MeshView, String>>>,
+    /// Validator `PeerId`s permitted to query the mesh-diagnostics behaviour.
+    /// The responder answers a diagnostics request only if the requesting peer is
+    /// in this set — for now we only serve other validators. Set once at startup
+    /// from the configured validator set (see [`Self::set_validator_peers`]).
+    /// **Fail-closed:** an empty set answers no one.
+    validator_peers: HashSet<PeerId>,
 }
 
 impl SnapchainGossip {
@@ -255,6 +356,10 @@ impl SnapchainGossip {
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
                     .mesh_n(10) // Try setting D to a higher value to see if it helps with slow sync (nodes will consume more bandwidth)
                     .mesh_n_high(20) // 2x D, which is the recommended value
+                    // Redial dropped explicit peers more aggressively (default 300 ≈ 150s
+                    // at 500ms heartbeat). 60 ticks ≈ 30s — defense in depth alongside
+                    // the per-tick targeted-disconnect machinery in `start()`.
+                    .check_explicit_peers_ticks(60)
                     .build()
                     .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
 
@@ -273,6 +378,15 @@ impl SnapchainGossip {
                     sync::Config::default().with_request_timeout(Duration::from_secs(5)),
                 );
 
+                let diagnostics = diagnostics::Behaviour::new(
+                    [(
+                        diagnostics::MESH_DIAGNOSTICS_PROTOCOL,
+                        request_response::ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default()
+                        .with_request_timeout(Duration::from_secs(5)),
+                );
+
                 // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
                     ConnectionLimits::default()
@@ -285,6 +399,7 @@ impl SnapchainGossip {
                 Ok(SnapchainBehavior {
                     gossipsub,
                     rpc,
+                    diagnostics,
                     connection_limits,
                 })
             })?
@@ -303,21 +418,24 @@ impl SnapchainGossip {
                 return Err(Box::new(e));
             }
         } else {
-            // Create a Gossipsub topic
             let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-            // subscribes to our topic
             let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
             if let Err(e) = result {
                 warn!("Failed to subscribe to topic: {:?}", e);
                 return Err(Box::new(e));
             }
+        }
 
-            let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
+        // Both validators and read nodes join the mempool mesh: validators
+        // consume mempool messages for inclusion in blocks; read nodes accept
+        // client-submitted messages via RPC and need to be useful relays for
+        // them. A node that publishes to a topic without subscribing falls
+        // back to fanout (best-effort, TTL'd, not in the mesh).
+        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
         }
 
         let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
@@ -346,6 +464,24 @@ impl SnapchainGossip {
 
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
+
+        // Mirror the topic-subscription branches above. Used by the boot
+        // one-shot in `start()` to issue a paired unsubscribe+subscribe cycle
+        // for each topic when the first direct peer connects.
+        let local_topics: Vec<gossipsub::IdentTopic> = if read_node {
+            vec![
+                gossipsub::IdentTopic::new(READ_NODE_PEER_STATUSES),
+                gossipsub::IdentTopic::new(MEMPOOL_TOPIC),
+                gossipsub::IdentTopic::new(CONTACT_INFO),
+            ]
+        } else {
+            vec![
+                gossipsub::IdentTopic::new(CONSENSUS_TOPIC),
+                gossipsub::IdentTopic::new(MEMPOOL_TOPIC),
+                gossipsub::IdentTopic::new(CONTACT_INFO),
+            ]
+        };
+
         Ok(SnapchainGossip {
             swarm,
             tx,
@@ -363,14 +499,62 @@ impl SnapchainGossip {
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
+            peer_blocklist: Arc::new(Mutex::new(HashSet::new())),
+            direct_peers: config.direct_peers().into_iter().collect(),
+            local_topics,
+            boot_resub_done: Arc::new(AtomicBool::new(false)),
+            last_force_bounce_at: HashMap::new(),
+            peer_connected_at: HashMap::new(),
+            direct_peer_force_bounce_count: Arc::new(AtomicU64::new(0)),
+            metrics: GossipMetrics::new(),
+            observed_addrs: HashMap::new(),
+            diagnostics_requests: HashMap::new(),
+            validator_peers: HashSet::new(),
         })
+    }
+
+    /// Handle to the per-peer gossip metrics. Cloned by `main` so the
+    /// cumulative counters can be registered into the shared Prometheus
+    /// registry after the gossip event loop has been spawned (the `Family`
+    /// values are `Arc`-backed, so the clone shares storage).
+    pub fn metrics(&self) -> GossipMetrics {
+        self.metrics.clone()
+    }
+
+    /// Set the validator `PeerId`s allowed to query the mesh-diagnostics
+    /// behaviour. Call once at startup (from the configured validator set);
+    /// until set, the responder is fail-closed and answers no one.
+    pub fn set_validator_peers(&mut self, peers: HashSet<PeerId>) {
+        self.validator_peers = peers;
+    }
+
+    /// Shared handle to the peer blocklist. Tests use this to simulate network
+    /// partitions: any peer whose `PeerId` is in the set has its inbound gossip
+    /// messages dropped. The lock is held only briefly (HashSet read), and the
+    /// production code path leaves the set empty.
+    pub fn peer_blocklist_handle(&self) -> Arc<Mutex<HashSet<PeerId>>> {
+        self.peer_blocklist.clone()
+    }
+
+    /// Handle to observe the boot one-shot resub flag from outside the
+    /// spawned `start()` task. Tests poll this to assert that the cycle
+    /// fired after the first direct-peer `ConnectionEstablished`.
+    pub fn boot_resub_done_handle(&self) -> Arc<AtomicBool> {
+        self.boot_resub_done.clone()
+    }
+
+    /// Handle to observe the lifetime count of `direct_peer_force_bounce`
+    /// events. Tests use this to assert that the periodic self-heal sweep
+    /// disconnected a peer when the bug condition was synthesized.
+    pub fn direct_peer_force_bounce_count_handle(&self) -> Arc<AtomicU64> {
+        self.direct_peer_force_bounce_count.clone()
     }
 
     async fn get_announce_rpc_address(
         fc_network: FarcasterNetwork,
         config: &Config,
     ) -> Result<String, reqwest::Error> {
-        if config.announce_rpc_address.len() > 0 {
+        if !config.announce_rpc_address.is_empty() {
             return Ok(config.announce_rpc_address.clone());
         }
 
@@ -387,7 +571,7 @@ impl SnapchainGossip {
     }
 
     async fn get_announce_gossip_address(fc_network: FarcasterNetwork, config: &Config) -> String {
-        if config.announce_address.len() > 0 {
+        if !config.announce_address.is_empty() {
             return config.announce_address.clone();
         }
 
@@ -488,6 +672,122 @@ impl SnapchainGossip {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64, vec![]);
                     self.statsd_client.gauge("gossip.sync_channels", self.sync_channels.len() as u64, vec![]);
+
+                    // Refresh derived per-peer gossip rates from the cumulative
+                    // counters. Collect first so we don't hold a borrow of the
+                    // swarm across the metrics call.
+                    let connected: Vec<PeerId> = self.swarm.connected_peers().cloned().collect();
+                    self.metrics.refresh_rates(connected.iter(), &ALL_TOPICS);
+
+                    // Mesh self-heal sweep. Snapshot per-peer topic subscriptions
+                    // once per tick; iterate `direct_peers` (small intentional set)
+                    // looking for peers that are libp2p-connected but missing the
+                    // CONTACT_INFO subscription. CONTACT_INFO is the universal
+                    // marker — subscribed to unconditionally by both validators
+                    // and read nodes — so its absence is unambiguous evidence
+                    // the SUBSCRIBE round-trip didn't complete after connect.
+                    // Fix: targeted disconnect to force a fresh handshake.
+                    let contact_info_hash = gossipsub::IdentTopic::new(CONTACT_INFO).hash();
+                    let now = Instant::now();
+                    let bounce_cooldown = Duration::from_secs(60);
+                    // SUBSCRIBE round-trip settle window. `gossipsub.all_peers()` reports
+                    // a peer the moment libp2p establishes the connection — before any
+                    // SUBSCRIBE control RPCs have been exchanged. Bouncing inside this
+                    // window would mistake healthy mid-handshake peers for the bug
+                    // condition. 30s is ~20× the default 500ms heartbeat that paces
+                    // SUBSCRIBE delivery, comfortably above any reasonable settle.
+                    let connection_settle_threshold = Duration::from_secs(30);
+
+                    let peer_topics_snapshot: HashMap<PeerId, Vec<gossipsub::TopicHash>> = self
+                        .swarm
+                        .behaviour()
+                        .gossipsub
+                        .all_peers()
+                        .map(|(p, ts)| (*p, ts.into_iter().cloned().collect()))
+                        .collect();
+
+                    // Reconcile `peer_connected_at` against the current snapshot. Two
+                    // directions of cleanup, both defensive against missed events:
+                    //
+                    // 1. Drop entries for peers no longer in gossipsub's connected
+                    //    set. Catches cases where ConnectionClosed wasn't observed
+                    //    (transport-level errors that bypass the normal close path).
+                    //    Without this, a missed close would leave the entry stale
+                    //    forever and the settle-time gate would short-circuit on a
+                    //    re-used PeerId.
+                    //
+                    // 2. Insert entries for direct peers that ARE gossipsub-connected
+                    //    but missing from the map. Catches the inverse case where we
+                    //    missed ConnectionEstablished (or pruned wrongly above).
+                    //    Conservative recovery: setting the timestamp to `now`
+                    //    restarts the settle clock, so we'd rather skip a bounce
+                    //    once than bounce a healthy peer.
+                    self.peer_connected_at
+                        .retain(|peer_id, _| peer_topics_snapshot.contains_key(peer_id));
+                    for peer_id in peer_topics_snapshot.keys() {
+                        if self.direct_peers.contains(peer_id) {
+                            self.peer_connected_at.entry(*peer_id).or_insert(now);
+                        }
+                    }
+
+                    let bouncable: Vec<PeerId> = self.direct_peers.iter()
+                        .filter_map(|peer_id| {
+                            let topics = peer_topics_snapshot.get(peer_id)?; // not connected → skip
+                            if topics.contains(&contact_info_hash) { return None; } // healthy → skip
+                            // Settle-time gate: skip peers we haven't seen connected long
+                            // enough for a SUBSCRIBE round-trip to complete. If the entry
+                            // is missing for some reason, fall through to bouncing — the
+                            // rate-limit gate below caps the damage to one bounce per 60s.
+                            if let Some(connected_at) = self.peer_connected_at.get(peer_id) {
+                                if now.duration_since(*connected_at) < connection_settle_threshold {
+                                    return None;
+                                }
+                            }
+                            if let Some(last) = self.last_force_bounce_at.get(peer_id) {
+                                if now.duration_since(*last) <= bounce_cooldown { return None; }
+                            }
+                            Some(*peer_id)
+                        })
+                        .collect();
+
+                    for peer_id in bouncable {
+                        warn!(peer = %peer_id, "Direct peer connected but missing CONTACT_INFO subscription — bouncing");
+                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                        self.last_force_bounce_at.insert(peer_id, now);
+                        self.statsd_client.count("gossip.direct_peer_force_bounce", 1, vec![]);
+                        self.direct_peer_force_bounce_count.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    // Smoking-gun gauge: direct peers that are connected but
+                    // haven't completed a SUBSCRIBE round-trip with us.
+                    // Steady state = 0. Reuses peer_topics_snapshot above.
+                    let direct_missing_contact_info: u64 = self.direct_peers.iter()
+                        .filter(|peer_id| {
+                            peer_topics_snapshot
+                                .get(*peer_id)
+                                .is_some_and(|topics| !topics.contains(&contact_info_hash))
+                        })
+                        .count() as u64;
+                    self.statsd_client.gauge("gossip.direct_peer_missing_contact_info_topic", direct_missing_contact_info, vec![]);
+
+                    // Validators only: surface consensus mesh size so we can
+                    // alert if grafts to N-1 peers don't establish.
+                    if !self.read_node {
+                        let consensus_hash = gossipsub::IdentTopic::new(CONSENSUS_TOPIC).hash();
+                        let mesh_size = self.swarm.behaviour().gossipsub.mesh_peers(&consensus_hash).count() as u64;
+                        self.statsd_client.gauge("gossip.consensus_mesh_size", mesh_size, vec![]);
+                    }
+
+                    // Steady-state-cost canary for the system_tx capacity bump
+                    // (Change A). If `used / capacity > 0.8` for >1 tick, the
+                    // consensus actor isn't draining fast enough and we need a
+                    // bigger buffer or a faster consumer.
+                    if let Some(tx) = &self.system_tx {
+                        let cap = tx.max_capacity() as u64;
+                        let used = (tx.max_capacity() - tx.capacity()) as u64;
+                        self.statsd_client.gauge("gossip.system_tx_queue_used", used, vec![]);
+                        self.statsd_client.gauge("gossip.system_tx_queue_capacity", cap, vec![]);
+                    }
                 },
                 _ = publish_contact_info_timer.tick() => {
                     if self.read_node {
@@ -498,7 +798,22 @@ impl SnapchainGossip {
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, endpoint, ..} => {
-                            info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
+                            let is_direct = self.direct_peers.contains(&peer_id);
+                            // Track first-connect time for the sweep settle-time check.
+                            // Bounded to direct peers only — the sweep doesn't bounce
+                            // non-direct peers, so tracking them would just be a slow
+                            // memory leak on read nodes that accept many connections.
+                            // `or_insert_with` keeps the original timestamp if multiple
+                            // connections to the same direct peer fire
+                            // ConnectionEstablished in succession.
+                            if is_direct {
+                                self.peer_connected_at.entry(peer_id).or_insert_with(Instant::now);
+                            }
+                            // Authoritative, conflict-free observed address of the live
+                            // connection (independent of any self-announced IP). Last
+                            // connection wins; used for DERIVED peer entries in the mesh view.
+                            self.observed_addrs.insert(peer_id, endpoint.get_remote_address().clone());
+                            info!(total_peers = self.swarm.connected_peers().count(), direct = is_direct, "Connection established with peer: {peer_id}");
                             if let Some(system_tx) = &self.system_tx {
                                 let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                                 if let Err(e) = system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await {
@@ -514,9 +829,57 @@ impl SnapchainGossip {
                                 },
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
+
+                            // Boot one-shot: when the first direct peer's connection is
+                            // established, cycle unsubscribe/subscribe on every topic this
+                            // node has joined. This forces fresh UNSUBSCRIBE+SUBSCRIBE
+                            // control RPCs out to every connected peer regardless of mesh
+                            // state — defends against the libp2p-gossipsub
+                            // `other_established > 0` early-return that suppresses the
+                            // normal subscribe-on-connect path during reconnect races.
+                            // Fires once per process lifetime.
+                            if is_direct
+                                && !self.boot_resub_done.swap(true, Ordering::Relaxed)
+                            {
+                                // `swap(true)` claims the slot atomically and tells us
+                                // whether we won the race (returned `false` = was unset =
+                                // we are the first). Any future edit that introduces an
+                                // .await mid-block cannot regress to multi-fire because
+                                // the slot is already taken before any work begins.
+                                info!(peer = %peer_id, "Performing one-shot unsub/sub cycle for direct peer mesh refresh");
+                                let topics_to_cycle: Vec<gossipsub::IdentTopic> = self.local_topics.to_vec();
+                                {
+                                    let gs = &mut self.swarm.behaviour_mut().gossipsub;
+                                    for topic in &topics_to_cycle {
+                                        let _ = gs.unsubscribe(topic);
+                                        if let Err(e) = gs.subscribe(topic) {
+                                            warn!("Boot resub: failed to re-subscribe to {}: {:?}", topic, e);
+                                        }
+                                    }
+                                }
+                                self.statsd_client.count("gossip.boot_resub_fired", 1, vec![]);
+                            }
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
-                            info!("Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
+                            let is_direct = self.direct_peers.contains(&peer_id);
+                            // Only forget the first-connect time when ALL connections
+                            // to this peer have closed. Until then, the peer is still
+                            // logically connected and the settle-time clock should
+                            // keep running from the first ConnectionEstablished. The
+                            // periodic sweep also runs a defensive prune in case this
+                            // event is somehow missed (transport-level errors that
+                            // bypass the close path), so leaks here are self-healing.
+                            if is_direct && !self.swarm.is_connected(&peer_id) {
+                                self.peer_connected_at.remove(&peer_id);
+                            }
+                            // Evict the peer's gossip-metric series and observed
+                            // address once fully disconnected, bounding cardinality
+                            // to connected peers.
+                            if !self.swarm.is_connected(&peer_id) {
+                                self.metrics.remove_peer(&peer_id, &ALL_TOPICS);
+                                self.observed_addrs.remove(&peer_id);
+                            }
+                            info!(direct = is_direct, "Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
                             if let Some(system_tx) = &self.system_tx {
                                 let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
                                 if let Err(e) = system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await {
@@ -530,10 +893,14 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
                         },
-                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
-                            info!("Peer: {peer_id} subscribed to topic: {topic}"),
-                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Unsubscribed { peer_id, topic })) =>
-                            info!("Peer: {peer_id} unsubscribed to topic: {topic}"),
+                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) => {
+                            let is_direct = self.direct_peers.contains(&peer_id);
+                            info!(direct = is_direct, "Peer: {peer_id} subscribed to topic: {topic}");
+                        },
+                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Unsubscribed { peer_id, topic })) => {
+                            let is_direct = self.direct_peers.contains(&peer_id);
+                            info!(direct = is_direct, "Peer: {peer_id} unsubscribed to topic: {topic}");
+                        },
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!(address = address.to_string(), "Local node is listening");
                             if let Some(system_tx) = &self.system_tx {
@@ -550,6 +917,23 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
+                            // Test-only partition simulation: drop messages whose
+                            // immediate sender is on the local blocklist. Production
+                            // leaves the set empty so this is a HashSet contains check
+                            // under an uncontended `parking_lot::Mutex` (no poisoning,
+                            // no thread parking, won't block the tokio executor).
+                            if self.peer_blocklist.lock().contains(&peer_id) {
+                                continue;
+                            }
+                            // Per-peer/per-topic gossip volume. `IdentTopic` uses
+                            // identity hashing, so `topic.as_str()` is the human
+                            // topic name (e.g. "consensus"). Cumulative — rates are
+                            // derived by the sampler on the periodic tick.
+                            self.metrics.record_message(
+                                &peer_id,
+                                message.topic.as_str(),
+                                message.data.len() as u64,
+                            );
                             // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
                             let maybe_sender = self.system_tx.as_ref().cloned();
                             if let Some(system_tx) = maybe_sender {
@@ -611,6 +995,50 @@ impl SnapchainGossip {
                                 sync::Event::InboundFailure {peer, connection_id: _, error, request_id} => {
                                     self.sync_channels.remove(&request_id);
                                     warn!("Failed to send RPC response to peer: {:?} due to: {:?}", peer, error);
+                                }
+                                _ => {}
+                            }
+                        }
+                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Diagnostics(diag_event)) => {
+                            match diag_event {
+                                request_response::Event::Message { peer, message, .. } => match message {
+                                    libp2p::request_response::Message::Request { channel, .. } => {
+                                        // Only serve other validators (for now). A non-validator
+                                        // requester is refused by dropping the response channel,
+                                        // which surfaces as an OutboundFailure on their side.
+                                        if !self.validator_peers.contains(&peer) {
+                                            debug!(
+                                                peer = %peer,
+                                                "Ignoring mesh diagnostics request from non-validator"
+                                            );
+                                        } else {
+                                            // Respond with RAW peer facts; the requesting aggregator
+                                            // classifies against its own validator set + height.
+                                            let view = self.get_mesh_view();
+                                            if self
+                                                .swarm
+                                                .behaviour_mut()
+                                                .diagnostics
+                                                .send_response(channel, view)
+                                                .is_err()
+                                            {
+                                                warn!("Failed to send mesh diagnostics response");
+                                            }
+                                        }
+                                    }
+                                    libp2p::request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    } => {
+                                        if let Some(tx) = self.diagnostics_requests.remove(&request_id) {
+                                            let _ = tx.send(Ok(response));
+                                        }
+                                    }
+                                },
+                                request_response::Event::OutboundFailure { request_id, error, .. } => {
+                                    if let Some(tx) = self.diagnostics_requests.remove(&request_id) {
+                                        let _ = tx.send(Err(format!("{error:?}")));
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1015,21 +1443,177 @@ impl SnapchainGossip {
 
                 None
             }
+            Some(GossipEvent::GetMeshView(channel)) => {
+                let view = self.get_mesh_view();
+                let _ = channel.send(view);
+
+                None
+            }
+            Some(GossipEvent::SendMeshViewRequest(peer, request, channel)) => {
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .diagnostics
+                    .send_request(&peer, request);
+                self.diagnostics_requests.insert(request_id, channel);
+                None
+            }
             None => None,
         }
     }
 
-    fn get_connected_peers(&self) -> Vec<ContactInfoBody> {
-        let connected_peers = self.swarm.connected_peers();
-
-        connected_peers
-            .filter_map(|peer| {
-                let info = self.peers.get(peer);
-                match info {
-                    Some(contact) => Some(contact.to_owned()),
-                    None => None,
+    /// Source-tagged view of every connected peer. Peers with peer-attested
+    /// `ContactInfoBody` are `COLLECTED`; peers we have none for (e.g.
+    /// validators, which never publish contact info) are `DERIVED` from the live
+    /// connection's observed address. `self.peers` is never mutated here — the
+    /// derived data is assembled at the response boundary only.
+    fn get_connected_peers(&self) -> Vec<proto::ConnectedPeer> {
+        self.swarm
+            .connected_peers()
+            .map(|peer| {
+                let observed_address = self
+                    .observed_addrs
+                    .get(peer)
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                match self.peers.get(peer) {
+                    Some(contact) => proto::ConnectedPeer {
+                        source: proto::ContactSource::Collected as i32,
+                        contact_info: Some(contact.clone()),
+                        peer_id: peer.to_bytes(),
+                        observed_address,
+                    },
+                    None => proto::ConnectedPeer {
+                        source: proto::ContactSource::Derived as i32,
+                        contact_info: None,
+                        peer_id: peer.to_bytes(),
+                        observed_address,
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Build this node's local mesh view: connected peers with per-topic
+    /// gossipsub mesh membership, gossip rates, and source-tagged contact info.
+    /// Validator classification (`node_type`, `consensus_public_key`,
+    /// `is_validator`, `current_height`) is left unset here and filled by the
+    /// RPC layer, which holds the validator set and block height.
+    fn get_mesh_view(&self) -> proto::MeshView {
+        let gossipsub = &self.swarm.behaviour().gossipsub;
+
+        // Snapshot per-peer topic subscriptions once.
+        let peer_topics: HashMap<PeerId, HashSet<gossipsub::TopicHash>> = gossipsub
+            .all_peers()
+            .map(|(p, ts)| (*p, ts.into_iter().cloned().collect()))
+            .collect();
+        // Mesh membership per known topic (the set of peers we mesh with).
+        let topic_mesh: HashMap<&str, HashSet<PeerId>> = ALL_TOPICS
+            .iter()
+            .map(|topic| {
+                let hash = gossipsub::IdentTopic::new(*topic).hash();
+                let mesh = gossipsub.mesh_peers(&hash).cloned().collect();
+                (*topic, mesh)
+            })
+            .collect();
+
+        let peers = self
+            .swarm
+            .connected_peers()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|peer| {
+                let subscribed = peer_topics.get(&peer);
+                let topics = ALL_TOPICS
+                    .iter()
+                    .filter_map(|topic| {
+                        let hash = gossipsub::IdentTopic::new(*topic).hash();
+                        let is_subscribed = subscribed.map(|s| s.contains(&hash)).unwrap_or(false);
+                        let in_mesh = topic_mesh
+                            .get(*topic)
+                            .map(|m| m.contains(&peer))
+                            .unwrap_or(false);
+                        // Only surface topics the peer is subscribed to (or that
+                        // we mesh with) to keep the view focused.
+                        if is_subscribed || in_mesh {
+                            Some(proto::TopicMembership {
+                                topic: topic.to_string(),
+                                subscribed: is_subscribed,
+                                in_mesh,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let gossip_rates = self
+                    .metrics
+                    .rates_for(&peer, &ALL_TOPICS)
+                    .into_iter()
+                    .map(|(topic, rate)| proto::GossipRate {
+                        topic,
+                        msgs_per_sec: rate.msgs_per_sec,
+                        bytes_per_sec: rate.bytes_per_sec,
+                        total_msgs: rate.total_msgs,
+                        total_bytes: rate.total_bytes,
+                    })
+                    .collect();
+                let collected = self.peers.get(&peer);
+                proto::MeshPeer {
+                    peer_id: peer.to_bytes(),
+                    node_type: proto::MeshNodeType::Unknown as i32, // filled by RPC layer
+                    consensus_public_key: None,                     // filled by RPC layer
+                    connected: true,
+                    direct_peer: self.direct_peers.contains(&peer),
+                    contact_source: if collected.is_some() {
+                        proto::ContactSource::Collected as i32
+                    } else {
+                        proto::ContactSource::Derived as i32
+                    },
+                    contact_info: collected.cloned(),
+                    observed_address: self
+                        .observed_addrs
+                        .get(&peer)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default(),
+                    topics,
+                    gossip_rates,
+                }
+            })
+            .collect();
+
+        let consensus_mesh_size = topic_mesh
+            .get(CONSENSUS_TOPIC)
+            .map(|m| m.len() as u32)
+            .unwrap_or(0);
+        let current_version = EngineVersion::current(self.fc_network).protocol_version();
+        let local = proto::MeshSelf {
+            peer_id: self.swarm.local_peer_id().to_bytes(),
+            consensus_public_key: vec![], // filled by RPC layer
+            is_validator: false,          // filled by RPC layer
+            gossip_address: self.announce_gossip_address.clone(),
+            rpc_address: self.announce_rpc_address.clone(),
+            snapchain_version: current_version.to_string(),
+            network: self.fc_network as i32,
+            subscribed_topics: self
+                .local_topics
+                .iter()
+                .map(|t| t.hash().to_string())
+                .collect(),
+            consensus_mesh_size,
+            current_height: 0, // filled by RPC layer
+        };
+
+        let generated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        proto::MeshView {
+            local: Some(local),
+            peers,
+            generated_at,
+        }
     }
 }

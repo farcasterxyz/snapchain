@@ -101,7 +101,7 @@ fn get_shard_page_by_prefix(
     )
     .map_err(|e| ShardStorageError::HubError(e))?;
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key)
     } else {
         None

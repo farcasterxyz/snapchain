@@ -521,7 +521,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
         height: Self::Height,
         round: Round,
     ) -> &'a Self::Validator {
-        assert!(validator_set.validators.len() > 0);
+        assert!(!validator_set.validators.is_empty());
         assert!(round != Round::Nil && round.as_i64() >= 0);
 
         let proposer_index = {

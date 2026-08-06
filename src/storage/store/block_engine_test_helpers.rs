@@ -6,6 +6,7 @@ use crate::proto::{
     StorageUnitType,
 };
 use crate::storage::db::RocksDB;
+use crate::storage::store::account::StoreOptions;
 use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
@@ -31,6 +32,8 @@ pub fn default_signer() -> SigningKey {
 pub struct BlockEngineOptions {
     pub network: FarcasterNetwork,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
+    pub channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for BlockEngineOptions {
@@ -38,6 +41,7 @@ impl Default for BlockEngineOptions {
         BlockEngineOptions {
             network: FarcasterNetwork::Devnet,
             messages_request_tx: None,
+            channel_slot_cap_override: None,
         }
     }
 }
@@ -51,13 +55,17 @@ pub fn setup_with_options(engine_options: BlockEngineOptions) -> (BlockEngine, T
     let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
 
-    let block_engine = BlockEngine::new(
+    let block_engine = BlockEngine::new_with_opts(
         trie,
         statsd_client,
         db,
         100,
         engine_options.messages_request_tx,
         engine_options.network,
+        StoreOptions {
+            channel_slot_cap_override: engine_options.channel_slot_cap_override,
+            ..Default::default()
+        },
     );
 
     (block_engine, temp_dir)
@@ -250,13 +258,19 @@ pub fn register_user(
     storage_units: u32,
     engine: &mut BlockEngine,
 ) {
-    // Create storage rent event with specified units
-    let storage_event = events_factory::create_rent_event(
+    // Grant the units with a rolling, recent timestamp rather than a fixed historical one.
+    // `StorageSlot::is_active` compares `invalidate_at` against wall-clock `SystemTime::now()`, so a
+    // fixed grant date eventually ages out of its validity window: once real time passes
+    // `grant_ts + validity`, the slot goes inactive and `prepare_proposal` silently drops the fid's
+    // messages. That is especially easy to hit when a test proposes against a
+    // pre-`StorageExpiryExtension2026` (< V18) engine version, where the unit only gets the 1-year
+    // (unextended) validity. A `now`-dated rent event still classifies as `UnitType2025` (both the
+    // 2025-cohort and new-rental branches store into `units_2025`) but never expires under test.
+    // Mirrors `test_helper::default_storage_event`.
+    let storage_event = events_factory::create_rent_event_with_timestamp(
         fid,
         storage_units,
-        StorageUnitType::UnitType2025,
-        false,
-        engine.network,
+        crate::utils::factory::time::current_timestamp(),
     );
     commit_event(engine, &storage_event);
 
@@ -303,7 +317,13 @@ pub fn assert_storage_balance(
     assert_eq!(
         block_engine
             .stores()
-            .get_storage_slot_for_fid(fid, &vec![], true, true)
+            .get_storage_slot_for_fid(
+                fid,
+                crate::version::version::EngineVersion::latest(),
+                &vec![],
+                true,
+                true,
+            )
             .unwrap()
             .units_for(unit_type),
         num_units

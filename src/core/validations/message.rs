@@ -5,6 +5,7 @@ use crate::proto::{
     self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, StorageUnitType,
     UserDataBody, UserDataType, UserNameType,
 };
+use crate::storage::store::account::{CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH};
 use crate::storage::util::{blake3_20, bytes_compare};
 
 use super::{cast, key, link, reaction, verification};
@@ -14,6 +15,7 @@ use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
 use prost::Message;
+use std::sync::LazyLock;
 
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
@@ -23,6 +25,15 @@ const EMBEDS_V1_CUTOFF: u32 = 73612800;
 const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
+
+static FNAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(FNAME_REGEX).unwrap());
+static TWITTER_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(TWITTER_USERNAME_REGEX).unwrap());
+static GITHUB_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(GITHUB_USERNAME_REGEX).unwrap());
+static GEO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$").unwrap());
+
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
 const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 10 * 60;
 
@@ -36,7 +47,7 @@ fn validate_bytes_as_string(
     max_length: u64,
     required: bool,
 ) -> Result<(), ValidationError> {
-    if required && byte_array.len() == 0 {
+    if required && byte_array.is_empty() {
         return Err(ValidationError::MissingString);
     }
     if byte_array.len() as u64 > max_length {
@@ -95,7 +106,7 @@ pub fn validate_message(
     let message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
-        if data_bytes.len() == 0 {
+        if data_bytes.is_empty() {
             return Err(ValidationError::MissingData);
         }
         match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
@@ -195,6 +206,7 @@ pub fn validate_message(
                 &cast_add_body,
                 message_data.timestamp < EMBEDS_V1_CUTOFF,
                 is_pro_user,
+                version,
             )?;
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {
@@ -225,9 +237,105 @@ pub fn validate_message(
         Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
             key::validate_key_remove_body(&key_remove_body)?;
         }
+        // Channel bodies become statelessly admissible only with ChannelMessages. BlockEngine
+        // independently retains the consensus-critical width and state-aware authority checks.
+        Some(proto::message_data::Body::ChannelUpdateBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_update_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelMemberBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_member_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelPinBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_pin_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelModerateBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_moderate_body(&body)?;
+        }
         None => {}
     }
 
+    Ok(())
+}
+
+fn invalid_channel(reason: &str) -> ValidationError {
+    ValidationError::HubError(crate::core::error::HubError::validation_failure(reason))
+}
+
+fn validate_channel_id(channel_id: &[u8]) -> Result<(), ValidationError> {
+    if channel_id.len() != CHANNEL_ID_LENGTH {
+        return Err(invalid_channel("channel id must be 32 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_channel_update_body(body: &proto::ChannelUpdateBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body
+        .casting_mode
+        .is_some_and(|mode| proto::CastingMode::try_from(mode).is_err())
+    {
+        return Err(invalid_channel("invalid channel casting mode"));
+    }
+    if body
+        .membership_mode
+        .is_some_and(|mode| proto::MembershipMode::try_from(mode).is_err())
+    {
+        return Err(invalid_channel("invalid channel membership mode"));
+    }
+    Ok(())
+}
+
+fn validate_channel_member_body(body: &proto::ChannelMemberBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body.fid == 0 || u32::try_from(body.fid).is_err() {
+        return Err(invalid_channel(
+            "channel member fid must fit in a non-zero u32",
+        ));
+    }
+    let action = proto::ChannelMemberAction::try_from(body.action)
+        .map_err(|_| invalid_channel("invalid channel member action"))?;
+    if action == proto::ChannelMemberAction::None {
+        return Err(invalid_channel("invalid channel member action"));
+    }
+    Ok(())
+}
+
+fn validate_channel_pin_body(body: &proto::ChannelPinBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if !body.cast_hash.is_empty() && body.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+        return Err(invalid_channel(
+            "channel pin cast hash must be empty or 20 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_channel_moderate_body(
+    body: &proto::ChannelModerateBody,
+) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+        return Err(invalid_channel(
+            "channel moderate cast hash must be 20 bytes",
+        ));
+    }
+    let action = proto::ChannelModerateAction::try_from(body.action)
+        .map_err(|_| invalid_channel("invalid channel moderate action"))?;
+    if action == proto::ChannelModerateAction::None {
+        return Err(invalid_channel("invalid channel moderate action"));
+    }
     Ok(())
 }
 
@@ -255,7 +363,7 @@ fn validate_signature(
         return Err(ValidationError::InvalidSignatureScheme);
     }
 
-    if signature.len() == 0 {
+    if signature.is_empty() {
         return Err(ValidationError::MissingSignature);
     }
 
@@ -279,7 +387,7 @@ pub fn validate_message_hash(
         return Err(ValidationError::InvalidHashScheme);
     }
 
-    if data_bytes.len() == 0 {
+    if data_bytes.is_empty() {
         return Err(ValidationError::MissingData);
     }
 
@@ -291,7 +399,7 @@ pub fn validate_message_hash(
 }
 
 pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
-    if input.len() == 0 {
+    if input.is_empty() {
         return Err(ValidationError::FnameIsMissing);
     }
 
@@ -300,8 +408,7 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -336,8 +443,7 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -368,8 +474,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -387,8 +492,7 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 15));
     }
 
-    if !Regex::new(TWITTER_USERNAME_REGEX)
-        .unwrap()
+    if !TWITTER_USERNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -406,8 +510,7 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 38));
     }
 
-    if !Regex::new(GITHUB_USERNAME_REGEX)
-        .unwrap()
+    if !GITHUB_USERNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -535,8 +638,7 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
-        .unwrap()
+    let captures = GEO_RE
         .captures(location)
         .map_err(|_| ValidationError::InvalidLocationString)?;
 
@@ -591,6 +693,14 @@ pub fn validate_user_data_add_body(
             }
         }
         UserDataType::Url => {
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::UrlValueTooLong);
+            }
+        }
+        UserDataType::LiveAt => {
+            if !version.is_enabled(ProtocolFeature::LiveAt) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
             if value_bytes.len() > 256 {
                 return Err(ValidationError::UrlValueTooLong);
             }

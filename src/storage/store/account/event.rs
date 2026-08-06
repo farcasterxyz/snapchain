@@ -200,7 +200,7 @@ impl HubEventStorageExt for HubEvent {
 
         Ok(EventsPage {
             events,
-            next_page_token: if last_key.len() > 0 {
+            next_page_token: if !last_key.is_empty() {
                 Some(last_key)
             } else {
                 None

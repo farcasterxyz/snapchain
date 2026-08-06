@@ -7,4 +7,4 @@ pub mod spawn;
 pub mod spawn_read_node;
 
 #[cfg(test)]
-mod read_node_actors_test;
+mod read_node_actors_tests;

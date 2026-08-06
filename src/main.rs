@@ -1,10 +1,8 @@
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::core::types::SnapchainValidatorContext;
 use snapchain::mempool::block_receiver::BlockReceiver;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
@@ -44,7 +42,8 @@ const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
-    mut gossip: SnapchainGossip,
+    local_peer_id_str: String,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
     onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
@@ -73,8 +72,26 @@ async fn start_servers(
         local_state_store,
     );
 
+    let fname_lookup: Option<Arc<dyn snapchain::connectors::fname::FnameTransferLookup>> =
+        if app_config.fnames.disable {
+            None
+        } else {
+            Some(Arc::new(
+                snapchain::connectors::fname::HttpFnameTransferLookup::new(
+                    app_config.fnames.url.clone(),
+                ),
+            ))
+        };
+
+    // Validator public keys (hex) used to classify peers in the mesh view by
+    // deriving each validator's PeerId — the latest set per shard, unioned
+    // (same source as the diagnostics gate, so the two stay consistent).
+    let validator_hex_keys: Vec<String> = app_config.consensus.latest_validator_public_keys();
+
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
+        app_config.admin_rpc_auth.clone(),
+        validator_hex_keys,
         block_stores.clone(),
         shard_stores.clone(),
         shard_senders,
@@ -83,10 +100,12 @@ async fn start_servers(
         app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
-        gossip.tx.clone(),
+        gossip_tx,
         chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
-        gossip.swarm.local_peer_id().to_string(),
+        local_peer_id_str,
+        fname_lookup,
+        app_config.mesh.clone(),
     ));
 
     let replication_service = if let Some(replicator) = replicator {
@@ -132,47 +151,30 @@ async fn start_servers(
 
     let http_shutdown_tx = shutdown_tx.clone();
     let http_server_config = app_config.http_server.clone();
+    let http_service = HubHttpServiceImpl {
+        service: service.clone(),
+    };
+    // Built once and shared across all connections — maps peers to human-readable
+    // names for the mesh JSON / UI.
+    let mesh_nodes = Arc::new(snapchain::network::mesh::nodes::NodeRegistry::from_config(
+        &app_config.mesh,
+    ));
+    info!(
+        known_nodes = mesh_nodes.len(),
+        "Mesh known-node registry loaded"
+    );
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
         info!(http_addr = http_addr, "HttpService listening",);
-
-        let http_service = HubHttpServiceImpl {
-            service: service.clone(),
-        };
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let io = TokioIo::new(stream);
-                    let http_server_config = http_server_config.clone();
-                    let service_clone = http_service.clone();
-                    tokio::spawn(async move {
-                        let router = snapchain::network::http_server::Router::new(service_clone);
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(
-                                io,
-                                service_fn(|r| router.handle(r, &http_server_config)),
-                            )
-                            .await
-                        {
-                            error!("Error serving connection: {}", err);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                    break;
-                }
-            }
-        }
-
+        let accept_handle = snapchain::network::http_server::spawn_http_server(
+            listener,
+            http_service,
+            http_server_config,
+            mesh_nodes,
+        );
+        // Match the previous behaviour: when the accept loop exits, signal shutdown.
+        let _ = accept_handle.await;
         http_shutdown_tx.send(()).await.ok();
-    });
-
-    // Start gossip last
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
     });
 }
 
@@ -423,7 +425,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let keypair = app_config.consensus.keypair().clone();
 
-    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
+    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(16384);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
     let gossip_result = SnapchainGossip::create(
@@ -441,7 +443,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let gossip = gossip_result?;
+    let mut gossip = gossip_result?;
+    // Validator PeerIds permitted to query the mesh-diagnostics behaviour;
+    // the gossip responder answers only these peers (fail-closed otherwise).
+    let validator_peers: HashSet<_> = snapchain::network::mesh::view::build_validator_peer_ids(
+        app_config.consensus.latest_validator_public_keys().iter(),
+    )
+    .into_keys()
+    .collect();
+    gossip.set_validator_peers(validator_peers);
     let local_peer_id = gossip.swarm.local_peer_id().clone();
     let read_or_validator = if app_config.read_node {
         "read"
@@ -456,12 +466,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let gossip_tx = gossip.tx.clone();
+    let local_peer_id_str = local_peer_id.to_string();
+    // Grab a handle to the per-peer gossip metrics before the gossip value is
+    // moved into the spawned task, so we can register the counters into the
+    // shared Prometheus registry below.
+    let gossip_metrics = gossip.metrics();
+
+    // Spawn the libp2p Swarm event loop now, ahead of SnapchainNode::create().
+    // Driving it in parallel with shard DB init lets QUIC keep-alives and
+    // gossipsub control messages flow during the heavy boot window, instead
+    // of being deferred until after all RocksDB stores are open.
+    tokio::spawn(async move {
+        info!("Starting gossip");
+        gossip.start().await;
+        info!("Gossip Stopped");
+    });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
+    // Register per-peer gossip counters alongside the consensus metrics.
+    gossip_metrics.register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
     let chains_clients = ChainClients::new(&app_config);
@@ -554,7 +581,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
-            gossip,
+            local_peer_id_str.clone(),
+            gossip_tx.clone(),
             mempool_tx,
             shutdown_tx,
             onchain_events_request_tx,
@@ -696,6 +724,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.onchain_events,
                     node_local_state::Chain::Optimism,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
@@ -717,6 +746,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.base_onchain_events,
                     node_local_state::Chain::Base,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
@@ -774,6 +804,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     event_rx: senders.events_tx.subscribe(),
                     validator_sets: app_config.consensus.to_stored_validator_sets(0), // We care about the validator sets for shard 0 blocks only
                     config: app_config.block_receiver.clone(),
+                    statsd: statsd_client.clone(),
                 };
                 tokio::spawn(async move { block_receiver.run().await });
             }
@@ -781,7 +812,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
-            gossip,
+            local_peer_id_str.clone(),
+            gossip_tx.clone(),
             mempool_tx.clone(),
             shutdown_tx.clone(),
             onchain_events_request_tx,
@@ -823,6 +855,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 });
             });
+        }
+
+        // Wait for the readiness signal before entering the consensus loop.
+        // Today the signal fires synchronously at the end of
+        // SnapchainNode::create(), so this returns immediately. The gate is in
+        // place so a future change that introduces real concurrency in node
+        // init (e.g., parallel shard DB open via spawn_blocking) can hold
+        // consensus message dispatch until the actors are ready, without
+        // changing the call site here.
+        {
+            let mut wal_replay_complete = node.wal_replay_complete.clone();
+            if !*wal_replay_complete.borrow() {
+                info!("Waiting for WAL replay to complete before consensus participation");
+                let _ = wal_replay_complete.changed().await;
+            }
+            info!("Validator initialization complete; entering consensus loop");
         }
 
         // Kick it off

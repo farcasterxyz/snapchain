@@ -9,6 +9,8 @@ permissions:
 
 env:
   MALACHITE_GIT_REF: "13bca14cd209d985c3adf101a02924acde8723a5"
+  # The default `info` log level is very noisy in CI test output; quiet it to errors only.
+  RUST_LOG: error
 
 jobs:
   test:
@@ -29,6 +31,18 @@ jobs:
           ref: ${{ env.MALACHITE_GIT_REF }}
           path: ./malachite
 
+      # Malachite is a path dependency, and cargo fingerprints path deps by source-file mtime.
+      # actions/checkout stamps every file with the checkout time (always "now"), which is newer than
+      # the cached build artifacts, so cargo rebuilds all malachite crates on every run despite a cache
+      # hit. Pin the source mtimes to the checked-out commit's date: stable across runs and older than
+      # the cached artifacts, so cargo trusts the cached malachite build. Correctness on a ref bump is
+      # guaranteed by the rust-cache key below, which includes MALACHITE_GIT_REF, so a bump gets a cold
+      # cache and a full rebuild instead of reusing stale artifacts.
+      - name: Pin malachite source mtimes for cargo cache reuse
+        run: |
+          commit_ts=$(git -C ./malachite show -s --format=%cI HEAD)
+          find ./malachite -type f -not -path '*/.git/*' -exec touch -d "$commit_ts" {} +
+
       - name: Install Rust 1.95.0
         uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -42,6 +56,17 @@ jobs:
         with:
           path: ./snapchain
           fetch-depth: 0
+
+      # Cache cargo registry/git and the build target dir to speed up CI. Malachite is a path
+      # dependency whose artifacts rust-cache keeps, but cargo only reuses them because the mtime
+      # pinning step above stops the fresh checkout from invalidating them. MALACHITE_GIT_REF is part
+      # of the cache key so a ref bump lands on a cold cache and rebuilds malachite from scratch,
+      # rather than reusing artifacts from the previous ref.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./snapchain
+          key: malachite-${{ env.MALACHITE_GIT_REF }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -91,6 +116,18 @@ jobs:
           RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
         run: cargo fmt --all --check
 
+      # The L0 conformance corpus is checked in and must be reproducible: regenerating it without a
+      # protocol change must produce no diff. A diff here means encoding/hash/signature/state-root
+      # output changed and the committed corpus (and the protocol-repo copy) needs regenerating.
+      - name: Check conformance corpus is up to date
+        working-directory: ./snapchain
+        env:
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        run: |
+          cargo test --test conformance_test generate_corpus -- --ignored --nocapture
+          git diff --exit-code -- tests/conformance/corpus \
+            || (echo "::error::Conformance corpus is stale. Run: cargo test --test conformance_test generate_corpus -- --ignored, then sync farcasterxyz/protocol/vectors/" && exit 1)
+
       - working-directory: ./snapchain/tests/client_parity_tests
         run: |
           npx node-gyp@12.2.0 install
@@ -105,4 +142,14 @@ jobs:
         with:
           name: coverage-report
           path: ./snapchain/coverage/
+          retention-days: 14
+
+      # Publish the L0 conformance corpus as a portable artifact an external client can download
+      # and run against in its own CI.
+      - name: Upload conformance corpus
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: conformance-corpus
+          path: ./snapchain/tests/conformance/
           retention-days: 14

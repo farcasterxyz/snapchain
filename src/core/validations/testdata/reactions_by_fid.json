@@ -1,0 +1,54 @@
+{
+  "messages": [
+    {
+      "data": {
+        "type": "MESSAGE_TYPE_REACTION_ADD",
+        "fid": 3,
+        "reactionBody": {
+          "type": "REACTION_TYPE_LIKE",
+          "targetCastId": { "fid": 576, "hash": "0x68f602dd2b91063e7263366c98f38b0357fe1def" }
+        }
+      }
+    },
+    {
+      "data": {
+        "type": "MESSAGE_TYPE_REACTION_ADD",
+        "fid": 3,
+        "reactionBody": {
+          "type": "REACTION_TYPE_LIKE",
+          "targetCastId": { "fid": 99, "hash": "0x0f7989fcd0cd0ffccb158d665d85b6a54bd6bfda" }
+        }
+      }
+    },
+    {
+      "data": {
+        "type": "MESSAGE_TYPE_REACTION_ADD",
+        "fid": 3,
+        "reactionBody": {
+          "type": "REACTION_TYPE_RECAST",
+          "targetCastId": { "fid": 457, "hash": "0xd184fa40495cb62e177849ca3bcfc866e34d4615" }
+        }
+      }
+    },
+    {
+      "data": {
+        "type": "MESSAGE_TYPE_REACTION_ADD",
+        "fid": 3,
+        "reactionBody": {
+          "type": "REACTION_TYPE_LIKE",
+          "targetUrl": "https://warpcast.com/~/channel/farcaster"
+        }
+      }
+    },
+    {
+      "data": {
+        "type": "MESSAGE_TYPE_REACTION_ADD",
+        "fid": 3,
+        "reactionBody": {
+          "type": "REACTION_TYPE_RECAST",
+          "targetUrl": "chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2"
+        }
+      }
+    }
+  ]
+}

@@ -39,6 +39,34 @@ mod tests {
         hex::encode(b)
     }
 
+    const PRE_V21_TESTNET_UNIX_TIMESTAMP: u64 = 1_784_124_000;
+
+    fn pre_v21_testnet_time(offset_seconds: u64) -> FarcasterTime {
+        FarcasterTime::from_unix_seconds(PRE_V21_TESTNET_UNIX_TIMESTAMP + offset_seconds)
+    }
+
+    fn pre_v21_testnet_message_timestamp(offset_seconds: u64) -> u32 {
+        pre_v21_testnet_time(offset_seconds).to_u64() as u32
+    }
+
+    async fn new_pre_v21_testnet_engine() -> (ShardEngine, tempfile::TempDir) {
+        test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet),
+            ..EngineOptions::default()
+        })
+        .await
+    }
+
+    async fn commit_pre_v21_message(engine: &mut ShardEngine, message: &proto::Message) {
+        let block_time = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+        assert_eq!(
+            EngineVersion::version_for(&block_time, FarcasterNetwork::Testnet),
+            EngineVersion::V19
+        );
+        test_helper::commit_message_at(engine, message, &block_time).await;
+        assert!(test_helper::message_exists_in_trie(engine, message));
+    }
+
     fn default_message(text: &str) -> proto::Message {
         messages_factory::casts::create_cast_add(
             FID_FOR_TEST,
@@ -503,6 +531,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_engine_block_link_survives_follow_compaction_at_v19() {
+        // End-to-end through the engine on devnet (V19): the engine derives
+        // scope_link_compaction = is_enabled(BlockLinks) = true and threads it down, so a
+        // follow compact state compacts only follows and leaves a block link intact.
+        let timestamp = messages_factory::farcaster_time();
+        let target_fid = 15;
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // A follow add the later compact state will sweep (its target isn't listed), and a
+        // block add to the same target that must survive a follow compaction.
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follow",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &follow_add).await;
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "block",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &block_add).await;
+
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            "follow",
+            vec![target_fid + 100],
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &follow_compact_state).await;
+
+        // Compaction ran (the non-target follow is gone) but was type-scoped (block survives).
+        assert!(!message_exists_in_trie(&mut engine, &follow_add));
+        assert!(message_exists_in_trie(&mut engine, &block_add));
+    }
+
+    #[tokio::test]
+    async fn test_engine_block_link_deleted_by_follow_compaction_pre_v19() {
+        // End-to-end on testnet at a pre-V19 timestamp: the engine derives
+        // scope_link_compaction = false, so a follow compact state compacts type-blind and
+        // deletes the block link too — the legacy behavior preserved for deterministic replay.
+        // Pinned to a fixed instant inside the V18 window (unix 1782000000, ~2026-06-20) rather
+        // than wall-clock time, which drifts past the 2026-07-15 14:00 UTC testnet V19 cutover.
+        let timestamp = FarcasterTime::from_unix_seconds(1782000000).to_u64() as u32;
+        let target_fid = 15;
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet),
+            ..Default::default()
+        })
+        .await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "block",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &block_add).await;
+
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            "follow",
+            vec![target_fid + 100],
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &follow_compact_state).await;
+
+        // Pre-V19, compaction is type-blind: the follow compact state deletes the block too.
+        assert!(!message_exists_in_trie(&mut engine, &block_add));
+    }
+
+    #[tokio::test]
     async fn test_commit_reaction_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_url = "exampleurl".to_string();
@@ -570,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_verification_messages() {
-        let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
         test_helper::register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
@@ -590,7 +711,7 @@ mod tests {
             None,
         );
 
-        commit_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
@@ -602,16 +723,71 @@ mod tests {
             None,
         );
 
-        commit_message(&mut engine, &verification_remove).await;
+        commit_pre_v21_message(&mut engine, &verification_remove).await;
 
         let verification_result = engine.get_verifications_by_fid(FID_FOR_TEST);
         assert_eq!(0, verification_result.unwrap().messages.len());
     }
 
     #[tokio::test]
+    async fn s4_data_shard_verification_admission_splits_at_v21() {
+        let pre_v21_block_time = pre_v21_testnet_time(0);
+        let timestamp = pre_v21_block_time.to_u64() as u32;
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0,
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            FID3_FOR_TEST,
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            Some(timestamp + 1),
+            None,
+        );
+
+        let (mut pre_v21_engine, _tmpdir) = new_pre_v21_testnet_engine().await;
+        register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut pre_v21_engine,
+        )
+        .await;
+        commit_pre_v21_message(&mut pre_v21_engine, &verification_add).await;
+
+        let (mut post_v21_engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut post_v21_engine,
+        )
+        .await;
+        for message in [&verification_add, &verification_remove] {
+            let error = post_v21_engine
+                .validate_user_message(
+                    message,
+                    &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
+                    EngineVersion::V21,
+                    &mut RocksDbTransactionBatch::new(),
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                MessageValidationError::InvalidMessageType(message_type)
+                    if message_type == message.msg_type() as i32
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn test_validate_ethereum_address_with_verification() {
-        let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -634,7 +810,7 @@ mod tests {
             None,
         );
 
-        commit_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         // Verify the verification was added
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
@@ -691,8 +867,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
-        let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -720,7 +896,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_message(&mut engine, &verification_add).await;
+        commit_pre_v21_message(&mut engine, &verification_add).await;
 
         // Step 2: Set the Ethereum address as primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -730,7 +906,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v21_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -755,7 +931,7 @@ mod tests {
             Some(timestamp + 2),
             None,
         );
-        commit_message(&mut engine, &verification_remove).await;
+        commit_pre_v21_message(&mut engine, &verification_remove).await;
 
         // Step 4: Verify the primary address was automatically revoked
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -832,8 +1008,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
-        let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let timestamp = pre_v21_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v21_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -861,7 +1037,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_message(&mut engine, &primary_verification_add).await;
+        commit_pre_v21_message(&mut engine, &primary_verification_add).await;
 
         let other_address = "182327170fc284caaa5b1bc3e3878233f529d741";
         let other_address_bytes = hex::decode(other_address).unwrap();
@@ -876,7 +1052,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_message(&mut engine, &other_verification_add).await;
+        commit_pre_v21_message(&mut engine, &other_verification_add).await;
 
         // Set the primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -886,7 +1062,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v21_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -904,7 +1080,7 @@ mod tests {
         );
 
         // This should succeed
-        commit_message(&mut engine, &other_verification_remove).await;
+        commit_pre_v21_message(&mut engine, &other_verification_remove).await;
 
         // Verify the primary address is STILL set (should not be revoked)
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -1082,7 +1258,7 @@ mod tests {
             .unwrap();
         let updated_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Account root is not empty after a message is committed
-        assert_eq!(updated_account_root.len() > 0, true);
+        assert!(!updated_account_root.is_empty());
         assert_ne!(updated_shard_root, shard_root);
 
         let another_fid_event = events_factory::create_onchain_event(FID_FOR_TEST + 1);
@@ -1100,7 +1276,7 @@ mod tests {
             .unwrap();
         let latest_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Only the account root for the new fid and the shard root is updated, original fid account root remains the same
-        assert_eq!(account_root_another_fid.len() > 0, true);
+        assert!(!account_root_another_fid.is_empty());
         assert_eq!(account_root_original_fid, updated_account_root);
         assert_ne!(latest_shard_root, updated_shard_root);
     }
@@ -1316,7 +1492,7 @@ mod tests {
         let result = engine.simulate_bulk_messages(&messages_batch);
 
         assert!(
-            result.len() == 0,
+            result.is_empty(),
             "Simulating an empty batch should succeed"
         );
 
@@ -3437,8 +3613,12 @@ mod tests {
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
+    /// Embeds stopped being a Pro feature at V20. This engine runs devnet, which is always the
+    /// latest version, so the gate is open — a plain fid with no tier event gets all four, and the
+    /// cap itself still bites at five. The version boundary is pinned separately in
+    /// `cast_tests::embed_limit_is_four_for_everyone_from_v20`.
     #[tokio::test]
-    async fn pro_users_get_four_embeds() {
+    async fn all_users_get_four_embeds() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
@@ -3447,50 +3627,50 @@ mod tests {
             &mut engine,
         )
         .await;
-        let pro_event = events_factory::create_pro_user_event(
-            FID_FOR_TEST,
-            1,
-            Some(time::current_timestamp_with_offset(-1)),
-        );
-        let four_embeds = messages_factory::casts::create_cast_add_rich(
-            FID_FOR_TEST,
-            "test",
-            Some(proto::CastType::Cast),
-            vec![
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("abcde".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("fghi".to_string())),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::CastId(CastId {
-                        fid: FID_FOR_TEST + 1,
-                        hash: rand::random::<[u8; 20]>().to_vec(),
-                    })),
-                },
-                Embed {
-                    embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
-                },
-            ],
-            None,
-            vec![],
-            None,
-            None,
-        );
+
+        let cast_with_embeds = |text: &str, count: usize| {
+            let embeds = (0..count)
+                .map(|i| {
+                    // Mix in a CastId embed so the count check is exercised against both variants.
+                    if i == 2 {
+                        Embed {
+                            embed: Some(proto::embed::Embed::CastId(CastId {
+                                fid: FID_FOR_TEST + 1,
+                                hash: rand::random::<[u8; 20]>().to_vec(),
+                            })),
+                        }
+                    } else {
+                        Embed {
+                            embed: Some(proto::embed::Embed::Url(format!(
+                                "https://example.com/{i}"
+                            ))),
+                        }
+                    }
+                })
+                .collect();
+            messages_factory::casts::create_cast_add_rich(
+                FID_FOR_TEST,
+                text,
+                Some(proto::CastType::Cast),
+                embeds,
+                None,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        // No pro event is ever committed: four embeds must merge on a plain fid.
+        let four_embeds = cast_with_embeds("four", 4);
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(!TrieKey::for_message(&four_embeds)
+        assert!(TrieKey::for_message(&four_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
-        commit_event(&mut engine, &pro_event).await;
-        assert!(engine.trie_key_exists(
-            test_helper::trie_ctx(),
-            &TrieKey::for_onchain_event(&pro_event)
-        ));
-
-        commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(TrieKey::for_message(&four_embeds)
+        // Four is still a cap, not an invitation.
+        let five_embeds = cast_with_embeds("five", 5);
+        commit_message_at(&mut engine, &five_embeds, &FarcasterTime::current()).await;
+        assert!(!TrieKey::for_message(&five_embeds)
             .iter()
             .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
@@ -3916,7 +4096,7 @@ mod tests {
         // Verify the borrower now has storage
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, EngineVersion::latest(), true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3925,7 +4105,7 @@ mod tests {
         // Verify the lender's storage was reduced
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, true, &vec![])
+            .get_storage_slot_for_fid(lender_fid, EngineVersion::latest(), true, &vec![])
             .unwrap();
         // Lender should have default storage minus 1 unit lent
         assert_eq!(
@@ -3950,7 +4130,7 @@ mod tests {
         // Verify the lender's storage was returned
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, EngineVersion::latest(), true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3958,12 +4138,2538 @@ mod tests {
         );
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, true, &vec![])
+            .get_storage_slot_for_fid(lender_fid, EngineVersion::latest(), true, &vec![])
             .unwrap();
         assert_eq!(
             lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
             1
         );
         assert!(!message_exists_in_trie(&mut engine, &lend_message))
+    }
+
+    mod verification_replay_tests {
+        use super::*;
+        use crate::proto::{hub_event, MergeMessageBody, Message};
+        use crate::storage::store::account::{make_ts_hash, VerificationStore};
+
+        const VERIFICATION_FID: u64 = FID3_FOR_TEST;
+        const VERIFICATION_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
+        const VERIFICATION_CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
+        const VERIFICATION_BLOCK_HASH_HEX: &str =
+            "d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296";
+
+        fn verification_address() -> Vec<u8> {
+            hex::decode(VERIFICATION_ADDRESS_HEX).unwrap()
+        }
+
+        fn verification_add(timestamp: u32) -> Message {
+            messages_factory::verifications::create_verification_add(
+                VERIFICATION_FID,
+                0,
+                verification_address(),
+                hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap(),
+                hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn verification_remove(timestamp: u32) -> Message {
+            verification_remove_for_address(verification_address(), timestamp)
+        }
+
+        fn verification_remove_for_address(address: Vec<u8>, timestamp: u32) -> Message {
+            messages_factory::verifications::create_verification_remove(
+                VERIFICATION_FID,
+                address,
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn replay_verification(
+            engine: &mut ShardEngine,
+            message: &Message,
+            seqnum: u64,
+        ) -> ShardStateChange {
+            replay_verifications(engine, &[(message.clone(), seqnum)]).await
+        }
+
+        /// Replay several BlockEvents inside a single block, in the order given.
+        async fn replay_verifications(
+            engine: &mut ShardEngine,
+            messages: &[(Message, u64)],
+        ) -> ShardStateChange {
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                messages
+                    .iter()
+                    .map(|(message, seqnum)| MempoolMessage::BlockEvent {
+                        for_shard: engine.shard_id(),
+                        message: create_merge_message_event(message.clone(), *seqnum),
+                    })
+                    .collect(),
+                None,
+            );
+            test_helper::validate_and_commit_state_change(engine, &state_change).await;
+            state_change
+        }
+
+        fn merge_body_for<'a>(
+            state_change: &'a ShardStateChange,
+            message: &Message,
+        ) -> &'a MergeMessageBody {
+            let matches = state_change
+                .events
+                .iter()
+                .filter_map(|event| match &event.body {
+                    Some(hub_event::Body::MergeMessageBody(body))
+                        if body.message.as_ref() == Some(message) =>
+                    {
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "expected exactly one replay merge event");
+            matches[0]
+        }
+
+        fn assert_verification_index(engine: &ShardEngine, expected: Option<&Message>) {
+            let stores = engine.get_stores();
+            let entries = VerificationStore::get_verifications_by_address(
+                &stores.verification_store,
+                &verification_address(),
+                None,
+            )
+            .unwrap();
+            match expected {
+                Some(message) => assert_eq!(
+                    entries,
+                    vec![(
+                        VERIFICATION_FID,
+                        make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)
+                            .unwrap()
+                    )]
+                ),
+                None => assert!(entries.is_empty()),
+            }
+        }
+
+        #[tokio::test]
+        async fn active_replay_preserves_message_index_trie_event_and_by_fid_read() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            let state_change = replay_verification(&mut engine, &add, 1).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                Some(add.clone())
+            );
+            assert_verification_index(&engine, Some(&add));
+            assert!(message_exists_in_trie(&mut engine, &add));
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![add.clone()]
+            );
+            assert!(merge_body_for(&state_change, &add)
+                .deleted_messages
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn replicator_replay_bypasses_post_v21_direct_admission_reject() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let add = verification_add(messages_factory::farcaster_time());
+            engine
+                .commit_replicator_message_for_test(&add, false)
+                .expect("replicator must bypass direct admission");
+            assert!(message_exists_in_trie(&mut engine, &add));
+        }
+
+        // A replay can carry a message the fid shard already holds verbatim. Force override must
+        // treat that as a no-op, not as a supersede of the row by itself: a self-supersede would
+        // list the message in its own event's `deleted_messages`, and because
+        // `MerkleTrie::update_for_event` applies inserts before deletes on a hash-keyed trie key,
+        // it would drop the message from the trie while the store kept the row -- a store/trie
+        // divergence, and an empty-trie `UnableToReloadRoot` panic in the degenerate case.
+        #[tokio::test]
+        async fn identical_replay_is_idempotent_across_store_index_and_trie() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            replay_verification(&mut engine, &add, 1).await;
+            let state_change = replay_verification(&mut engine, &add, 2).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                Some(add.clone())
+            );
+            assert_verification_index(&engine, Some(&add));
+            assert!(
+                message_exists_in_trie(&mut engine, &add),
+                "identical replay must leave the trie key intact"
+            );
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![add.clone()]
+            );
+            assert!(
+                merge_body_for(&state_change, &add)
+                    .deleted_messages
+                    .is_empty(),
+                "a message must never appear in its own deleted_messages"
+            );
+        }
+
+        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V21
+        // cutover, then the SAME verification arriving again by shard-0 forced replay after
+        // cutover. This is the window case `routing.rs` documents: self-supersede keeps the store,
+        // by-address index, and trie mutually consistent (the replay is a state no-op), while the
+        // event stream is deliberately NOT idempotent -- the replay still emits a fresh
+        // MergeMessage HubEvent with empty `deleted_messages`, which is why a subscriber may see
+        // the verification twice even though state converges.
+        //
+        // `commit_replicator_message_for_test` stands in for the pre-cutover live merge: it seeds
+        // the row the data shard would already hold from the pre-V21 regime, which post-V21 direct
+        // admission now rejects (that rejection is exactly what makes shard 0 the only live path).
+        #[tokio::test]
+        async fn cutover_straddle_live_then_replay_converges_state_but_re_emits_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            // 1. Pre-cutover: the data shard already holds the live-merged verification.
+            engine
+                .commit_replicator_message_for_test(&add, false)
+                .expect("pre-cutover live merge must succeed");
+            {
+                let stores = engine.get_stores();
+                assert_eq!(
+                    VerificationStore::get_verification_add(
+                        &stores.verification_store,
+                        VERIFICATION_FID,
+                        &verification_address(),
+                        None,
+                    )
+                    .unwrap(),
+                    Some(add.clone()),
+                );
+            }
+            assert_verification_index(&engine, Some(&add));
+            assert!(message_exists_in_trie(&mut engine, &add));
+            let root_after_live_merge = engine.trie_root_hash();
+
+            // 2. Post-cutover: the SAME verification arrives again by shard-0 forced replay.
+            let state_change = replay_verification(&mut engine, &add, 1).await;
+
+            // 3. State converges -- the redundant replay is a no-op on store, index, and trie.
+            {
+                let stores = engine.get_stores();
+                assert_eq!(
+                    VerificationStore::get_verification_add(
+                        &stores.verification_store,
+                        VERIFICATION_FID,
+                        &verification_address(),
+                        None,
+                    )
+                    .unwrap(),
+                    Some(add.clone()),
+                    "replaying an already-held verification must not change the add row",
+                );
+            }
+            assert_verification_index(&engine, Some(&add));
+            assert!(
+                message_exists_in_trie(&mut engine, &add),
+                "self-supersede must leave the trie key intact",
+            );
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![add.clone()],
+            );
+            assert_eq!(
+                engine.trie_root_hash(),
+                root_after_live_merge,
+                "the state root must be identical before and after the redundant replay",
+            );
+
+            // 4. The event stream is NOT idempotent: the replay still emits a fresh MergeMessage
+            //    for the same message (the duplicate a subscriber may observe), and a message must
+            //    never supersede itself, so its own `deleted_messages` stays empty.
+            let merge_body = merge_body_for(&state_change, &add);
+            assert!(
+                merge_body.deleted_messages.is_empty(),
+                "a re-merged message must never appear in its own deleted_messages",
+            );
+        }
+
+        // Two BlockEvents for the same (fid, address) in one block. Conflict discovery reads
+        // through the shared txn batch, so the second must see the first's uncommitted write and
+        // supersede it. BlockEvent order wins over embedded timestamps, hence the older remove.
+        #[tokio::test]
+        async fn two_replays_for_one_address_in_one_block_settle_on_the_last() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let timestamp = messages_factory::farcaster_time();
+            let add = verification_add(timestamp + 10);
+            let remove = verification_remove(timestamp);
+
+            replay_verifications(&mut engine, &[(add.clone(), 1), (remove.clone(), 2)]).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                )
+                .unwrap(),
+                Some(remove.clone())
+            );
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                None
+            );
+            assert_verification_index(&engine, None);
+            assert!(!message_exists_in_trie(&mut engine, &add));
+            assert!(message_exists_in_trie(&mut engine, &remove));
+        }
+
+        #[tokio::test]
+        async fn replayed_older_remove_force_overrides_newer_add() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let timestamp = messages_factory::farcaster_time();
+            let existing_add = verification_add(timestamp + 10);
+            engine
+                .commit_replicator_message_for_test(&existing_add, false)
+                .unwrap();
+
+            let replayed_remove = verification_remove(timestamp);
+            let state_change = replay_verification(&mut engine, &replayed_remove, 1).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                )
+                .unwrap(),
+                Some(replayed_remove.clone())
+            );
+            assert_verification_index(&engine, None);
+            assert!(!message_exists_in_trie(&mut engine, &existing_add));
+            assert!(message_exists_in_trie(&mut engine, &replayed_remove));
+            assert!(engine
+                .get_verifications_by_fid(VERIFICATION_FID)
+                .unwrap()
+                .messages
+                .is_empty());
+            assert_eq!(
+                merge_body_for(&state_change, &replayed_remove).deleted_messages,
+                vec![existing_add]
+            );
+        }
+
+        #[tokio::test]
+        async fn replayed_older_add_intentionally_force_overrides_newer_remove() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let timestamp = messages_factory::farcaster_time();
+            let existing_remove = verification_remove(timestamp + 10);
+            engine
+                .commit_replicator_message_for_test(&existing_remove, false)
+                .unwrap();
+
+            let replayed_add = verification_add(timestamp);
+            let state_change = replay_verification(&mut engine, &replayed_add, 1).await;
+
+            // Intended protocol rule, not a bug: shard-0 consensus order wins even though the
+            // replayed add's embedded timestamp is older than the data-shard tombstone.
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                Some(replayed_add.clone())
+            );
+            assert_verification_index(&engine, Some(&replayed_add));
+            assert!(!message_exists_in_trie(&mut engine, &existing_remove));
+            assert!(message_exists_in_trie(&mut engine, &replayed_add));
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![replayed_add.clone()]
+            );
+            assert_eq!(
+                merge_body_for(&state_change, &replayed_add).deleted_messages,
+                vec![existing_remove]
+            );
+        }
+
+        #[tokio::test]
+        async fn replayed_remove_revokes_primary_address_on_data_shard() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let timestamp = messages_factory::farcaster_time();
+            let add = verification_add(timestamp);
+            engine
+                .commit_replicator_message_for_test(&add, false)
+                .unwrap();
+
+            let checksummed =
+                alloy_primitives::Address::from_slice(&verification_address()).to_checksum(None);
+            let primary_address = messages_factory::user_data::create_user_data_add(
+                VERIFICATION_FID,
+                proto::UserDataType::UserDataPrimaryAddressEthereum,
+                &checksummed,
+                Some(timestamp + 1),
+                None,
+            );
+            commit_message(&mut engine, &primary_address).await;
+
+            let remove = verification_remove(timestamp + 2);
+            let state_change = replay_verification(&mut engine, &remove, 1).await;
+
+            assert!(engine
+                .get_user_data_by_fid_and_type(
+                    VERIFICATION_FID,
+                    proto::UserDataType::UserDataPrimaryAddressEthereum,
+                )
+                .is_err());
+            assert!(!message_exists_in_trie(&mut engine, &primary_address));
+            assert!(state_change.events.iter().any(|event| {
+                matches!(
+                    &event.body,
+                    Some(hub_event::Body::RevokeMessageBody(body))
+                        if body.message.as_ref() == Some(&primary_address)
+                )
+            }));
+            assert_eq!(
+                merge_body_for(&state_change, &remove).deleted_messages,
+                vec![add]
+            );
+        }
+
+        #[tokio::test]
+        async fn replay_prunes_combined_verification_state_to_storage_cap() {
+            let five_verification_limits =
+                StoreLimits::new(limits::legacy(), limits::legacy(), limits::legacy());
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                limits: Some(five_verification_limits),
+                ..EngineOptions::default()
+            })
+            .await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let timestamp = messages_factory::farcaster_time();
+            let pre_activation_rows = (1u8..=5)
+                .enumerate()
+                .map(|(index, byte)| {
+                    verification_remove_for_address(
+                        vec![byte; 20],
+                        timestamp + u32::try_from(index).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for message in &pre_activation_rows {
+                engine
+                    .commit_replicator_message_for_test(message, false)
+                    .unwrap();
+            }
+
+            let replayed_add = verification_add(timestamp + 10);
+            let state_change = replay_verification(&mut engine, &replayed_add, 1).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &[1; 20],
+                )
+                .unwrap(),
+                None,
+                "the oldest pre-activation row must be pruned"
+            );
+            for (index, message) in pre_activation_rows.iter().enumerate().skip(1) {
+                assert!(message_exists_in_trie(&mut engine, message));
+                assert!(VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &[u8::try_from(index + 1).unwrap(); 20],
+                )
+                .unwrap()
+                .is_some());
+            }
+            assert!(message_exists_in_trie(&mut engine, &replayed_add));
+            assert_eq!(
+                stores
+                    .get_usage(
+                        VERIFICATION_FID,
+                        proto::MessageType::VerificationAddEthAddress,
+                        &mut RocksDbTransactionBatch::new(),
+                    )
+                    .unwrap(),
+                (5, 5)
+            );
+            assert!(state_change.events.iter().any(|event| {
+                matches!(
+                    &event.body,
+                    Some(hub_event::Body::PruneMessageBody(body))
+                        if body.message.as_ref() == Some(&pre_activation_rows[0])
+                )
+            }));
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // KEY_ADD / KEY_REMOVE BlockEvent replay + downstream-message validation (NEYN-10618 +
+    // NEYN-10626 in-process slice).
+    //
+    // These tests model how a non-shard-0 ShardEngine learns about gasless keys: shard 0
+    // (BlockEngine) merges KEY_ADD / KEY_REMOVE and emits a `MergeMessageEventBody`; shards
+    // 1..N receive those BlockEvents through `propose_state_change`, which dispatches them via
+    // `handle_block_event` → `merge_message`. The replay path bypasses `validate_user_message`
+    // by design — the BlockEvent itself is the authority — but the underlying merge code
+    // still reads on-chain id_register events from the shard's local store, so both FIDs must
+    // already be registered locally.
+    // ----------------------------------------------------------------------------------------
+    mod gasless_key_replay_tests {
+        use super::*;
+        use crate::storage::store::account::{
+            get_active_key, get_gasless_key_owner_fid, get_gasless_key_record, get_last_used_at,
+            ActiveKey,
+        };
+        use alloy_signer_local::PrivateKeySigner;
+
+        const REQUEST_FID: u64 = FID_FOR_TEST + 100;
+
+        fn address_bytes(signer: &PrivateKeySigner) -> Vec<u8> {
+            signer.address().as_slice().to_vec()
+        }
+
+        async fn register_eth(
+            engine: &mut ShardEngine,
+            fid: u64,
+            custody: &PrivateKeySigner,
+            signer: ed25519_dalek::SigningKey,
+        ) {
+            register_user(fid, signer, address_bytes(custody), engine).await;
+        }
+
+        fn build_key_add(
+            fid_custody: &PrivateKeySigner,
+            app_custody: &PrivateKeySigner,
+            envelope: &ed25519_dalek::SigningKey,
+            scopes: Vec<proto::MessageType>,
+            ttl: u32,
+            nonce: u32,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::keys::create_key_add(
+                FID_FOR_TEST,
+                fid_custody,
+                REQUEST_FID,
+                app_custody,
+                envelope,
+                scopes,
+                ttl,
+                nonce,
+                timestamp + 1_000_000,
+                Some(timestamp),
+            )
+        }
+
+        // -- replay-path tests ------------------------------------------------------------
+
+        #[tokio::test]
+        async fn test_shard_engine_replays_key_add_block_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            let block_event = create_merge_message_event(key_add.clone(), 1);
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            let record = get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                .unwrap()
+                .expect("gasless record must materialize on the shard via replay");
+            assert_eq!(record.request_fid, REQUEST_FID);
+            assert_eq!(
+                get_gasless_key_owner_fid(&stores.db, &txn, &envelope_pubkey).unwrap(),
+                Some(FID_FOR_TEST),
+            );
+            assert_eq!(
+                get_last_used_at(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey).unwrap(),
+                Some(timestamp),
+            );
+        }
+
+        #[tokio::test]
+        async fn test_shard_engine_skips_pre_feature_block_event_replay() {
+            // Rollback safety: a validator running on Mainnet (where V16 / GaslessSigners is
+            // not yet active) that receives a BlockEvent wrapping a KEY_ADD must reject the
+            // replay rather than merging into a pre-feature shard. The gate inside
+            // `handle_block_event` matches the analogous live-admission gate in
+            // `validate_user_message`, returning `InvalidMessageType` so the caller's `warn!`
+            // surfaces the unusual replay attempt rather than silently no-op'ing.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            // BlockEvent default block_timestamp=0 → version_for(0, Mainnet) is pre-V16, so
+            // GaslessSigners is disabled and the gate inside handle_block_event must fire.
+            let block_event = create_merge_message_event(key_add, 1);
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            // No gasless record materializes — the merge was short-circuited before any state
+            // writes happened.
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            assert!(
+                get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn test_shard_engine_replays_key_remove_block_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey: [u8; 32] = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            let add_block_event = create_merge_message_event(key_add, 1);
+            commit_block_events(&mut engine, vec![&add_block_event]).await;
+
+            let key_remove = messages_factory::keys::create_key_remove_custody(
+                FID_FOR_TEST,
+                &fid_custody,
+                &test_helper::default_signer(),
+                &envelope_pubkey,
+                2,
+                timestamp + 1_000_000,
+                Some(timestamp + 1),
+            );
+            let remove_block_event = create_merge_message_event(key_remove, 2);
+            commit_block_events(&mut engine, vec![&remove_block_event]).await;
+
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            assert!(
+                get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                get_gasless_key_owner_fid(&stores.db, &txn, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                get_last_used_at(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey).unwrap(),
+                None,
+            );
+        }
+
+        // -- downstream message e2e (cast signed by gasless key after replay) -------------
+
+        #[tokio::test]
+        async fn test_cast_signed_by_gasless_key_validates_after_replay() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Cast signed by the gasless key validates and merges. Active-key lookup must
+            // surface the gasless record (NEYN-10580 wired this).
+            let cast = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "hello from gasless",
+                Some(timestamp + 2),
+                Some(&gasless),
+            );
+            commit_message(&mut engine, &cast).await;
+            assert!(message_exists_in_trie(&mut engine, &cast));
+
+            // Sanity check: active-key resolution returns Gasless, not OnChain.
+            let txn = RocksDbTransactionBatch::new();
+            let stores = engine.get_stores();
+            let pubkey = gasless.verifying_key().to_bytes();
+            let active = get_active_key(
+                &stores.onchain_event_store,
+                &stores.db,
+                &txn,
+                FID_FOR_TEST,
+                &pubkey,
+            )
+            .unwrap()
+            .expect("active key must resolve");
+            assert!(matches!(active, ActiveKey::Gasless { .. }));
+        }
+
+        #[tokio::test]
+        async fn test_cast_with_unscoped_message_type_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            // Scope KEY_ADD to CastAdd only.
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Reaction signed by the same gasless key is out-of-scope → admit check rejects.
+            let reaction = messages_factory::reactions::create_reaction_add(
+                FID_FOR_TEST,
+                ReactionType::Like,
+                Target::TargetCastId(CastId {
+                    fid: FID2_FOR_TEST,
+                    hash: vec![1; 20],
+                }),
+                Some(timestamp + 2),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(reaction.clone())],
+                None,
+            );
+            // The reaction must not produce a successful merge.
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &reaction).await);
+        }
+
+        #[tokio::test]
+        async fn test_cast_after_key_remove_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+            let pubkey: [u8; 32] = gasless.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // First cast accepted while key is live.
+            let cast1 = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "before revoke",
+                Some(timestamp + 1),
+                Some(&gasless),
+            );
+            commit_message(&mut engine, &cast1).await;
+            assert!(message_exists_in_trie(&mut engine, &cast1));
+
+            // KEY_REMOVE replays.
+            let key_remove = messages_factory::keys::create_key_remove_custody(
+                FID_FOR_TEST,
+                &fid_custody,
+                &test_helper::default_signer(),
+                &pubkey,
+                2,
+                timestamp + 1_000_000,
+                Some(timestamp + 2),
+            );
+            commit_block_events(
+                &mut engine,
+                vec![&create_merge_message_event(key_remove, 2)],
+            )
+            .await;
+
+            // Subsequent cast signed by the (now-revoked) gasless key must be rejected.
+            let cast2 = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "after revoke",
+                Some(timestamp + 3),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(cast2.clone())],
+                None,
+            );
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &cast2).await);
+        }
+
+        #[tokio::test]
+        async fn test_cast_after_ttl_expiry_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            // Anchor in the past so the "1000-seconds-later" expired-cast block timestamp
+            // is still ≤ FarcasterTime::current() at commit time. ShardEngine commit metrics
+            // panic on a future block timestamp (block_delay underflows).
+            let timestamp = messages_factory::farcaster_time() - 2000;
+            // Short TTL of 10 seconds — sliding window starts at message.timestamp.
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                10,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Cast at timestamp+5 (within TTL) — accepted, bumps last_used_at to now.
+            let cast_ok = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "within ttl",
+                Some(timestamp + 5),
+                Some(&gasless),
+            );
+            commit_message_at(
+                &mut engine,
+                &cast_ok,
+                &FarcasterTime::new((timestamp + 5) as u64),
+            )
+            .await;
+            assert!(message_exists_in_trie(&mut engine, &cast_ok));
+
+            // Cast well past last_used_at + ttl — sliding-TTL bump rejects.
+            let cast_expired = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "past ttl",
+                Some(timestamp + 1000),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(cast_expired.clone())],
+                Some(FarcasterTime::new((timestamp + 1000) as u64)),
+            );
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &cast_expired).await);
+        }
+
+        /// Helper: validate + commit an already-built state_change and report whether `msg`
+        /// landed in the trie. Used by failure tests where we don't want a panic on rejection
+        /// (which `commit_message` does).
+        async fn message_exists_in_trie_after(
+            engine: &mut ShardEngine,
+            state_change: &ShardStateChange,
+            msg: &proto::Message,
+        ) -> bool {
+            test_helper::validate_and_commit_state_change(engine, state_change).await;
+            TrieKey::for_message(msg)
+                .iter()
+                .all(|key| engine.trie_key_exists(trie_ctx(), key))
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // MergeOnChainEvent BlockEvent replica fold + ownership hints.
+    //
+    // Shard 0 fans channel-register events to every data shard as a MergeOnChainEvent BlockEvent;
+    // `handle_block_event` runs the trie-free replica fold against the shard's own
+    // OnchainEventStore and emits a ChannelOwnerChangeHint whenever a REGISTER/TRANSFER records a
+    // new owner. These tests drive that arm through the real block-event commit path. The
+    // pre-feature reject test is unchanged: the gate still ships WITH the type.
+    // ----------------------------------------------------------------------------------------
+    mod channel_ownership_events_block_event_tests {
+        use super::*;
+        use crate::storage::store::account::get_channel_keys_by_owner_address;
+        use alloy_primitives::keccak256;
+
+        const CHANNEL_KEY: &str = "pets";
+
+        fn channel_label(channel_key: &str) -> Vec<u8> {
+            keccak256(channel_key.as_bytes()).to_vec()
+        }
+
+        fn channel_event(
+            channel_key: &str,
+            label_source: &str,
+            owner_byte: u8,
+            event_type: proto::ChannelRegisterEventType,
+            expiry: u64,
+            block_number: u32,
+        ) -> OnChainEvent {
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(label_source),
+                vec![owner_byte; 20],
+                expiry,
+                event_type,
+                block_number,
+                0,
+            )
+        }
+
+        fn channel_register_onchain_event() -> OnChainEvent {
+            channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            )
+        }
+
+        // Commits one MergeOnChainEvent BlockEvent (seqnum-chained) through the data-shard path.
+        async fn apply_channel_block_event(
+            engine: &mut ShardEngine,
+            onchain_event: OnChainEvent,
+            seqnum: u64,
+        ) {
+            let block_event =
+                events_factory::create_merge_on_chain_event_event(onchain_event, seqnum);
+            commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        fn owner_change_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.r#type == HubEventType::ChannelOwnerChangeHint as i32)
+                .collect()
+        }
+
+        fn assert_hint(
+            hint: &HubEvent,
+            channel_key: &str,
+            owner_address: &[u8],
+            cause: proto::ChannelOwnerChangeCause,
+        ) {
+            let body = match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            };
+            assert_eq!(body.channel_key, channel_key);
+            assert_eq!(body.owner_address, owner_address);
+            assert_eq!(body.cause, cause as i32);
+            // A subscriber-visible event id, assigned by the shared HubEventIdGenerator.
+            assert!(hint.id > 0, "hint must carry a normal (nonzero) event id");
+        }
+
+        fn owner_channels(engine: &ShardEngine, owner_byte: u8) -> Vec<String> {
+            get_channel_keys_by_owner_address(
+                &engine.get_stores().onchain_event_store.db,
+                &vec![owner_byte; 20],
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .0
+        }
+
+        #[tokio::test]
+        async fn test_active_merge_on_chain_event_block_event_folds_replica_and_hints() {
+            // Devnet runs V21, so the arm folds the fanned-out REGISTER into this shard's own
+            // replica: it materializes all three secondary indexes (ByChannelKey,
+            // ChannelKeyByLabel, ByOwnerAddress), emits exactly one REGISTER hint, and — being a
+            // secondary-index-only fold — never touches the trie.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let root_before = engine.trie_root_hash();
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
+
+            let stores = engine.get_stores();
+            // ByChannelKey.
+            let owner = stores
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.channel_key, CHANNEL_KEY);
+            assert_eq!(owner.owner_address, vec![0xCC; 20]);
+            // ChannelKeyByLabel.
+            assert_eq!(
+                stores
+                    .onchain_event_store
+                    .get_channel_key_by_label(&channel_label(CHANNEL_KEY), None)
+                    .unwrap(),
+                Some(CHANNEL_KEY.to_string())
+            );
+            // ByOwnerAddress.
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+
+            // Exactly one REGISTER hint carrying the recorded owner.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
+            );
+
+            // Trie-free: the replica lives entirely in RocksDB secondary indexes.
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "replica fold must not touch the trie"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_renew_updates_expiry_and_emits_no_hint() {
+            // RENEW extends expiry without changing ownership — the index is updated but no hint
+            // fires (the cause enum has no RENEW variant by design).
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
+
+            let renew = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Renew,
+                2_000_000_000,
+                101,
+            );
+            apply_channel_block_event(&mut engine, renew, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.expiry, 2_000_000_000, "renew updates expiry");
+            // Only the register's hint — renew adds none.
+            assert_eq!(owner_change_hints(&engine).len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_transfer_moves_owner_and_hints_new_owner() {
+            // TRANSFER rebinds the channel to a new owner (resolved via ChannelKeyByLabel), moves
+            // the ByOwnerAddress index, and emits a TRANSFER hint carrying the NEW owner.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "owner moved to new address"
+            );
+            // ByOwnerAddress moved: old owner empty, new owner holds the channel.
+            assert!(owner_channels(&engine, 0xAA).is_empty());
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 2, "one REGISTER hint, one TRANSFER hint");
+            assert_hint(
+                &hints[1],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_lww_older_event_is_skipped_and_emits_no_hint() {
+            // A later-arriving but chain-older REGISTER loses LWW: no write, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let older = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xDD,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                50, // earlier block → older chain position
+            );
+            apply_channel_block_event(&mut engine, older, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xAA; 20],
+                "older event must not overwrite"
+            );
+            assert_eq!(
+                owner_change_hints(&engine).len(),
+                1,
+                "no hint for the skipped event"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_transfer_with_unknown_label_skips_and_emits_no_hint() {
+            // A transfer whose label resolves to no registered channel is warned and skipped —
+            // no owner index, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let transfer = channel_event(
+                "",
+                "ghost",
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                100,
+            );
+            apply_channel_block_event(&mut engine, transfer, 1).await;
+
+            assert!(engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner("ghost", None)
+                .unwrap()
+                .is_none());
+            assert!(owner_change_hints(&engine).is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_double_application_is_idempotent_and_still_hints() {
+            // On the route_fid(0) shard a channel event is merged first as a system message
+            // (primary + fold, no hint) and THEN re-applied as a block event. The block-event
+            // replica fold re-runs at the same chain position: strict-`<` LWW rewrites
+            // byte-identical index values, and the hint still fires — pinning "REGISTER/TRANSFER
+            // hints on every shard's stream" even where the event was already merged.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_register_onchain_event();
+
+            // System-message path: materializes the index, emits a MergeOnChainEvent (no hint).
+            commit_event(&mut engine, &register).await;
+            let owner_after_system = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "system merge emits no hint"
+            );
+
+            // Block-event path on the SAME shard: no block events exist yet, so seqnum 1.
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let owner_after_block = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner_after_system, owner_after_block,
+                "re-application at equal chain position is byte-identical"
+            );
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+            // The block-event path emits the hint even though the event was already merged.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_route_fid_zero_burst_coalesces_to_latest_hint() {
+            // Consumer-contract pin (hub_event.proto): on the route_fid(0) shard the
+            // system-message path leads the fan-out, so a rapid same-channel burst can be
+            // COALESCED down to just the latest hint on THIS shard — not every event hints
+            // here, only the latest one.
+            //
+            // Sequence: the system-message path merges REGISTER@100 then TRANSFER@101 first,
+            // advancing this shard's owner index to owner 0xBB @ block 101. The fanned-out
+            // block events then arrive in chain order:
+            //   - REGISTER@100 loses the strict-`<` LWW against the stored @101 → no write,
+            //     NO hint (it hinted on every fan-out-only shard, which never saw the
+            //     system-message lead — see test_transfer_moves_owner_and_hints_new_owner,
+            //     where the same REGISTER+TRANSFER via block events alone yields TWO hints).
+            //   - TRANSFER@101 re-applies at the equal chain position → byte-identical write,
+            //     Some(change) → the one TRANSFER hint this shard emits.
+            // The final owner state is identical to a fan-out-only shard; only the hint
+            // stream is coalesced. Deterministic per chain history.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+
+            // System-message path leads: it merges both events (index → 0xBB @ 101) and
+            // emits no hint.
+            commit_event(&mut engine, &register).await;
+            commit_event(&mut engine, &transfer).await;
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "system-message merges emit no hint"
+            );
+
+            // Fanned-out REGISTER@100 arrives after the index already advanced to @101: it
+            // loses LWW and is coalesced away — no write, no hint.
+            apply_channel_block_event(&mut engine, register, 1).await;
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "chain-older REGISTER must not overwrite the newer transfer"
+            );
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "the coalesced (LWW-losing) REGISTER emits no hint on this shard"
+            );
+
+            // Fanned-out TRANSFER@101 re-applies at the equal position and emits the one hint.
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+            let hints = owner_change_hints(&engine);
+            assert_eq!(
+                hints.len(),
+                1,
+                "only the latest event in the burst hints on route_fid(0)"
+            );
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+        }
+
+        #[tokio::test]
+        async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
+            // On Mainnet the block's timestamp (0) resolves to a pre-V21 version, so
+            // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The
+            // caller warns and swallows the error, so the block still commits — but no state is
+            // produced: the merge is short-circuited before any fold or trie write.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+
+            let root_before = engine.trie_root_hash();
+            let block_event = events_factory::create_merge_on_chain_event_event(
+                channel_register_onchain_event(),
+                1,
+            );
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            assert!(block_event_exists(&engine, &block_event));
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "rejected MergeOnChainEvent replay must not touch the trie"
+            );
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap();
+            assert!(
+                owner.is_none(),
+                "pre-feature replay must not fold any owner index"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Verification-merge channel-owner hints.
+    //
+    // When an Ethereum verification is force-replayed from shard 0, the engine scans THIS shard's
+    // own ByOwnerAddress replica (built by the channel-register block-event fold) and emits one
+    // ChannelOwnerChangeHint per channel the verified address owns, cause VERIFICATION_ADD /
+    // VERIFICATION_REMOVE. The hook is STRUCTURALLY unable to fail, alter, or panic the merge:
+    // every error warns and yields fewer hints, and the merge result + trie are untouched.
+    //
+    // Most tests drive the real BlockEvent replay + forced merge + trie + hint sequence. Two edges
+    // — the pre-V21 gate and the Solana-protocol skip — call the emitter directly with an explicit
+    // version because no running network can construct those states through replay.
+    // ----------------------------------------------------------------------------------------
+    mod channel_ownership_events_verification_hint_tests {
+        use super::*;
+        use crate::storage::constants::{OnChainEventPostfix, RootPrefix};
+        use alloy_primitives::keccak256;
+
+        // Canonical EOA verification fixture: a valid claim signature for FID3_FOR_TEST over this
+        // address on devnet (reused from `test_commit_verification_messages`). The channels these
+        // tests register are OWNED by exactly this address, so the merged verification's replica
+        // scan finds them.
+        const VERIFIED_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
+        const CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
+        const BLOCK_HASH_HEX: &str =
+            "d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296";
+
+        fn verified_address() -> Vec<u8> {
+            hex::decode(VERIFIED_ADDRESS_HEX).unwrap()
+        }
+
+        // A fresh devnet engine (V21 active) with FID3_FOR_TEST registered so the fixture
+        // verification can merge.
+        async fn new_verifier_engine() -> (ShardEngine, tempfile::TempDir) {
+            let (mut engine, tmpdir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+            test_helper::register_user(
+                FID3_FOR_TEST,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            (engine, tmpdir)
+        }
+
+        fn verification_add(timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_add(
+                FID3_FOR_TEST,
+                0,
+                verified_address(),
+                hex::decode(CLAIM_SIGNATURE_HEX).unwrap(),
+                hex::decode(BLOCK_HASH_HEX).unwrap(),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn verification_remove(timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_remove(
+                FID3_FOR_TEST,
+                verified_address(),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn replay_message(engine: &mut ShardEngine, message: &proto::Message) {
+            let block_event =
+                events_factory::create_merge_message_event(message.clone(), next_seqnum(engine));
+            test_helper::commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        async fn commit_verification(engine: &mut ShardEngine, message: &proto::Message) {
+            replay_message(engine, message).await;
+            assert!(test_helper::message_exists_in_trie(engine, message));
+        }
+
+        // The next fan-out block-event seqnum for THIS engine. Block events are silently skipped
+        // unless their seqnum is exactly max+1; querying it keeps the tests robust to any other
+        // block events (they never advance on this single-shard test path today, but we don't
+        // assume that).
+        fn next_seqnum(engine: &ShardEngine) -> u64 {
+            engine
+                .get_stores()
+                .block_event_store
+                .max_seqnum()
+                .unwrap_or(0)
+                + 1
+        }
+
+        async fn apply_channel_event(engine: &mut ShardEngine, event: OnChainEvent) {
+            let seqnum = next_seqnum(engine);
+            let block_event = events_factory::create_merge_on_chain_event_event(event, seqnum);
+            test_helper::commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        // Register `channel_key` to `owner` via the channel-register block-event fold path (populates
+        // the shard's own ByOwnerAddress replica). REGISTER hint fires as a side effect.
+        async fn register_channel(engine: &mut ShardEngine, channel_key: &str, owner: Vec<u8>) {
+            let event = events_factory::create_channel_register_event(
+                channel_key,
+                keccak256(channel_key.as_bytes()).to_vec(),
+                owner,
+                1_900_000_000,
+                proto::ChannelRegisterEventType::Register,
+                (next_seqnum(engine) as u32) + 1000, // block_number: strictly increasing, arbitrary
+                0,
+            );
+            apply_channel_event(engine, event).await;
+        }
+
+        // Transfer the channel labeled by `label_source` to `new_owner`. A transfer carries the
+        // label (not the channel_key) and the new owner.
+        async fn transfer_channel(
+            engine: &mut ShardEngine,
+            label_source: &str,
+            new_owner: Vec<u8>,
+            block_number: u32,
+        ) {
+            let event = events_factory::create_channel_register_event(
+                "",
+                keccak256(label_source.as_bytes()).to_vec(),
+                new_owner,
+                0,
+                proto::ChannelRegisterEventType::Transfer,
+                block_number,
+                0,
+            );
+            apply_channel_event(engine, event).await;
+        }
+
+        fn channel_owner_address(engine: &ShardEngine, channel_key: &str) -> Option<Vec<u8>> {
+            engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(channel_key, None)
+                .unwrap()
+                .map(|owner| owner.owner_address)
+        }
+
+        fn owner_change_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.r#type == HubEventType::ChannelOwnerChangeHint as i32)
+                .collect()
+        }
+
+        // Decode a hint's body. Every event reaching this is already filtered to
+        // `type == ChannelOwnerChangeHint` (by `owner_change_hints`), so the body variant is
+        // guaranteed; a mismatch is a test-harness bug and panics loudly.
+        fn hint_body(hint: &HubEvent) -> &proto::ChannelOwnerChangeHintBody {
+            match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            }
+        }
+
+        // Only VERIFICATION_* hints, in emission (id) order — filters out the REGISTER/TRANSFER
+        // hints that the block-event fold emits while seeding the replica.
+        fn verification_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            owner_change_hints(engine)
+                .into_iter()
+                .filter(|hint| {
+                    let cause = hint_body(hint).cause;
+                    cause == proto::ChannelOwnerChangeCause::VerificationAdd as i32
+                        || cause == proto::ChannelOwnerChangeCause::VerificationRemove as i32
+                })
+                .collect()
+        }
+
+        fn assert_hint(
+            hint: &HubEvent,
+            channel_key: &str,
+            owner_address: &[u8],
+            cause: proto::ChannelOwnerChangeCause,
+        ) {
+            let body = hint_body(hint);
+            assert_eq!(body.channel_key, channel_key);
+            assert_eq!(body.owner_address, owner_address);
+            assert_eq!(body.cause, cause as i32);
+            assert!(hint.id > 0, "hint must carry a normal (nonzero) event id");
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_for_channel_owner_emits_one_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            commit_verification(&mut engine, &verification_add(ts)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(
+                hints.len(),
+                1,
+                "one VERIFICATION_ADD hint for the owned channel"
+            );
+            assert_hint(
+                &hints[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_for_non_owner_emits_no_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            // A channel exists, but it's owned by a DIFFERENT address — the verified address owns
+            // nothing, so the scan is empty.
+            register_channel(&mut engine, "pets", vec![0xAB; 20]).await;
+
+            let ts = messages_factory::farcaster_time();
+            commit_verification(&mut engine, &verification_add(ts)).await;
+
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "no hint when the verified address owns no channels"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_normal_replay_type_emits_no_channel_owner_hint() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+            let hints_before = owner_change_hints(&engine).len();
+
+            let lend = messages_factory::storage_lend::create_storage_lend(
+                FID3_FOR_TEST,
+                FID_FOR_TEST,
+                1,
+                crate::proto::StorageUnitType::UnitType2025,
+                Some(messages_factory::farcaster_time()),
+                None,
+            );
+            replay_message(&mut engine, &lend).await;
+
+            assert_eq!(
+                owner_change_hints(&engine).len(),
+                hints_before,
+                "a successful Normal replay must not emit a channel-owner hint"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_verification_add_emits_hints_in_ascending_channel_key_order() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            // Register three channels owned by the verified address in NON-sorted order; the
+            // replica scan is by ascending key, so hints must come out apple, banana, cherry.
+            register_channel(&mut engine, "banana", verified_address()).await;
+            register_channel(&mut engine, "cherry", verified_address()).await;
+            register_channel(&mut engine, "apple", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            commit_verification(&mut engine, &verification_add(ts)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 3, "one hint per owned channel");
+            for (hint, channel_key) in hints.iter().zip(["apple", "banana", "cherry"]) {
+                assert_hint(
+                    hint,
+                    channel_key,
+                    &verified_address(),
+                    proto::ChannelOwnerChangeCause::VerificationAdd,
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_verification_remove_emits_hint_with_remove_cause() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            // Add first (so the remove has something to remove and merges), then remove.
+            commit_verification(&mut engine, &verification_add(ts)).await;
+            commit_verification(&mut engine, &verification_remove(ts + 1)).await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 2, "one ADD hint, then one REMOVE hint");
+            assert_hint(
+                &hints[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[1],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationRemove,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_failed_forced_verification_replay_emits_no_hint() {
+            // The emitter runs only after `merge_replayed_verification` succeeds. A malformed
+            // verification that dispatches to the forced arm but fails the store merge must not
+            // emit a hint even though its address owns a channel.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let ts = messages_factory::farcaster_time();
+            let mut malformed = verification_add(ts);
+            malformed.data.as_mut().unwrap().body = Some(
+                proto::message_data::Body::VerificationRemoveBody(proto::VerificationRemoveBody {
+                    address: verified_address(),
+                    protocol: proto::Protocol::Ethereum as i32,
+                }),
+            );
+            replay_message(&mut engine, &malformed).await;
+
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "a failed forced replay must not emit a verification hint"
+            );
+            assert!(!test_helper::message_exists_in_trie(
+                &mut engine,
+                &malformed
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_verification_merge_survives_corrupt_replica() {
+            // THE structural-safety pin. Corrupt the shard's ByOwnerAddress replica so the scan's
+            // UTF-8 decode fails, then merge a real Ethereum verification for that address. The
+            // merge MUST still succeed and be trie-indexed; the hook warns and emits no hint. The
+            // merge is provably unaffected by replica corruption.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            // Write garbage bytes under a ByOwnerAddress key for the verified address: the
+            // channel_key suffix is invalid UTF-8, so `get_channel_keys_by_owner_address`'s
+            // `String::from_utf8` errors and the whole scan returns Err.
+            let mut corrupt_key = vec![
+                RootPrefix::OnChainEvent as u8,
+                OnChainEventPostfix::ChannelRegisterByOwnerAddress as u8,
+            ];
+            corrupt_key.extend_from_slice(&verified_address());
+            corrupt_key.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 channel_key
+            let mut txn = RocksDbTransactionBatch::new();
+            txn.put(corrupt_key, vec![1u8]);
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            let ts = messages_factory::farcaster_time();
+            let add = verification_add(ts);
+            commit_verification(&mut engine, &add).await;
+
+            // The verification merged and is trie-indexed — untouched by the replica corruption.
+            assert!(
+                test_helper::message_exists_in_trie(&mut engine, &add),
+                "the verification must merge and be trie-indexed despite replica corruption"
+            );
+            assert_eq!(
+                1,
+                engine
+                    .get_verifications_by_fid(FID3_FOR_TEST)
+                    .unwrap()
+                    .messages
+                    .len(),
+                "the verification is present in the store"
+            );
+            // The corrupt scan errored out, so no hint (or partial) — never a merge failure.
+            assert!(
+                verification_hints(&engine).is_empty(),
+                "corrupt replica yields no hint, not a failed merge"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_hints_do_not_touch_the_trie() {
+            // Trie discipline: emitting AND persisting a verification hint mutates zero trie
+            // state. The hook is invoked directly on a populated replica and the shard root is
+            // captured before and after — it must be byte-identical. Hints flow to the event
+            // store only; the hook never calls `update_trie`, and `for_hub_event` pins
+            // `ChannelOwnerChangeHintBody` to zero trie keys, so a hint contributes nothing to the
+            // root. (A two-engine before/after of the full merge is confounded by the random
+            // transaction_hash the onchain-event factory stamps on register_user's trie-indexed
+            // events, so this isolates the hook itself, deterministically.)
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let root_before = engine.trie_root_hash();
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn,
+                EngineVersion::V21,
+            );
+            assert_eq!(hints.len(), 1, "the hook emits the hint");
+            // Persist the hint's writes: only the event store is touched, never the trie.
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "emitting and persisting a hint must not touch the shard root"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_pre_v21_gate_suppresses_hints_on_a_populated_replica() {
+            // The pre-V21 gate on the exact state no running network exhibits: a populated
+            // replica with the feature off. Built on devnet (so the replica exists), then the
+            // hook is called directly with a pre-V21 vs V21 version — the ONLY difference between
+            // "no hints" and "the hint" is the version, proving the gate is the discriminator.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            let mut txn_pre = RocksDbTransactionBatch::new();
+            let pre_v21 = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn_pre,
+                EngineVersion::V19,
+            );
+            assert!(
+                pre_v21.is_empty(),
+                "pre-V21 (feature off) emits no hint even on a populated replica"
+            );
+
+            let mut txn_v21 = RocksDbTransactionBatch::new();
+            let v21 = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn_v21,
+                EngineVersion::V21,
+            );
+            assert_eq!(v21.len(), 1, "the same inputs at V21 emit the hint");
+            assert_hint(
+                &v21[0],
+                "pets",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_solana_verification_emits_no_hint() {
+            // Solana verifications never own channels: the replica holds validated 20-byte EVM
+            // addresses only, so the hook gates on protocol == Ethereum. A Solana verification can
+            // not merge through the normal path in a unit test (no ed25519 fixture), so we pin the
+            // protocol gate directly: the same verified address owns a channel, but flipping the
+            // body's protocol to Solana suppresses the hint that the Ethereum path would emit.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            let mut solana_add = verification_add(messages_factory::farcaster_time());
+            if let Some(proto::message_data::Body::VerificationAddAddressBody(body)) =
+                solana_add.data.as_mut().and_then(|data| data.body.as_mut())
+            {
+                body.protocol = proto::Protocol::Solana as i32;
+            }
+
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &solana_add,
+                &mut txn,
+                EngineVersion::V21,
+            );
+            assert!(
+                hints.is_empty(),
+                "a Solana-protocol verification takes no hint even when the address owns a channel"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_malformed_verification_body_skips_without_panic() {
+            // Adversarial-input pin (plan risk 1): the message body is untrusted network input.
+            // A message whose type passes the filter but whose body is missing or the WRONG
+            // variant — plus one with no `data` at all — must hit the warn-and-skip path: no
+            // hint, and crucially no panic (no unwrap on body/message data). The replica is
+            // populated for this address, so a well-formed body WOULD emit; the empties below are
+            // the malformed body's doing, not an empty replica.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            // Sanity: a well-formed add for this owner emits one hint (so "empty" below is meaningful).
+            let mut txn = RocksDbTransactionBatch::new();
+            assert_eq!(
+                engine
+                    .emit_channel_owner_hints_for_verification(
+                        &verification_add(messages_factory::farcaster_time()),
+                        &mut txn,
+                        EngineVersion::V21,
+                    )
+                    .len(),
+                1,
+                "sanity: a well-formed add for this owner emits one hint"
+            );
+
+            // 1. type == VerificationAddEthAddress but body = None.
+            let mut no_body = verification_add(messages_factory::farcaster_time());
+            no_body.data.as_mut().unwrap().body = None;
+
+            // 2. type == VerificationAddEthAddress but body is a DIFFERENT (Remove) variant.
+            let mut wrong_variant = verification_add(messages_factory::farcaster_time());
+            wrong_variant.data.as_mut().unwrap().body = Some(
+                proto::message_data::Body::VerificationRemoveBody(proto::VerificationRemoveBody {
+                    address: verified_address(),
+                    protocol: proto::Protocol::Ethereum as i32,
+                }),
+            );
+
+            // 3. No `data` at all — msg_type() falls back to None, so the hook takes no hint.
+            let mut no_data = verification_add(messages_factory::farcaster_time());
+            no_data.data = None;
+
+            for (label, msg) in [
+                ("body = None", &no_body),
+                ("wrong body variant", &wrong_variant),
+                ("data = None", &no_data),
+            ] {
+                let mut txn = RocksDbTransactionBatch::new();
+                let hints = engine.emit_channel_owner_hints_for_verification(
+                    msg,
+                    &mut txn,
+                    EngineVersion::V21,
+                );
+                assert!(
+                    hints.is_empty(),
+                    "malformed message ({label}) must emit no hint and not panic"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_hint_fan_out_is_capped() {
+            // One verification for an address owning many channels must not emit an
+            // unbounded number of hints — that would draw down the shared 16384/block
+            // event-id budget. Drive the cap at a small value via the `_capped` seam:
+            // 5 owned channels registered in non-sorted order, cap 3 → exactly the 3
+            // LOWEST channel_keys, in ascending order (truncation is order-deterministic,
+            // not insertion-ordered). Production uses the 256 constant.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["e", "b", "d", "a", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V21,
+                3,
+            );
+
+            assert_eq!(hints.len(), 3, "fan-out truncated to the cap");
+            for (hint, channel_key) in hints.iter().zip(["a", "b", "c"]) {
+                assert_hint(
+                    hint,
+                    channel_key,
+                    &verified_address(),
+                    proto::ChannelOwnerChangeCause::VerificationAdd,
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_production_wrapper_caps_fan_out_at_the_constant() {
+            // The truncation tests above drive the `_capped` seam with a small max, so they
+            // pass regardless of what the PUBLIC wrapper forwards — a regression that made the
+            // wrapper pass `usize::MAX` (removing the very budget bound this feature adds) would
+            // leave them green. This test guards the one production seam: register CAP+1 channels
+            // to a single address, call the public wrapper (no explicit max), and assert it
+            // truncates to exactly `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION`. Uses the constant
+            // (not a literal) so the expectation follows any future change to the cap.
+            let cap = ShardEngine::MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION;
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for i in 0..(cap + 1) {
+                // Zero-padded so ascending byte order is stable and distinct per channel.
+                register_channel(&mut engine, &format!("chan_{:04}", i), verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn,
+                EngineVersion::V21,
+            );
+
+            assert_eq!(
+                hints.len(),
+                cap,
+                "public wrapper must truncate fan-out to MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION",
+            );
+        }
+
+        #[tokio::test]
+        async fn test_replayed_verification_hint_fan_out_is_capped_at_256() {
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            let first_seqnum = next_seqnum(&engine);
+            let block_events = (0u64..257)
+                .map(|index| {
+                    let channel_key = format!("channel-{index:03}");
+                    let event = events_factory::create_channel_register_event(
+                        &channel_key,
+                        keccak256(channel_key.as_bytes()).to_vec(),
+                        verified_address(),
+                        1_900_000_000,
+                        proto::ChannelRegisterEventType::Register,
+                        (index as u32) + 3000,
+                        0,
+                    );
+                    events_factory::create_merge_on_chain_event_event(event, first_seqnum + index)
+                })
+                .collect::<Vec<_>>();
+            test_helper::commit_block_events(&mut engine, block_events.iter().collect()).await;
+
+            commit_verification(
+                &mut engine,
+                &verification_add(messages_factory::farcaster_time()),
+            )
+            .await;
+
+            let hints = verification_hints(&engine);
+            assert_eq!(hints.len(), 256, "replay uses the production hint cap");
+            assert_hint(
+                &hints[0],
+                "channel-000",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[255],
+                "channel-255",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_truncated_hints_do_not_touch_the_trie() {
+            // Truncation must be as trie-inert as normal emission: capping the fan-out
+            // mutates zero trie state, so it can never move the shard root (and thus can
+            // never affect the merge). Mirrors `test_hints_do_not_touch_the_trie`, but on
+            // the truncation path. (That a REAL merge survives ANY hook outcome — error,
+            // empty, or this truncation, which is strictly milder than the scan error
+            // tested there — is pinned by `test_verification_merge_survives_corrupt_replica`.)
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c", "d", "e"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let root_before = engine.trie_root_hash();
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V21,
+                3,
+            );
+            assert_eq!(hints.len(), 3, "the cap truncated to 3 hints");
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "emitting truncated hints must not touch the shard root"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_cap_above_owned_count_emits_every_hint() {
+            // Regression guard: the cap only truncates when owned channels EXCEED it.
+            // With the cap well above the owned count, every owned channel still gets a
+            // hint — the normal path is unchanged by the cap.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V21,
+                256,
+            );
+
+            assert_eq!(
+                hints.len(),
+                3,
+                "a cap above the owned count emits one hint per channel"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_end_to_end_ownership_lifecycle() {
+            // Capstone: a channel is registered by one address, transferred to the verified
+            // address, then verified and unverified — exercising all four hint causes across the
+            // onchain-fold and forced-verification replay legs, with GetChannelOwner resolving
+            // correctly after each step.
+            //
+            // Order note: the plan sketches register → verify → transfer → remove, but a transfer
+            // that moves a channel AWAY from an address strands it (the address then owns nothing,
+            // so a later remove correctly emits no hint). To exercise a meaningful closing
+            // VERIFICATION_REMOVE, the transfer here moves the channel TO the verified address
+            // before it verifies: register(other) → transfer(→verified) → verify → remove. All
+            // four causes fire once each.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            let other_owner = vec![0xAA; 20];
+
+            // 1. REGISTER "art" to another address.
+            register_channel(&mut engine, "art", other_owner.clone()).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(other_owner.clone()),
+                "after register, owner is the original address"
+            );
+
+            // 2. TRANSFER "art" to the verified address.
+            transfer_channel(&mut engine, "art", verified_address(), 2_000_000_000).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "after transfer, owner is the verified address"
+            );
+
+            // 3. VERIFICATION_ADD for the verified address (now owns "art").
+            let ts = messages_factory::farcaster_time();
+            commit_verification(&mut engine, &verification_add(ts)).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "verification does not change registry ownership"
+            );
+
+            // 4. VERIFICATION_REMOVE for the verified address (still owns "art").
+            commit_verification(&mut engine, &verification_remove(ts + 1)).await;
+            assert_eq!(
+                channel_owner_address(&engine, "art"),
+                Some(verified_address()),
+                "removing a verification does not change registry ownership"
+            );
+
+            // The full hint sequence across both replay legs, in emission order.
+            let hints = owner_change_hints(&engine);
+            let causes: Vec<i32> = hints.iter().map(|hint| hint_body(hint).cause).collect();
+            assert_eq!(
+                causes,
+                vec![
+                    proto::ChannelOwnerChangeCause::Register as i32,
+                    proto::ChannelOwnerChangeCause::Transfer as i32,
+                    proto::ChannelOwnerChangeCause::VerificationAdd as i32,
+                    proto::ChannelOwnerChangeCause::VerificationRemove as i32,
+                ],
+                "all four causes fire once each, in lifecycle order"
+            );
+            // Every hint concerns "art"; the two verification hints carry the verified address.
+            assert_hint(
+                &hints[2],
+                "art",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationAdd,
+            );
+            assert_hint(
+                &hints[3],
+                "art",
+                &verified_address(),
+                proto::ChannelOwnerChangeCause::VerificationRemove,
+            );
+        }
+    }
+
+    mod channel_message_replay_tests {
+        use super::*;
+        use crate::proto::{hub_event, ChannelMemberAction, Message, MessageType};
+        use crate::storage::store::account::{ChannelMemberState, ChannelMemberStore};
+
+        const FIRST_AUTHOR: u64 = 7001;
+        const SECOND_AUTHOR: u64 = 7002;
+        const TARGET_FID: u64 = 7003;
+
+        fn channel_id() -> Vec<u8> {
+            vec![0xC7; 32]
+        }
+
+        fn member_message(author: u64, action: ChannelMemberAction, timestamp: u32) -> Message {
+            messages_factory::create_message_with_data(
+                author,
+                MessageType::ChannelMember,
+                proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id(),
+                    fid: TARGET_FID,
+                    action: action as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn replay_message(
+            engine: &mut ShardEngine,
+            message: &Message,
+            seqnum: u64,
+        ) -> ShardStateChange {
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::BlockEvent {
+                    for_shard: engine.shard_id(),
+                    message: create_merge_message_event(message.clone(), seqnum),
+                }],
+                None,
+            );
+            test_helper::validate_and_commit_state_change(engine, &state_change).await;
+            state_change
+        }
+
+        fn merge_body_for<'a>(
+            state_change: &'a ShardStateChange,
+            message: &Message,
+        ) -> &'a proto::MergeMessageBody {
+            state_change
+                .events
+                .iter()
+                .find_map(|event| match event.body.as_ref() {
+                    Some(hub_event::Body::MergeMessageBody(body))
+                        if body.message.as_ref() == Some(message) =>
+                    {
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .expect("replayed channel message must emit a MergeMessage HubEvent")
+        }
+
+        #[tokio::test]
+        async fn cross_author_supersede_converges_replica_store_index_trie_and_event() {
+            let first = member_message(FIRST_AUTHOR, ChannelMemberAction::AddMember, 200);
+            // The later consensus item has an older embedded timestamp. Normal channel replay
+            // still replaces the slot because merge_slot follows replay order, not ts_hash LWW.
+            let second = member_message(SECOND_AUTHOR, ChannelMemberAction::Ban, 100);
+            let (mut replica_a, _tmp_a) = test_helper::new_engine().await;
+            let (mut replica_b, _tmp_b) = test_helper::new_engine().await;
+            let first_state = replay_message(&mut replica_a, &first, 1).await;
+            test_helper::validate_and_commit_state_change(&mut replica_b, &first_state).await;
+            let second_state = replay_message(&mut replica_a, &second, 2).await;
+            test_helper::validate_and_commit_state_change(&mut replica_b, &second_state).await;
+
+            assert_eq!(replica_a.trie_root_hash(), replica_b.trie_root_hash());
+            assert_eq!(second_state.new_state_root, replica_b.trie_root_hash());
+            assert_eq!(
+                HubEvent::get_events(replica_a.db.clone(), 0, None, None)
+                    .unwrap()
+                    .events,
+                HubEvent::get_events(replica_b.db.clone(), 0, None, None)
+                    .unwrap()
+                    .events,
+                "replica HubEvent streams must be byte-identical"
+            );
+
+            let slot_key = ChannelMemberStore::slot_key(&channel_id(), TARGET_FID).unwrap();
+            assert_eq!(
+                replica_a.db.get(&slot_key).unwrap(),
+                replica_b.db.get(&slot_key).unwrap(),
+                "replica slot pointers must be byte-identical"
+            );
+            for replica in [&mut replica_a, &mut replica_b] {
+                let stores = replica.get_stores();
+                assert_eq!(
+                    ChannelMemberStore::member_state(
+                        &stores.channel_member_store,
+                        &channel_id(),
+                        TARGET_FID,
+                        None,
+                    )
+                    .unwrap(),
+                    Some(ChannelMemberState::Banned)
+                );
+                assert_eq!(
+                    ChannelMemberStore::slot_count(
+                        &stores.channel_member_store,
+                        &channel_id(),
+                        None,
+                    )
+                    .unwrap(),
+                    1,
+                    "cross-author replacement must not mint a second slot"
+                );
+                assert!(!message_exists_in_trie(replica, &first));
+                assert!(message_exists_in_trie(replica, &second));
+            }
+
+            assert_eq!(
+                merge_body_for(&second_state, &second).deleted_messages,
+                vec![first.clone()]
+            );
+        }
+    }
+
+    /// The channel-follow index, exercised through the PRODUCTION wiring.
+    ///
+    /// Every other follow test builds a `ReactionStore` directly and hands it a
+    /// registrar, which means none of them touch `Stores::new_with_opts` — the one
+    /// place the registrar is actually resolved for a running node. Verified by
+    /// mutation: replacing `channel_registrar_for_network(network)` in `stores.rs`
+    /// with `None` left the entire suite green while the feature was dead in
+    /// production. This test is what fails in that case.
+    #[tokio::test]
+    async fn test_channel_follow_index_is_written_through_the_production_wiring() {
+        use crate::core::channel_uri::{channel_registrar_for_network, ChannelAssetId};
+        use crate::storage::store::account::ReactionStore;
+
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let channel_id = [0x5au8; 32];
+        let registrar = channel_registrar_for_network(engine.network)
+            .expect("devnet must have a registrar, or this feature is inert");
+        let target = Target::TargetUrl(
+            ChannelAssetId::for_channel(&registrar, channel_id).canonical_string(),
+        );
+
+        let follow = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            None,
+            Some(&signer),
+        );
+        commit_message(&mut engine, &follow).await;
+
+        let store = &engine.get_stores().reaction_store;
+        assert_eq!(
+            ReactionStore::follower_count(store, &channel_id).unwrap(),
+            1,
+            "a LIKE of the registrar's asset id must be indexed as a follow"
+        );
+        assert_eq!(
+            ReactionStore::is_following(store, FID_FOR_TEST, &channel_id).unwrap(),
+            Some(follow.data.as_ref().unwrap().timestamp)
+        );
+
+        // And the teardown path, through the same wiring.
+        let unfollow = messages_factory::reactions::create_reaction_remove(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target,
+            Some(follow.data.as_ref().unwrap().timestamp + 10),
+            Some(&signer),
+        );
+        commit_message(&mut engine, &unfollow).await;
+
+        assert_eq!(
+            ReactionStore::follower_count(store, &channel_id).unwrap(),
+            0
+        );
+        assert_eq!(
+            ReactionStore::is_following(store, FID_FOR_TEST, &channel_id).unwrap(),
+            None
+        );
+    }
+
+    /// A reaction merged through the replicator replay path must produce exactly
+    /// the same follow rows as one merged live.
+    ///
+    /// Today this is structurally guaranteed — `replay_replicator_message` calls
+    /// the same `merge_message`, resolving the gate from the same message-embedded
+    /// timestamp — so this is a tripwire against a refactor that gives replay its
+    /// own merge, not a proof of anything the current code could get wrong.
+    #[tokio::test]
+    async fn test_follow_index_is_identical_live_and_on_replicator_replay() {
+        use crate::core::channel_uri::{channel_registrar_for_network, ChannelAssetId};
+        use crate::storage::constants::RootPrefix;
+
+        let follow_rows = |engine: &ShardEngine| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let prefix = vec![RootPrefix::ChannelFollow as u8];
+            let mut rows = vec![];
+            engine
+                .get_stores()
+                .db
+                .for_each_iterator_by_prefix(
+                    Some(prefix.clone()),
+                    Some(crate::storage::util::increment_vec_u8(&prefix)),
+                    &PageOptions::default(),
+                    |key, value| {
+                        rows.push((key.to_vec(), value.to_vec()));
+                        Ok(false)
+                    },
+                )
+                .unwrap();
+            rows
+        };
+
+        let (mut live, _t1) = test_helper::new_engine().await;
+        let (mut replayed, _t2) = test_helper::new_engine().await;
+
+        let registrar = channel_registrar_for_network(live.network).unwrap();
+        let channel_id = [0x77u8; 32];
+        let target = Target::TargetUrl(
+            ChannelAssetId::for_channel(&registrar, channel_id).canonical_string(),
+        );
+
+        let signer = test_helper::default_signer();
+        for engine in [&mut live, &mut replayed] {
+            test_helper::register_user(
+                FID_FOR_TEST,
+                signer.clone(),
+                default_custody_address(),
+                engine,
+            )
+            .await;
+        }
+
+        // A supersede and a removal, so the comparison has something to catch
+        // beyond a single insert.
+        let first = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            Some(1000),
+            Some(&signer),
+        );
+        let second = messages_factory::reactions::create_reaction_add(
+            FID_FOR_TEST,
+            ReactionType::Like,
+            target.clone(),
+            Some(2000),
+            Some(&signer),
+        );
+
+        for msg in [&first, &second] {
+            commit_message(&mut live, msg).await;
+            replayed
+                .commit_replicator_message_for_test(msg, true)
+                .unwrap();
+        }
+
+        assert!(!follow_rows(&live).is_empty(), "fixture wrote no rows");
+        assert_eq!(
+            follow_rows(&live),
+            follow_rows(&replayed),
+            "live merge and replicator replay must produce identical follow rows"
+        );
     }
 }

@@ -53,6 +53,20 @@ struct Args {
 
     #[arg(long, default_value = "4")]
     num_nodes: u32,
+
+    /// Generate configs that work inside the Docker Compose bridge network.
+    #[arg(long, default_value = "false")]
+    docker: bool,
+
+    /// Admin RPC basic auth users for local/devnet debugging, as "user:password".
+    #[arg(long, default_value = "")]
+    admin_rpc_auth: String,
+
+    /// Configure every validator as a libp2p direct/explicit peer of the others,
+    /// matching how mainnet/testnet are deployed. When false, nodes instead form
+    /// an emergent gossip mesh (useful for exercising the `●` mesh path locally).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    direct_peers: bool,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -85,6 +99,19 @@ async fn main() {
     )
     .to_string();
 
+    // PeerId for each node, derived from the SAME keypair the node loads as its
+    // `consensus.private_key` (see consensus.rs `keypair()`), so the id we
+    // advertise to peers is exactly the id that node presents at runtime. Indexed
+    // identically to `keypairs` / `all_public_keys`: entry `k` ⟺ node `k + 1`.
+    let all_peer_ids = keypairs
+        .iter()
+        .map(|x| {
+            libp2p::identity::PublicKey::from(Keypair::from(x.clone()).public())
+                .to_peer_id()
+                .to_base58()
+        })
+        .collect::<Vec<String>>();
+
     let base_rpc_port = 3382;
     let base_http_port = 3482;
     let base_gossip_port = 50050;
@@ -103,17 +130,46 @@ async fn main() {
         }
         let secret_key = hex::encode(&keypairs[i as usize - 1]);
         let rpc_port = base_rpc_port + i;
-        let http_port = base_http_port + i;
+        let http_port = if args.docker {
+            3381
+        } else {
+            base_http_port + i
+        };
         let gossip_port = base_gossip_port + i;
-        let host = format!("127.0.0.1");
+        let host = if args.docker {
+            "0.0.0.0".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        };
         let rpc_address = format!("{host}:{rpc_port}");
         let http_address = format!("{host}:{http_port}");
         let gossip_multi_addr = format!("/ip4/{host}/udp/{gossip_port}/quic-v1");
         let other_nodes_addresses = (1..=num_nodes)
             .filter(|&x| x != id)
-            .map(|x| format!("/ip4/127.0.0.1/udp/{:?}/quic-v1", base_gossip_port + x))
+            .map(|x| {
+                let gossip_host = if args.docker {
+                    format!("172.100.0.{}", 10 + x)
+                } else {
+                    "127.0.0.1".to_string()
+                };
+                format!("/ip4/{gossip_host}/udp/{:?}/quic-v1", base_gossip_port + x)
+            })
             .collect::<Vec<String>>()
             .join(",");
+
+        // Node `id` loads keypairs[id-1]; its direct peers are every OTHER node,
+        // looked up by the same index (so node x's advertised id == all_peer_ids[x-1]
+        // == the id node x presents at runtime). Empty when --direct-peers=false.
+        let direct_peers_line = if args.direct_peers {
+            let ids = (1..=num_nodes)
+                .filter(|&x| x != id)
+                .map(|x| all_peer_ids[x as usize - 1].clone())
+                .collect::<Vec<String>>()
+                .join(",");
+            format!("direct_peers = \"{ids}\"")
+        } else {
+            String::new()
+        };
 
         let block_time = humantime::format_duration(args.block_time);
         let num_shards = args.num_shards;
@@ -134,6 +190,7 @@ async fn main() {
         let statsd_prefix = format!("{}{}", args.statsd_prefix, id);
         let statsd_addr = args.statsd_addr.clone();
         let statsd_use_tags = args.statsd_use_tags;
+        let admin_rpc_auth = args.admin_rpc_auth.clone();
         let l1_rpc_url = args.l1_rpc_url.clone();
         let op_l2_rpc_url = args.op_l2_rpc_url.clone();
         let base_l2_rpc_url = args.base_l2_rpc_url.clone();
@@ -161,6 +218,7 @@ async fn main() {
             r#"
 rpc_address="{rpc_address}"
 http_address="{http_address}"
+admin_rpc_auth="{admin_rpc_auth}"
 rocksdb_dir="{db_dir}"
 l1_rpc_url="{l1_rpc_url}"
 
@@ -172,6 +230,7 @@ use_tags={statsd_use_tags}
 [gossip]
 address="{gossip_multi_addr}"
 bootstrap_peers = "{other_nodes_addresses}"
+{direct_peers_line}
 
 [consensus]
 private_key = "{secret_key}"
@@ -197,6 +256,15 @@ snapshot_download_dir = "{snapshot_download_dir}"
 load_db_from_snapshot=false
 aws_access_key_id = "{aws_access_key_id}"
 aws_secret_access_key = "{aws_secret_access_key}"
+
+# Shard-0 merges (KEY_ADD, KEY_REMOVE, LEND_STORAGE) write to shard 0's stores, but the
+# corresponding read APIs are served from the fid's data shard. BlockReceiver is what carries
+# shard-0 block events across so each data shard replays the same merge. Without it a devnet
+# accepts those message types and no read ever observes the result, with nothing logged. Enabled
+# here even though `block_receiver::Config::default()` is `enabled = false`, so a freshly
+# generated devnet exercises the same propagation path as a real deployment.
+[block_receiver]
+enabled = true
             "#
         );
 

@@ -128,7 +128,7 @@ impl StoreDef for UsernameProofStoreDef {
 
         let data = message.data.as_ref().unwrap();
         if let Some(Body::UsernameProofBody(body)) = &data.body {
-            if body.name.len() == 0 {
+            if body.name.is_empty() {
                 return Err(HubError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "name empty".to_string(),
@@ -165,7 +165,7 @@ impl StoreDef for UsernameProofStoreDef {
 
         let data = message.data.as_ref().unwrap();
         if let Some(Body::UsernameProofBody(body)) = &data.body {
-            if body.name.len() == 0 {
+            if body.name.is_empty() {
                 return Err(HubError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "name empty".to_string(),
@@ -303,7 +303,7 @@ impl StoreDef for UsernameProofStoreDef {
             _ => None,
         };
 
-        let (deleted_proof_body, deleted_message) = if merge_conflicts.len() > 0 {
+        let (deleted_proof_body, deleted_message) = if !merge_conflicts.is_empty() {
             match &merge_conflicts[0].data {
                 Some(message_data) => match &message_data.body {
                     Some(Body::UsernameProofBody(username_proof_body)) => (

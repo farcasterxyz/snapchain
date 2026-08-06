@@ -113,6 +113,8 @@ Type of UserData message
 | USER_DATA_TYPE_BANNER              | 10     | Banner image for the user             |
 | USER_DATA_PRIMARY_ADDRESS_ETHEREUM | 11     | Primary Ethereum address              |
 | USER_DATA_PRIMARY_ADDRESS_SOLANA   | 12     | Primary Solana address                |
+| USER_DATA_TYPE_PROFILE_TOKEN       | 13     | Profile token in CAIP-19 format       |
+| USER_DATA_TYPE_LIVE_AT             | 14     | Live activity URL for the user        |
 
 See [FIP-196](https://github.com/farcasterxyz/protocol/discussions/196) for more information on Location.
 See [FIP-19](https://github.com/farcasterxyz/protocol/discussions/199) for more information on Twitter/X and Github usernames.

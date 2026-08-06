@@ -59,6 +59,14 @@ jobs:
         languages: rust
         build-mode: none
         source-root: ./snapchain
+        config: |
+          paths-ignore:
+            - "**/*_test.rs"
+            - "**/*_tests.rs"
+            - "**/test_*.rs"
+            - "**/test_helper.rs"
+            - "**/test_utils.rs"
+            - "**/tests/**/*.rs"
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4

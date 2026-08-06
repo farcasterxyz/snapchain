@@ -1,0 +1,47 @@
+[package]
+name = "fc-cli"
+version = "0.0.1"
+edition = "2021"
+description = "Command-line client for Farcaster's Snapchain network"
+license = "GPL-3.0"
+
+[[bin]]
+name = "fc"
+path = "src/main.rs"
+
+[dependencies]
+snapchain-proto = { path = "../proto" }
+
+# Async runtime + networking
+tokio = { version = "1.40.0", features = ["full"] }
+tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
+reqwest = { version = "0.12.9", features = ["json", "stream"] }
+prost = "0.13.3"
+
+# CLI parsing
+clap = { version = "4.3.0", features = ["derive", "env"] }
+
+# Crypto / signing
+ed25519-dalek = { version = "2.1.1", features = ["batch"] }
+alloy-primitives = "1"
+alloy-dyn-abi = { version = "1", features = ["eip712"] }
+alloy-sol-types = { version = "1", features = ["json"] }
+alloy-signer = "2.0"
+alloy-signer-local = { version = "2.0", features = ["mnemonic"] }
+blake3 = "1.4.1"
+
+# Utilities
+base64 = "0.22.1"
+hex = "0.4.3"
+rand = "0.8.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Test-only, and deliberately one-directional: `snapchain` does not depend on this crate.
+# The CLI mirrors the node's EIP-712 verification-claim encoding by hand (see
+# `eip712::verification_claim_typed_data`); linking the real crate in tests lets us assert
+# against the node's actual validator instead of a frozen digest, so a change to the claim
+# encoding fails here rather than in production as a rejected message.
+snapchain = { path = ".." }

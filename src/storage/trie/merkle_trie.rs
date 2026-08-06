@@ -193,6 +193,12 @@ impl TrieKey {
             Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
                 // BLOCK_CONFIRMED events don't affect the trie state.
             }
+            Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(_)) => {
+                // Ownership-change hints are subscriber-only triggers and are deliberately
+                // trie-free: the derived channel-owner replica is maintained via
+                // secondary indexes only, never the trie (it is rebuildable from the
+                // block-event sequence). Contributing a trie key here would alter state roots.
+            }
             &None => {
                 // This should never happen
                 panic!("No body in event");
@@ -818,6 +824,37 @@ mod tests {
         assert_eq!(
             TrieKey::for_message_type(123, 1).len(),
             UNCOMPACTED_LENGTH / 2
+        );
+    }
+
+    #[test]
+    fn test_channel_owner_change_hint_contributes_no_trie_keys() {
+        // Consensus-critical: ChannelOwnerChangeHint HubEvents are subscriber-only and MUST
+        // stay trie-free — the channel-owner replica is a rebuildable secondary index, never
+        // trie state. The exhaustive match forces the arm to EXIST, but only this test pins it
+        // to stay EMPTY; a future edit that contributes a key here would diverge state roots
+        // across the network. Pure function, no DB/engine setup needed.
+        use crate::proto;
+        let event = proto::HubEvent {
+            r#type: proto::HubEventType::ChannelOwnerChangeHint as i32,
+            id: 1,
+            body: Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(
+                proto::ChannelOwnerChangeHintBody {
+                    channel_key: "pets".to_string(),
+                    owner_address: vec![0xCC; 20],
+                    cause: proto::ChannelOwnerChangeCause::Transfer as i32,
+                },
+            )),
+            block_number: 1,
+            shard_index: 2,
+            timestamp: 0,
+        };
+        let (inserts, deletes) = TrieKey::for_hub_event(&event);
+        assert!(
+            inserts.is_empty() && deletes.is_empty(),
+            "ownership-change hints must contribute zero trie keys (state-root safety); got {} inserts, {} deletes",
+            inserts.len(),
+            deletes.len()
         );
     }
 

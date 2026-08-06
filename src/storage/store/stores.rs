@@ -2,6 +2,7 @@ use super::account::{
     EventsPage, HubEventStorageExt, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore,
     UserDataStoreDef, VerificationStore, VerificationStoreDef,
 };
+use crate::core::channel_uri::channel_registrar_for_network;
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::network::http_server::TierType;
@@ -13,7 +14,9 @@ use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
-    BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
+    BlockEventStore, CastStore, CastStoreDef, ChannelMemberStore, ChannelMemberStoreDef,
+    ChannelModerateStore, ChannelModerateStoreDef, ChannelPinStore, ChannelPinStoreDef,
+    ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
     OnchainEventStore, StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
     StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
@@ -21,6 +24,7 @@ use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -51,6 +55,20 @@ pub struct Stores {
     pub reaction_store: Store<ReactionStoreDef>,
     pub user_data_store: Store<UserDataStoreDef>,
     pub verification_store: Store<VerificationStoreDef>,
+    // REPLICA, NOT AUTHORITY. These four are byte-identical in type and name to the
+    // fields on `BlockStores`, but they hold a data shard's copy of shard-0 channel
+    // state, written only by gated BlockEvent replay and replication — never by
+    // admission. Two consequences for readers:
+    //   - authority questions (who may moderate, is the channel parked) must be
+    //     answered from `BlockStores`; a data shard has no registry or verification
+    //     state to decide them with. Every channel read RPC goes to `block_stores`.
+    //   - a replica holds only what fanned out after activation. Rows merged on
+    //     shard 0 before this increment are not emitted retroactively, so absence
+    //     here is not evidence of absence on shard 0.
+    pub channel_update_store: Store<ChannelUpdateStoreDef>,
+    pub channel_member_store: Store<ChannelMemberStoreDef>,
+    pub channel_pin_store: Store<ChannelPinStoreDef>,
+    pub channel_moderate_store: Store<ChannelModerateStoreDef>,
     pub onchain_event_store: OnchainEventStore,
     pub username_proof_store: Store<UsernameProofStoreDef>,
     pub storage_lend_store: Store<StorageLendStoreDef>,
@@ -145,11 +163,17 @@ impl Limits {
             // NEYN-10580 (shard routing) and NEYN-10573/10574 (engine handling) land.
             MessageType::KeyAdd => StoreType::None,
             MessageType::KeyRemove => StoreType::None,
+            // Channel replicas are bounded by shard-0 admission rather than per-fid storage
+            // quota or pruning, so their data-shard stores deliberately remain StoreType::None.
+            MessageType::ChannelUpdate
+            | MessageType::ChannelMember
+            | MessageType::ChannelPin
+            | MessageType::ChannelModerate => StoreType::None,
             MessageType::None => StoreType::None,
         }
     }
 
-    fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
+    pub(crate) fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
         match store_type {
             StoreType::Casts => vec![MessageType::CastAdd, MessageType::CastRemove],
             StoreType::Links => vec![
@@ -271,6 +295,10 @@ impl Stores {
             event_handler.clone(),
             100,
             store_opts.clone(),
+            // From the network, never from `store_opts` or connector config: this
+            // decides the contents of a replicated derived index, so every node on
+            // a network has to resolve it identically.
+            channel_registrar_for_network(network),
         );
         let link_store =
             LinkStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
@@ -281,6 +309,30 @@ impl Stores {
             store_opts.clone(),
         );
         let verification_store = VerificationStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let channel_update_store = ChannelUpdateStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let channel_member_store = ChannelMemberStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let channel_pin_store = ChannelPinStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let channel_moderate_store = ChannelModerateStore::new_with_opts(
             db.clone(),
             event_handler.clone(),
             100,
@@ -312,6 +364,10 @@ impl Stores {
             reaction_store,
             user_data_store,
             verification_store,
+            channel_update_store,
+            channel_member_store,
+            channel_pin_store,
+            channel_moderate_store,
             onchain_event_store,
             username_proof_store,
             storage_lend_store,
@@ -344,6 +400,7 @@ impl Stores {
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        engine_version: EngineVersion,
         count_borrowed_storage: bool,
         pending_events: &[OnChainEvent],
     ) -> Result<StorageSlot, StoresError> {
@@ -367,6 +424,7 @@ impl Stores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                engine_version,
                 pending_events,
                 &lent_storage,
                 &borrowed_storage,
@@ -385,7 +443,14 @@ impl Stores {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
         let count_borrowed_storage = store_type != StoreType::StorageLends;
-        let slot = self.get_storage_slot_for_fid(fid, count_borrowed_storage, &[])?;
+        // RPC/limit-enforcement path: max_messages is independent of invalidate_at, so the
+        // expiry-extension version gate does not affect the result here. Use the current version.
+        let slot = self.get_storage_slot_for_fid(
+            fid,
+            EngineVersion::current(self.network),
+            count_borrowed_storage,
+            &[],
+        )?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -436,6 +501,7 @@ impl Stores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                EngineVersion::current(self.network),
                 &[],
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &StorageSlot::new(0, 0, 0, u32::MAX),
@@ -455,7 +521,14 @@ impl Stores {
             })?;
         let net_slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[], &lent_slot, &borrowed_slot)
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                EngineVersion::current(self.network),
+                &[],
+                &lent_slot,
+                &borrowed_slot,
+            )
             .map_err(|e| StoresError::OnchainEventError(e))?;
         for store_type in vec![
             StoreType::Casts,
@@ -543,6 +616,17 @@ impl Stores {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, StoresError> {
         let mut revoke_events = Vec::new();
+        // The four channel stores are DELIBERATELY absent from this list; do not add
+        // them "for completeness". These are a data shard's REPLICA of shard-0 channel
+        // state, written only by gated replay — this sweep is not their writer, and a
+        // deletion here would diverge the replica from shard 0 with nothing to
+        // reconcile it. Worse, the primary messages sit behind live slot pointers that
+        // a revocation would not clear: the read path hard-errors on a dangling slot
+        // rather than skipping it, so one revoked signer would turn GetChannelMembers
+        // into a permanent 500 for that entire channel. Whether a revoked signer's
+        // channel messages should be swept at all is a shard-0 question, and it would
+        // have to reach data shards as replay like every other channel mutation.
+        //
         // TODO: Dedup once we have a unified interface for stores
         revoke_events.extend(
             self.cast_store

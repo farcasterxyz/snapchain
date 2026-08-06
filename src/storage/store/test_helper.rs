@@ -24,7 +24,7 @@ use crate::proto::{
     ShardHash, ShardHeader, Transaction,
 };
 use crate::proto::{MessagesResponse, OnChainEvent};
-use crate::storage::store::account::MessagesPage;
+use crate::storage::store::account::{MessagesPage, StoreOptions};
 use crate::storage::store::engine::{PostCommitMessage, ShardStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 #[allow(unused_imports)] // Used by cfg(test)
@@ -37,6 +37,19 @@ use tonic::{Response, Status};
 use tracing_subscriber::EnvFilter;
 
 pub const FID_FOR_TEST: u64 = 1234;
+
+/// A default `MergeContext` for store tests that do not care which engine version the merge
+/// runs under. Uses the latest version.
+///
+/// Two things ARE version-sensitive and build their own context instead: link compaction
+/// (`is_compaction_conflict`), and the reaction store's channel-follow index, which is gated on
+/// `ProtocolFeature::ChannelFollows` read from this context. A test that asserts a follow row is
+/// absent must pass a pre-V21 context explicitly rather than relying on this helper.
+pub fn default_merge_ctx() -> crate::storage::store::account::MergeContext {
+    crate::storage::store::account::MergeContext {
+        version: crate::version::version::EngineVersion::latest(),
+    }
+}
 
 #[cfg(test)]
 pub const FID2_FOR_TEST: u64 = 1235;
@@ -130,6 +143,8 @@ pub struct EngineOptions {
     pub fname_signer_address: Option<alloy_primitives::Address>,
     pub shard_id: u32,
     pub post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+    // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
+    pub channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for EngineOptions {
@@ -142,6 +157,7 @@ impl Default for EngineOptions {
             fname_signer_address: None,
             shard_id: 1,
             post_commit_tx: None,
+            channel_slot_cap_override: None,
         }
     }
 }
@@ -175,7 +191,7 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
     ));
 
     (
-        ShardEngine::new(
+        ShardEngine::new_with_opts(
             db,
             options.network.unwrap_or(proto::FarcasterNetwork::Devnet), // So all protocol features are enabled by default
             merkle_trie::MerkleTrie::new().unwrap(),
@@ -186,6 +202,10 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
             options.messages_request_tx,
             options.fname_signer_address,
             options.post_commit_tx,
+            StoreOptions {
+                channel_slot_cap_override: options.channel_slot_cap_override,
+                ..Default::default()
+            },
         )
         .await
         .unwrap(),
@@ -395,12 +415,19 @@ pub async fn validate_and_commit_state_change(
 }
 
 pub fn default_storage_event(fid: u64) -> OnChainEvent {
-    events_factory::create_rent_event(
+    // Grant the unit with a rolling, recent timestamp rather than a fixed historical
+    // one. `StorageSlot::is_active` compares `invalidate_at` against wall-clock
+    // `SystemTime::now()`, so a fixed grant date eventually ages out of its validity
+    // window: once real time passes `grant_ts + validity`, the slot goes inactive and
+    // `prepare_proposal` silently drops the fid's messages. That is especially easy to
+    // hit when a test proposes against a pre-`StorageExpiryExtension2026` (< V18) engine
+    // version, where the unit only gets the 1-year (unextended) validity. A `now`-dated
+    // rent event still classifies as `UnitType2025` (both the 2025-cohort and new-rental
+    // branches store into `units_2025`) but never expires under test.
+    events_factory::create_rent_event_with_timestamp(
         fid,
         1,
-        proto::StorageUnitType::UnitType2025,
-        false,
-        proto::FarcasterNetwork::Devnet,
+        crate::utils::factory::time::current_timestamp(),
     )
 }
 
