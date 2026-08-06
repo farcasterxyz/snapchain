@@ -179,7 +179,7 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
         return Ok(());
     }
 
-    write_replace(&config_path, &merged)?;
+    write_replace(&config_path, &merged, &local_raw)?;
     eprintln!("Wrote {}", config_path.display());
     Ok(())
 }
@@ -254,7 +254,7 @@ fn redact_private_key(mut merged: toml::Table) -> String {
 /// crash leaves a truncated file: unique temp sibling created 0600, contents
 /// fsync'd, the original file's permissions copied over, atomic rename, then a
 /// best-effort directory fsync so the rename itself survives power loss.
-fn write_replace(path: &Path, contents: &str) -> Result<(), BoxedError> {
+fn write_replace(path: &Path, contents: &str, expected_current: &str) -> Result<(), BoxedError> {
     use std::io::Write as _;
 
     let file_name = path
@@ -265,16 +265,36 @@ fn write_replace(path: &Path, contents: &str) -> Result<(), BoxedError> {
     // its half-written bytes renamed into place.
     let tmp = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
 
-    let original_perms = std::fs::metadata(path)
-        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
-        .permissions();
+    // Sweep temp files left by a previous pull that was killed between write
+    // and rename — each is a stale full copy of the config, private key
+    // included, that would otherwise sit on disk forever.
+    if let Some(dir) = path.parent() {
+        let stale_prefix = format!(".{file_name}.tmp.");
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(&stale_prefix) && entry.path() != tmp {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    let original_meta =
+        std::fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+        // Create with the original file's mode from the start: it changes
+        // nothing security-wise (the same bytes already sit at that mode in
+        // the original), and setting it before sync_all means the mode is on
+        // the inode the fsync covers — a chmod after the sync need not
+        // survive a crash.
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        options.mode(original_meta.mode() & 0o7777);
     }
 
     let written = (|| -> Result<(), BoxedError> {
@@ -285,8 +305,32 @@ fn write_replace(path: &Path, contents: &str) -> Result<(), BoxedError> {
             .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         file.sync_all()
             .map_err(|e| format!("cannot sync {}: {e}", tmp.display()))?;
-        std::fs::set_permissions(&tmp, original_perms)
-            .map_err(|e| format!("cannot set permissions on {}: {e}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            // Best-effort ownership carry-over for the root-runs-fc,
+            // node-runs-unprivileged split; EPERM when not privileged is fine
+            // (we are then already running as the file's effective audience).
+            use std::os::unix::fs::MetadataExt as _;
+            let _ = std::os::unix::fs::chown(
+                &tmp,
+                Some(original_meta.uid()),
+                Some(original_meta.gid()),
+            );
+        }
+        // Refuse to clobber edits made while we were talking to the RPC (key
+        // rotation, operator hand-edit): our merge was computed from a
+        // snapshot. Narrows the lost-update window from the whole network
+        // round-trip to the compare-rename gap; single-writer discipline is
+        // the deploy script's job.
+        let current = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot re-read {}: {e}", path.display()))?;
+        if current != expected_current {
+            return Err(format!(
+                "{} changed while the pull was running; re-run to merge against the new contents",
+                path.display()
+            )
+            .into());
+        }
         std::fs::rename(&tmp, path).map_err(|e| {
             format!(
                 "cannot rename {} over {}: {e} (note: a single-file bind mount cannot be \
@@ -304,9 +348,17 @@ fn write_replace(path: &Path, contents: &str) -> Result<(), BoxedError> {
         return written;
     }
 
+    // Sync the directory so the rename itself survives power loss. Failure is
+    // survivable (the old config would reappear, not a torn one) but should
+    // not be silent.
     if let Some(dir) = path.parent() {
-        if let Ok(dir_handle) = std::fs::File::open(dir) {
-            let _ = dir_handle.sync_all();
+        let dir_sync = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        if let Err(e) = dir_sync {
+            eprintln!(
+                "warning: could not sync {} after rename ({e}); the update may not survive \
+                 an immediate power loss",
+                dir.display()
+            );
         }
     }
     Ok(())
@@ -444,7 +496,17 @@ async fn fetch_config_toml(
     let response: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| format!("eth_call response is not JSON: {e}"))?;
     if let Some(error) = response.get("error") {
-        return Err(format!("eth_call failed: {error}").into());
+        // Deliberately not echoing the raw error object: providers reflect
+        // request details into it, including credential-bearing endpoint URLs.
+        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+        let message: String = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("(no message)")
+            .chars()
+            .take(200)
+            .collect();
+        return Err(format!("eth_call failed: code {code}: {message}").into());
     }
     let result = response
         .get("result")
@@ -1057,19 +1119,43 @@ bootstrap_peers = "x"
         let path = dir.join("config.toml");
         std::fs::write(&path, "old = true\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A secret-bearing temp orphaned by a previous killed pull must be
+        // swept, not accumulated.
+        let orphan = dir.join(".config.toml.tmp.99999999");
+        std::fs::write(&orphan, "stale secret copy\n").unwrap();
 
-        write_replace(&path, "new = true\n").unwrap();
+        write_replace(&path, "new = true\n", "old = true\n").unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = true\n");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "rewrite must not widen a 0600 key file");
-        // No stray temp copy of the (secret-bearing) content left behind.
+        // No stray temp copy of the (secret-bearing) content left behind —
+        // neither ours nor the pre-existing orphan.
         let strays: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name() != "config.toml")
             .collect();
         assert!(strays.is_empty(), "stray temp files: {strays:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_replace_refuses_when_file_changed_underneath() {
+        let dir =
+            std::env::temp_dir().join(format!("fc-config-pull-changed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // The file was rotated after we snapshotted "old = true".
+        std::fs::write(&path, "rotated = true\n").unwrap();
+
+        let err = write_replace(&path, "new = true\n", "old = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while"), "got: {err}");
+        // The rotated content must survive untouched, with no temp left over.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rotated = true\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

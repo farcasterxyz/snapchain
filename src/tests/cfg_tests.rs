@@ -262,6 +262,34 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_syntax_error_does_not_echo_source_line() {
+        run_test(vec![], || {
+            const FAKE_SECRET: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefFAKE";
+            let (_tmpdir, file_path) = write_config_file(&format!(
+                r#"
+                log_format = "text"
+                [consensus]
+                private_key = "{FAKE_SECRET}" stray
+            "#
+            ));
+
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let err = load_and_merge_config(args).unwrap_err().to_string();
+
+            // The config file carries the consensus private key; a parse
+            // error must report position only, never the source line.
+            assert!(!err.contains(FAKE_SECRET), "leaked source line: {err}");
+            assert!(err.contains("TOML parse error"), "got: {err}");
+            assert!(err.contains("line"), "got: {err}");
+        })
+    }
+
+    #[test]
+    #[serial]
     fn test_missing_config_file() {
         run_test(vec![], || {
             let args = vec![

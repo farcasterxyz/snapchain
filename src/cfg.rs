@@ -176,6 +176,28 @@ pub fn load_and_merge_config(args: Vec<String>) -> Result<Config, Box<dyn Error>
     let mut figment = Figment::from(Serialized::defaults(Config::default()));
 
     if Path::new(&cli_args.config_path).exists() {
+        // Syntax-check the file ourselves before handing it to figment:
+        // figment's TOML error echoes the offending source line, and this
+        // file carries the consensus private key — a stray token on that line
+        // must not put the key into captured stderr. Report position and
+        // message only.
+        let raw = std::fs::read_to_string(&cli_args.config_path)?;
+        if let Err(e) = raw.parse::<toml::Table>() {
+            let position = match e.span() {
+                Some(span) => {
+                    let line = raw[..span.start.min(raw.len())].matches('\n').count() + 1;
+                    format!(" at line {}", line)
+                }
+                None => String::new(),
+            };
+            return Err(format!(
+                "config file {}: TOML parse error{}: {}",
+                &cli_args.config_path,
+                position,
+                e.message()
+            )
+            .into());
+        }
         figment = figment.merge(Toml::file(&cli_args.config_path));
     } else {
         return Err(format!("config file not found: {}", &cli_args.config_path).into());
