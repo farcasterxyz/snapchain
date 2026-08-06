@@ -33,6 +33,21 @@
 #   FC_BIN, SNAPCHAIN_BIN    Binary locations (default /app/fc, /app/snapchain).
 #                            Overridable for non-default layouts (external
 #                            validators) and for tests.
+#   ONCHAIN_CONFIG_POLL_INTERVAL
+#                            Seconds between configVersion() polls in the watch
+#                            loop this script spawns on success (default 300;
+#                            0 disables the watcher entirely).
+#   ONCHAIN_CONFIG_WATCH_BIN Watcher script location (default: sibling
+#                            onchain-config-watch.sh). Test hook.
+#
+# Alongside the cache this script maintains, when ONCHAIN_CONFIG_CACHE is set:
+#   $CACHE.version  configVersion() watermark — the counter value read just
+#                   before the last successfully applied pull. The watch loop
+#                   compares the live counter against it (by inequality) to
+#                   gate restarts.
+#   $CACHE.prev     the previous known-good config, rotated out when a pull
+#                   changes the cache — the manual-rollback artifact that can
+#                   restore the old config without an RPC round-trip.
 #
 # Exit codes: 0 = config ready to boot (pulled, restored from cache, or no-op);
 # nonzero = do not boot (entrypoints call this as `apply-onchain-config.sh || exit 1`,
@@ -129,8 +144,63 @@ check_config() {
     "$SNAPCHAIN_BIN" --config-path "$CONFIG_PATH" --check-config
 }
 
+# Hand off to the rollout watcher: a disowned background loop that polls
+# configVersion() and triggers a staggered restart when it moves. Spawned from
+# here rather than the compose entrypoints so every fleet — Neynar pods and
+# public validators alike — gets it by image upgrade alone, with no compose
+# changes. The child survives this script's exit (it is reparented to the
+# container's init) and dies with the container; each boot starts a fresh one.
+# Called only on the success paths: a boot we refused is not a boot to watch.
+spawn_watcher() {
+    local watch_bin="${ONCHAIN_CONFIG_WATCH_BIN:-$(dirname "$0")/onchain-config-watch.sh}"
+    if [[ "${ONCHAIN_CONFIG_POLL_INTERVAL:-300}" == "0" ]]; then
+        log "ONCHAIN_CONFIG_POLL_INTERVAL=0; config changes will only apply on the next restart"
+        return 0
+    fi
+    if [[ ! -x "$watch_bin" ]]; then
+        log "WARNING: watcher $watch_bin missing or not executable; config changes will only apply on the next restart"
+        return 0
+    fi
+    # The watcher never re-derives the network: this boot's value is what the
+    # node actually runs with until the next restart, which replaces the
+    # watcher too. stdin closed, stdout/stderr inherited into container logs.
+    ONCHAIN_WATCH_NETWORK="$network" "$watch_bin" "$CONFIG_PATH" < /dev/null &
+    log "started onchain-config watcher (pid $!)"
+}
+
+# Read the mutation counter BEFORE pulling the document: if a registry write
+# lands between the two calls, the stored watermark is low — costing one
+# harmless extra restart later — never high, which would eat a change. Best
+# effort: a boot must not fail because the counter read did, and without a
+# cache volume there is nowhere durable to record it (the watcher then keeps
+# an in-memory watermark instead).
+onchain_version=""
+if [[ -n "$CACHE_PATH" ]]; then
+    version_args=(--network "$network" config version --config "$CONFIG_PATH")
+    if [[ -n "${ONCHAIN_CONFIG_REGISTRY:-}" ]]; then
+        version_args+=(--registry "$ONCHAIN_CONFIG_REGISTRY")
+    fi
+    if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
+        version_args+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
+    fi
+    if ! onchain_version="$("$FC_BIN" "${version_args[@]}")" \
+        || ! [[ "$onchain_version" =~ ^[0-9]+$ ]]; then
+        log "WARNING: could not read configVersion; watermark will not be recorded this boot"
+        onchain_version=""
+    fi
+fi
+
 if "$FC_BIN" "${pull_args[@]}" && check_config; then
     if [[ -n "$CACHE_PATH" ]]; then
+        # Rotate the outgoing cache to .prev — the previous known-good that
+        # manual rollback restores without an RPC round-trip. The new cache
+        # content is exactly $CONFIG_PATH, so compare against that and skip
+        # when nothing changed. Best-effort: losing .prev must not stop a
+        # boot, and a torn .prev is caught by --check-config at restore time.
+        if [[ -f "$CACHE_PATH" ]] && ! cmp -s "$CONFIG_PATH" "$CACHE_PATH"; then
+            cp "$CACHE_PATH" "$CACHE_PATH.prev" \
+                || log "WARNING: could not rotate previous known-good to $CACHE_PATH.prev"
+        fi
         # The merged config contains consensus.private_key: keep the cache
         # non-world-readable (mktemp creates 0600) and publish it with an
         # atomic rename so a crash mid-copy can't leave a truncated
@@ -150,9 +220,24 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
         else
             log WARN "pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
         fi
+        # Record which counter value this config corresponds to, so the watch
+        # loop can gate restarts on the counter moving. Same atomicity rules
+        # as the cache; failure costs one no-op restart later, not the boot.
+        if [[ -n "$onchain_version" ]]; then
+            wm_tmp=""
+            trap '[[ -n "$cache_tmp" ]] && rm -f "$cache_tmp"; [[ -n "$wm_tmp" ]] && rm -f "$wm_tmp"' EXIT
+            if { wm_tmp="$(mktemp "$CACHE_PATH.version.XXXXXX")" \
+                && printf '%s\n' "$onchain_version" > "$wm_tmp" \
+                && mv "$wm_tmp" "$CACHE_PATH.version" && wm_tmp=""; }; then
+                log "recorded applied configVersion $onchain_version"
+            else
+                log "WARNING: could not record configVersion watermark; booting anyway"
+            fi
+        fi
     else
         log INFO "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"
     fi
+    spawn_watcher
     exit 0
 fi
 
@@ -185,6 +270,11 @@ if [[ -n "$CACHE_PATH" && -f "$CACHE_PATH" ]]; then
         exit 1
     fi
     log INFO "booting from cached config"
+    # The cache's content matches the watermark already on disk (both were
+    # written by the last successful pull), so the watcher's inequality check
+    # stays correct: once the RPC recovers, a counter that moved since that
+    # pull triggers the catch-up restart this boot could not perform.
+    spawn_watcher
     exit 0
 fi
 

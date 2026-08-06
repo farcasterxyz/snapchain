@@ -12,28 +12,50 @@ FAILURES=0
 TESTS=0
 
 # Each test gets a fresh sandbox with stub binaries and a validator config.
-# Stub behavior is content-driven: the fc stub records its argv and appends a
-# marker to the config (simulating the merge; FC_STUB_APPEND overrides it, and
-# FC_STUB_EXIT forces a pull failure), and the snapchain stub fails
-# --check-config iff the config contains "BAD".
+# Stub behavior is content-driven: the fc stub dispatches on the config
+# subcommand — `pull` records argv to fc.args and appends a marker to the
+# config (FC_STUB_APPEND overrides the marker, FC_STUB_NO_APPEND simulates a
+# pull that changes nothing); `version` records argv to fc.version.args and
+# prints FC_STUB_VERSION (default 42; FC_STUB_VERSION_EXIT fails just the
+# version read). FC_STUB_EXIT fails every fc call. Both append the subcommand
+# to fc.calls so tests can assert call order. The snapchain stub fails
+# --check-config iff the config contains "BAD". The watcher spawn is
+# intercepted by a stub (ONCHAIN_CONFIG_WATCH_BIN) that records its argv and
+# environment to watch.spawned — tests must never start the real watch loop.
 setup() {
     DIR="$(mktemp -d)"
     cat > "$DIR/fc" <<'EOF'
 #!/bin/bash
-printf '%s\n' "$@" > "$(dirname "$0")/fc.args"
-[[ "${FC_STUB_EXIT:-0}" != 0 ]] && exit "${FC_STUB_EXIT}"
+subcmd=""
 config=""
-while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--config" ]]; then config="$2"; fi
-    shift
+prev=""
+for a in "$@"; do
+    if [[ "$prev" == "config" ]]; then subcmd="$a"; fi
+    if [[ "$prev" == "--config" ]]; then config="$a"; fi
+    prev="$a"
 done
-# Mirror real fc: it refuses read_node = true configs in write mode (it only
-# checks the file — the SNAPCHAIN_READ_NODE env overlay is invisible to it).
-if grep -Eq '^[[:space:]]*read_node[[:space:]]*=[[:space:]]*true' "$config"; then
-    echo "read_node = true; the registry manages validator config only" >&2
-    exit 1
-fi
-echo "${FC_STUB_APPEND:-# merged-from-registry}" >> "$config"
+echo "$subcmd" >> "$(dirname "$0")/fc.calls"
+[[ "${FC_STUB_EXIT:-0}" != 0 ]] && exit "${FC_STUB_EXIT}"
+case "$subcmd" in
+version)
+    printf '%s\n' "$@" > "$(dirname "$0")/fc.version.args"
+    [[ "${FC_STUB_VERSION_EXIT:-0}" != 0 ]] && exit "${FC_STUB_VERSION_EXIT}"
+    echo "${FC_STUB_VERSION:-42}"
+    ;;
+pull)
+    printf '%s\n' "$@" > "$(dirname "$0")/fc.args"
+    # Mirror real fc: it refuses read_node = true configs in write mode (it
+    # only checks the file — the SNAPCHAIN_READ_NODE env overlay is invisible
+    # to it).
+    if grep -Eq '^[[:space:]]*read_node[[:space:]]*=[[:space:]]*true' "$config"; then
+        echo "read_node = true; the registry manages validator config only" >&2
+        exit 1
+    fi
+    if [[ -z "${FC_STUB_NO_APPEND:-}" ]]; then
+        echo "${FC_STUB_APPEND:-# merged-from-registry}" >> "$config"
+    fi
+    ;;
+esac
 EOF
     cat > "$DIR/snapchain" <<'EOF'
 #!/bin/bash
@@ -45,7 +67,12 @@ done
 grep -q "BAD" "$config" && exit 1
 echo "config OK"
 EOF
-    chmod +x "$DIR/fc" "$DIR/snapchain"
+    cat > "$DIR/watch-stub" <<'EOF'
+#!/bin/bash
+{ echo "argv: $*"; echo "network: ${ONCHAIN_WATCH_NETWORK:-}"; } \
+    > "$(dirname "$0")/watch.spawned"
+EOF
+    chmod +x "$DIR/fc" "$DIR/snapchain" "$DIR/watch-stub"
     cat > "$DIR/config.toml" <<'EOF'
 fc_network = "Mainnet"
 read_node = false
@@ -59,9 +86,12 @@ run_script() {
     RC=0
     OUT="$(cd "$DIR" && env \
         FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
+        ONCHAIN_CONFIG_WATCH_BIN="$DIR/watch-stub" \
         ONCHAIN_CONFIG_ENABLED=true "$@" \
         "$SCRIPT" config.toml 2>&1)" || RC=$?
 }
+
+watcher_spawned() { [[ -f "$DIR/watch.spawned" ]]; }
 
 check() {
     local desc="$1"
@@ -209,10 +239,20 @@ check "rotated-key cache: config NOT restored" not grep -q last-known-good "$DIR
 check "rotated-key cache: key values not printed" not grep -q "rotated-away-key" <<< "$OUT"
 
 #### cache publication leaves no temp files behind
+no_stray_cache_files() {
+    local f name
+    for f in "$DIR/cache"/*; do
+        name="$(basename "$f")"
+        case "$name" in
+            config.toml | config.toml.version | config.toml.prev) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
 setup
 run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "tmp cleanup on success: only the cache file remains" \
-    [ "$(ls "$DIR/cache")" = "config.toml" ]
+check "tmp cleanup on success: only cache artifacts remain" no_stray_cache_files
 
 #### log lines are node-shaped JSON (same fields as tracing_subscriber .json())
 setup
@@ -227,6 +267,92 @@ setup
 rm "$DIR/config.toml"
 run_script
 check "missing config: exits nonzero" [ "$RC" -ne 0 ]
+
+#### C9: watermark recorded on success, version read strictly before the pull
+setup
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "watermark: recorded from configVersion" \
+    grep -qx 42 "$DIR/cache/config.toml.version"
+check "watermark: version read before pull" \
+    [ "$(head -1 "$DIR/fc.calls")" = version ]
+check "watermark: version passed the derived network" \
+    grep -qx mainnet "$DIR/fc.version.args"
+
+#### C9: version read fails → boot anyway, no watermark, watcher still runs
+setup
+run_script FC_STUB_VERSION_EXIT=9 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "version-read failure: exits 0" [ "$RC" -eq 0 ]
+check "version-read failure: merge still applied" \
+    grep -q merged-from-registry "$DIR/config.toml"
+check "version-read failure: no watermark written" \
+    not test -f "$DIR/cache/config.toml.version"
+check "version-read failure: warns" grep -q "could not read configVersion" <<< "$OUT"
+check "version-read failure: watcher still spawned" watcher_spawned
+
+#### C9: no cache configured → no version read at all
+setup
+run_script
+check "no cache: fc never asked for version" \
+    not grep -qx version "$DIR/fc.calls"
+check "no cache: watcher still spawned" watcher_spawned
+
+#### C9: previous known-good rotated to .prev when the cache content changes
+setup
+write_matching_cache
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "prev rotation: exits 0" [ "$RC" -eq 0 ]
+check "prev rotation: .prev holds the outgoing cache" \
+    grep -q last-known-good "$DIR/cache/config.toml.prev"
+check "prev rotation: cache holds the fresh merge" \
+    cmp -s "$DIR/config.toml" "$DIR/cache/config.toml"
+
+#### C9: unchanged pull → cache not rotated, older .prev preserved
+setup
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"   # seed cache == merged config
+echo "older-prev-content" > "$DIR/cache/config.toml.prev"
+cp "$DIR/cache/config.toml" "$DIR/config.toml"             # fresh boot writes same config
+run_script FC_STUB_NO_APPEND=1 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "no-change pull: exits 0" [ "$RC" -eq 0 ]
+check "no-change pull: .prev untouched" \
+    grep -qx older-prev-content "$DIR/cache/config.toml.prev"
+
+#### C9: watcher spawn — success path, with the derived network in its env
+setup
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "watcher: spawned on success" watcher_spawned
+check "watcher: given the config path" grep -q "argv: config.toml" "$DIR/watch.spawned"
+check "watcher: given the derived network" grep -q "network: mainnet" "$DIR/watch.spawned"
+
+#### C9: watcher spawned on the cache-fallback path too (RPC outage recovery)
+setup
+write_matching_cache
+run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "watcher: spawned on cache fallback" watcher_spawned
+
+#### C9: no watcher when disabled, on read nodes, or on refused boots
+setup
+run_script ONCHAIN_CONFIG_ENABLED=
+check "watcher: not spawned when disabled" not watcher_spawned
+setup
+run_script SNAPCHAIN_READ_NODE=true
+check "watcher: not spawned on read nodes" not watcher_spawned
+setup
+run_script FC_STUB_EXIT=7
+check "watcher: not spawned on a refused boot" not watcher_spawned
+
+#### C9: ONCHAIN_CONFIG_POLL_INTERVAL=0 opts out of the watcher
+setup
+run_script ONCHAIN_CONFIG_POLL_INTERVAL=0 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "poll disabled: exits 0" [ "$RC" -eq 0 ]
+check "poll disabled: watcher not spawned" not watcher_spawned
+check "poll disabled: says so" grep -q "only apply on the next restart" <<< "$OUT"
+
+#### C9: missing watcher script → warn but boot
+setup
+run_script ONCHAIN_CONFIG_WATCH_BIN="$DIR/does-not-exist" \
+    ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "missing watcher: exits 0" [ "$RC" -eq 0 ]
+check "missing watcher: warns" grep -q "missing or not executable" <<< "$OUT"
 
 echo
 if [[ "$FAILURES" -gt 0 ]]; then
