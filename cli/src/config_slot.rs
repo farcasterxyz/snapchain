@@ -1,9 +1,12 @@
 //! `fc config slot` — this validator's deterministic restart-stagger slot.
 //!
 //! Prints `<index> <count>` on stdout, where `index` is the position of this
-//! node's consensus public key in the ordered, de-duplicated union of
+//! node's consensus public key in the SORTED, de-duplicated union of
 //! `validator_public_keys` across the config's `consensus.validator_sets`,
-//! and `count` is the size of that union. A node whose key is not in the
+//! and `count` is the size of that union. Sorting makes slots a function of
+//! membership alone — a write that merely reorders keys cannot move anyone's
+//! window (see slot_in_sets); a write that changes membership still can, so
+//! the operator rule below stands. A node whose key is not in the
 //! document gets the sentinel `index == count`. The sentinel is SHARED: if
 //! one registry write removes several still-active validators at once, they
 //! all land in the same window and can restart together — operators should
@@ -110,22 +113,23 @@ fn derive_public_key_hex(private_key: &str) -> Result<String, BoxedError> {
     Ok(hex::encode(verifying.to_bytes()))
 }
 
-/// Index of `public_key_hex` in the ordered union of the sets' keys, plus the
-/// union's size. First-occurrence order, case-insensitive: the registry
-/// renders lowercase hex, but hand-maintained files may not.
+/// Index of `public_key_hex` in the SORTED union of the sets' keys, plus the
+/// union's size. Sorted, not document order: a registry amend can reorder
+/// keys within a set without changing membership, and with document-order
+/// slots such a write landing while one validator restarts could hand its
+/// window to a different node mid-flight (two validators down at once).
+/// Sorting makes the slot a function of membership alone — only writes that
+/// actually add or remove keys can shift anyone's slot. Case-insensitive:
+/// the registry renders lowercase hex, but hand-maintained files may not.
 fn slot_in_sets(
     public_key_hex: &str,
     sets: &[ValidatorSetConfig],
 ) -> Result<(usize, usize), BoxedError> {
-    let mut union: Vec<String> = Vec::new();
-    for set in sets {
-        for key in &set.validator_public_keys {
-            let key = key.to_lowercase();
-            if !union.contains(&key) {
-                union.push(key);
-            }
-        }
-    }
+    let union: std::collections::BTreeSet<String> = sets
+        .iter()
+        .flat_map(|set| set.validator_public_keys.iter())
+        .map(|key| key.to_lowercase())
+        .collect();
     if union.is_empty() {
         return Err("consensus.validator_sets lists no validator keys".into());
     }
@@ -172,11 +176,29 @@ mod tests {
     }
 
     #[test]
-    fn index_is_position_in_first_occurrence_union() {
+    fn index_is_position_in_sorted_union() {
         let sets = [set(&["aa", RFC_PUBLIC, "bb"]), set(&["bb", "cc"])];
-        // Union: aa, RFC_PUBLIC, bb, cc — duplicates collapse to first sight.
-        assert_eq!(slot_in_sets(RFC_PUBLIC, &sets).unwrap(), (1, 4));
-        assert_eq!(slot_in_sets("cc", &sets).unwrap(), (3, 4));
+        // Sorted union: aa, bb, cc, d75a… — duplicates collapse, order is
+        // lexicographic regardless of document order.
+        assert_eq!(slot_in_sets(RFC_PUBLIC, &sets).unwrap(), (3, 4));
+        assert_eq!(slot_in_sets("cc", &sets).unwrap(), (2, 4));
+    }
+
+    #[test]
+    fn document_reordering_cannot_move_slots() {
+        // A registry amend that only permutes keys must not reassign windows:
+        // with document-order slots, a reorder landing mid-restart could hand
+        // a down validator's window to a live one.
+        let forward = [set(&["aa", RFC_PUBLIC, "bb"])];
+        let shuffled = [set(&["bb", "aa", RFC_PUBLIC])];
+        assert_eq!(
+            slot_in_sets(RFC_PUBLIC, &forward).unwrap(),
+            slot_in_sets(RFC_PUBLIC, &shuffled).unwrap(),
+        );
+        assert_eq!(
+            slot_in_sets("aa", &forward).unwrap(),
+            slot_in_sets("aa", &shuffled).unwrap(),
+        );
     }
 
     #[test]
@@ -208,7 +230,8 @@ mod tests {
     #[test]
     fn key_comparison_is_case_insensitive() {
         let sets = [set(&[&RFC_PUBLIC.to_uppercase(), "bb"])];
-        assert_eq!(slot_in_sets(RFC_PUBLIC, &sets).unwrap(), (0, 2));
+        // Sorted after lowercasing: bb before d75a….
+        assert_eq!(slot_in_sets(RFC_PUBLIC, &sets).unwrap(), (1, 2));
     }
 
     #[test]

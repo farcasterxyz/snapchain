@@ -103,6 +103,15 @@ pub struct ConfigPullArgs {
     #[arg(long)]
     dry_run: bool,
 
+    /// Also read configVersion() and write it (a decimal line) to this file
+    /// after a successful merge. With this flag both registry reads are
+    /// pinned to one block hash (EIP-1898), so the reported counter is bound
+    /// to exactly the document that was merged — a load-balanced RPC cannot
+    /// pair a fresh counter with a stale document. The deploy scripts use the
+    /// value as the rollout watermark. Requires an EIP-1898-capable endpoint.
+    #[arg(long)]
+    report_version: Option<PathBuf>,
+
     /// Keep a non-empty `gossip.bootstrap_peers` already enumerated in the
     /// local config instead of adopting the registry's list — for operators
     /// managing their own bootstrap topology (e.g. private addresses the
@@ -134,10 +143,13 @@ pub struct ConfigVersionArgs {
 }
 
 /// `fc config version` — print the registry's `configVersion()` counter as a
-/// decimal integer on stdout. A read-only single eth_call, cheap enough to
-/// poll: the counter increments on every mutation, so a watcher that stores
-/// the last-applied value can gate restarts on it moving. Compare for
-/// inequality, not ordering — an onchain revert moves the counter forward.
+/// decimal integer on stdout. A read-only single eth_call at "latest", cheap
+/// enough to poll. This is the watch loop's TRIGGER only: it is not bound to
+/// any document, so the authoritative watermark value must come from
+/// `config pull --report-version`, whose reads are pinned to one block. The
+/// counter is strictly monotonic (increments on every mutation; an onchain
+/// revert moves it forward), so an observed value BELOW a stored watermark
+/// can only be a stale RPC view, never a change to apply.
 pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result<(), BoxedError> {
     let local: toml::Table = match &args.config {
         Some(path) => {
@@ -154,7 +166,8 @@ pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result
     // only runs on validators anyway.
 
     let registry = resolve_registry(args.registry.as_deref(), network)?;
-    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network)?;
+    let env_l1_rpc_url = std::env::var("SNAPCHAIN_L1_RPC_URL").ok();
+    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network, env_l1_rpc_url.as_deref())?;
     let client = http_client()?;
     check_chain_id(&client, &rpc_url, network).await?;
 
@@ -163,6 +176,7 @@ pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result
         &rpc_url,
         registry,
         configVersionCall {}.abi_encode(),
+        &serde_json::json!("latest"),
     )
     .await?;
     let version = configVersionCall::abi_decode_returns(&raw)
@@ -255,7 +269,32 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     }
     let client = http_client()?;
     check_chain_id(&client, &rpc_url, network).await?;
-    let rendered = fetch_config_toml(&client, &rpc_url, registry).await?;
+
+    // When the version is being reported, pin BOTH registry reads to one
+    // block hash: eth_getBlockByNumber(latest) once, then eth_call each read
+    // at that hash. Separate "latest" calls against a load-balanced RPC can
+    // pair a fresh counter with a stale document — a watermark recorded that
+    // way would silently swallow the newer version forever. A reorg that
+    // drops the pinned block fails the call loudly; the next attempt re-pins.
+    let (block, bound_version) = match &args.report_version {
+        Some(_) => {
+            let hash = latest_block_hash(&client, &rpc_url).await?;
+            let block = serde_json::json!({ "blockHash": hash });
+            let raw = eth_call(
+                &client,
+                &rpc_url,
+                registry,
+                configVersionCall {}.abi_encode(),
+                &block,
+            )
+            .await?;
+            let version = configVersionCall::abi_decode_returns(&raw)
+                .map_err(|e| format!("cannot ABI-decode configVersion() return: {e}"))?;
+            (block, Some(version))
+        }
+        None => (serde_json::json!("latest"), None),
+    };
+    let rendered = fetch_config_toml(&client, &rpc_url, registry, &block).await?;
 
     let onchain: toml::Table =
         toml::from_str(&rendered).map_err(|e| format!("registry returned invalid TOML: {e}"))?;
@@ -275,11 +314,18 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
 
     if args.dry_run {
         print!("{}", redact_secrets(local));
-        return Ok(());
+    } else {
+        write_replace(&config_path, &merged, &local_raw)?;
+        eprintln!("Wrote {}", config_path.display());
     }
 
-    write_replace(&config_path, &merged, &local_raw)?;
-    eprintln!("Wrote {}", config_path.display());
+    // Written only after the merge fully succeeded: the report means "this
+    // version's document is what the config now carries". No secret content;
+    // consumed immediately by the calling script, so a plain write suffices.
+    if let (Some(path), Some(version)) = (&args.report_version, &bound_version) {
+        std::fs::write(path, format!("{version}\n"))
+            .map_err(|e| format!("cannot write version report {}: {e}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -646,20 +692,61 @@ async fn fetch_config_toml(
     client: &reqwest::Client,
     rpc_url: &str,
     registry: Address,
+    block: &serde_json::Value,
 ) -> Result<String, BoxedError> {
-    let raw = eth_call(client, rpc_url, registry, configTomlCall {}.abi_encode()).await?;
+    let raw = eth_call(
+        client,
+        rpc_url,
+        registry,
+        configTomlCall {}.abi_encode(),
+        block,
+    )
+    .await?;
     Ok(configTomlCall::abi_decode_returns(&raw)
         .map_err(|e| format!("cannot ABI-decode configToml() return: {e}"))?)
 }
 
-/// One `eth_call` against the registry, returning the decoded (hex-stripped)
-/// return bytes. Shared by `pull` (configToml) and `version` (configVersion);
+/// The latest block's hash, for pinning a pair of reads to one state
+/// (EIP-1898 eth_call block parameter).
+async fn latest_block_hash(client: &reqwest::Client, rpc_url: &str) -> Result<String, BoxedError> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "eth_getBlockByNumber", "params": ["latest", false],
+    });
+    let response: serde_json::Value = client
+        .post(rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("eth_getBlockByNumber request failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("eth_getBlockByNumber HTTP error: {}", e.without_url()))?
+        .json()
+        .await
+        .map_err(|e| {
+            format!(
+                "eth_getBlockByNumber response is not JSON: {}",
+                e.without_url()
+            )
+        })?;
+    response
+        .get("result")
+        .and_then(|r| r.get("hash"))
+        .and_then(|h| h.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "eth_getBlockByNumber returned no block hash".into())
+}
+
+/// One `eth_call` against the registry at `block` ("latest" or an EIP-1898
+/// {"blockHash": ...} pin), returning the decoded (hex-stripped) return
+/// bytes. Shared by `pull` (configToml) and `version` (configVersion);
 /// carries the response-size cap and the credential-scrubbing error handling.
 async fn eth_call(
     client: &reqwest::Client,
     rpc_url: &str,
     registry: Address,
     calldata: Vec<u8>,
+    block: &serde_json::Value,
 ) -> Result<Vec<u8>, BoxedError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -670,7 +757,7 @@ async fn eth_call(
                 "to": format!("{registry}"),
                 "data": format!("0x{}", hex::encode(calldata)),
             },
-            "latest",
+            block,
         ],
     });
     let response = post_json_capped(client, rpc_url, &request, "eth_call").await?;
