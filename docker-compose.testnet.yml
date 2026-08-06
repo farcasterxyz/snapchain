@@ -49,7 +49,10 @@ services:
         ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
         ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
         ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
-        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.toml \
+        # Network-specific filename: running mainnet and testnet from the same
+        # checkout shares the .onchain-config host dir, and a fallback boot
+        # must never restore the other network's cached config.
+        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.testnet.toml \
         /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]

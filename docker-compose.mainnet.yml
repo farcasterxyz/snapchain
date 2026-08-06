@@ -48,7 +48,7 @@ services:
         ONCHAIN_CONFIG_ENABLED="${ONCHAIN_CONFIG_ENABLED:-}" \
         ONCHAIN_CONFIG_REGISTRY="${ONCHAIN_CONFIG_REGISTRY:-}" \
         ONCHAIN_CONFIG_RPC_URL="${ONCHAIN_CONFIG_RPC_URL:-}" \
-        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.toml \
+        ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.mainnet.toml \
         /app/apply-onchain-config.sh config.toml || exit 1
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
