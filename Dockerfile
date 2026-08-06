@@ -74,7 +74,7 @@ COPY --from=builder \
   /usr/src/app/target/release/perftest \
   /usr/src/app/target/release/fc \
   /app/
-COPY scripts/apply-onchain-config.sh /app/
+COPY scripts/apply-onchain-config.sh scripts/onchain-config-watch.sh /app/
 
 ENV RUSTFLAGS="-Awarnings"
 # Compose files override both entrypoint and command; this default only covers
