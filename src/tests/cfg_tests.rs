@@ -314,4 +314,42 @@ mod tests {
             }
         })
     }
+
+    /// Contract test for `fc config pull`'s read_node handling
+    /// (`cli/src/config_pull.rs::effective_read_node` mirrors these exact
+    /// semantics): the env overlay wins over the file, and figment parses the
+    /// value strictly — exactly "true"/"false", anything else aborts config
+    /// loading. If a figment upgrade loosens or changes this, fc's mirror
+    /// must follow.
+    #[test]
+    #[serial]
+    fn read_node_env_overlay_is_strict() {
+        let load = |env_val: Option<&str>| {
+            let envs = match env_val {
+                Some(v) => vec![set("SNAPCHAIN_READ_NODE", v)],
+                None => vec![clr("SNAPCHAIN_READ_NODE")],
+            };
+            let mut result = None;
+            run_test(envs, || {
+                let (_tmpdir, file_path) = write_config_file(r#"read_node = true"#);
+                let args = vec![
+                    "test_binary".to_string(),
+                    "--config-path".to_string(),
+                    file_path,
+                ];
+                result = Some(load_and_merge_config(args).map(|c| c.read_node));
+            });
+            result.unwrap()
+        };
+
+        assert_eq!(load(None).unwrap(), true); // file alone decides
+        assert_eq!(load(Some("true")).unwrap(), true);
+        assert_eq!(load(Some("false")).unwrap(), false); // env beats file
+        for bad in ["TRUE", "True", "1", "0", "yes", ""] {
+            assert!(
+                load(Some(bad)).is_err(),
+                "loader unexpectedly accepted SNAPCHAIN_READ_NODE={bad:?}"
+            );
+        }
+    }
 }

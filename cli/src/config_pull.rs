@@ -130,14 +130,13 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
 
     // The registry manages validators only; read nodes keep their own peer
     // configuration path (spec §2.5). A dry run is harmless inspection.
-    let is_read_node = local
-        .get("read_node")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let env_read_node = std::env::var("SNAPCHAIN_READ_NODE").ok();
+    let is_read_node = effective_read_node(&local, env_read_node.as_deref())?;
     if is_read_node {
         if !args.dry_run {
             return Err(format!(
-                "{} sets read_node = true; the registry manages validator config only \
+                "{} resolves to read_node = true (via the file or the SNAPCHAIN_READ_NODE \
+                 overlay); the registry manages validator config only \
                  (use --dry-run to inspect the merge anyway)",
                 args.config.display()
             )
@@ -215,6 +214,33 @@ fn check_network_matches(
              {selected}; pass a matching --network"
         )
         .into())
+    }
+}
+
+/// The node mode this config will actually run with. The node's figment
+/// loader overlays `SNAPCHAIN_READ_NODE` over the file — same rule as
+/// `fc_network` above — and parses it strictly: exactly `"true"` or
+/// `"false"`, anything else aborts config loading (verified against the
+/// loader in `snapchain::tests::cfg_tests::read_node_env_overlay_is_strict`).
+/// Mirror both halves: honor the overlay, and refuse values the node would
+/// refuse rather than guessing.
+fn effective_read_node(
+    local: &toml::Table,
+    env_read_node: Option<&str>,
+) -> Result<bool, BoxedError> {
+    match env_read_node {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(other) => Err(format!(
+            "SNAPCHAIN_READ_NODE={other:?} is not a value the node's loader accepts \
+             (exactly \"true\" or \"false\"); the node would fail to start with this \
+             environment"
+        )
+        .into()),
+        None => Ok(local
+            .get("read_node")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)),
     }
 }
 
@@ -941,6 +967,32 @@ bootstrap_peers = "x"
         // Env set, file silent: env alone decides.
         let empty = toml::Table::new();
         assert!(check_network_matches(&empty, NetworkArg::Mainnet, Some("Testnet")).is_err());
+    }
+
+    #[test]
+    fn read_node_honors_env_overlay() {
+        let read_node_file: toml::Table = toml::from_str("read_node = true").unwrap();
+        let validator_file: toml::Table = toml::from_str("read_node = false").unwrap();
+        let empty = toml::Table::new();
+
+        // Env unset: the file decides; absent key defaults to validator.
+        assert!(effective_read_node(&read_node_file, None).unwrap());
+        assert!(!effective_read_node(&validator_file, None).unwrap());
+        assert!(!effective_read_node(&empty, None).unwrap());
+
+        // Env set: it is what the node will actually run with, in both
+        // directions — a file-declared read node overridden to validator must
+        // be pulled for, not refused.
+        assert!(!effective_read_node(&read_node_file, Some("false")).unwrap());
+        assert!(effective_read_node(&validator_file, Some("true")).unwrap());
+
+        // Values the node's loader rejects must error, not be guessed at.
+        for bad in ["TRUE", "1", "0", "yes", ""] {
+            let err = effective_read_node(&empty, Some(bad))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("SNAPCHAIN_READ_NODE"), "got: {err}");
+        }
     }
 
     /// Parity with the node: the mirrored `ValidatorSetConfig` must deserialize
