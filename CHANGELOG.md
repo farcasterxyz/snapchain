@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.1] - 2026-08-06
+
+### 🚀 Features
+
+- Add http-served ui for checking network health (#977)
+- Ingest channel registrations as onchain events (#957)
+- Redesign verification by-address index to support multiple verifiers (#958)
+- Add channel owner resolution and read APIs (#960)
+- Emit channel ownership-change hint events (#964)
+- Add channel message protos (#973)
+- Merge verifications on shard 0 and replay them onto data shards (#974)
+- Admit and merge channel messages on shard 0 (#975)
+- Fan out channel messages to data shards and add channel read APIs (#976)
+- *(channels)* Channel follows via reactions (#993)
+- *(cli)* Add fc verification and devnet bootstrap commands (#996)
+- *(cast)* Allow 4 embeds for all users, not just Pro (#1001)
+
+### 🐛 Bug Fixes
+
+- (reactions): replace flaky live test with a representative fixture set (#981)
+- Sort block engine onchain replay events (V21-gated) (#959)
+- *(devnet)* Enable block_receiver in generated node configs (#990)
+- *(onchain_events)* Watch both channel registry contracts (#992)
+
+### 🚜 Refactor
+
+- *(ens)* Inline ENS glue, drop foundry-common git pin [NEYN-12731] (#984)
+
+### 📚 Documentation
+
+- Use gasless signers in the writing-messages guide (#989)
+
+### 🧪 Testing
+
+- Stop test storage fixtures aging out against the wall clock (#971)
+- Replace flaky live cast & link validation tests with fixtures (#983)
+- Bump wait_for_block timeout in shard-decoupling test (#988)
+
 ## [0.14.0] - 2026-07-16
 
 ### 🚀 Features
