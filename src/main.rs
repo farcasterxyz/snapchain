@@ -305,11 +305,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if app_config.statsd.prefix == "" {
+        // TODO: consider removing this check
+        return Err("statsd prefix must be specified in config".into());
+    }
+
+    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
+        Some((host, port)) => {
+            if host.is_empty() || port.is_empty() {
+                return Err("statsd address must be in the format host:port".into());
+            }
+            Ok((host.to_string(), port.parse::<u16>()?))
+        }
+        None => Err(format!(
+            "invalid statsd address: {}",
+            app_config.statsd.addr
+        )),
+    }?;
+
     // Deploy scripts run `snapchain --check-config` between rewriting config.toml
     // (fc config pull) and restarting the node, so a bad config fails here — before
     // the running node is stopped — rather than as a crash loop after. Placed after
-    // the log_format check so everything main() itself validates is covered; note
-    // the gate is loader-deep only — values that panic later in startup (e.g. a
+    // the log_format and statsd checks so everything main() itself validates
+    // pure-config (no side effects) is covered; --clear-db stays behind the gate,
+    // since a validation run must never touch the database. Note the gate is
+    // otherwise loader-deep only — values that panic later in startup (e.g. a
     // malformed consensus.private_key) are not exercised here.
     if app_config.check_config {
         println!("config OK");
@@ -332,24 +352,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             warn!("No db to clear at {:?}", db_dir);
         }
     }
-
-    if app_config.statsd.prefix == "" {
-        // TODO: consider removing this check
-        return Err("statsd prefix must be specified in config".into());
-    }
-
-    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
-        Some((host, port)) => {
-            if host.is_empty() || port.is_empty() {
-                return Err("statsd address must be in the format host:port".into());
-            }
-            Ok((host.to_string(), port.parse::<u16>()?))
-        }
-        None => Err(format!(
-            "invalid statsd address: {}",
-            app_config.statsd.addr
-        )),
-    }?;
 
     let host = (statsd_host, statsd_port);
     let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();

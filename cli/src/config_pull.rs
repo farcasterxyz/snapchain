@@ -270,8 +270,9 @@ fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> S
 
 /// Dry-run output goes to stdout, which deployment pipelines capture into log
 /// collectors — mask every credential-bearing key the node config can hold,
-/// not just the private key: `l1_rpc_url` carries the provider API key in its
-/// path (the same reason this module never prints the RPC URL), `rpc_auth` /
+/// not just the private key: `l1_rpc_url` and the `onchain_events` /
+/// `base_onchain_events` `rpc_url`s carry the provider API key in their path
+/// (the same reason this module never prints the RPC URL), `rpc_auth` /
 /// `admin_rpc_auth` are credentials outright, and `snapshot.aws_*` are AWS
 /// keys. The three managed keys, the thing dry-run exists to inspect, are
 /// unaffected. Keys are redacted only when present and non-empty, so the
@@ -295,6 +296,11 @@ fn redact_secrets(mut merged: toml::Table) -> String {
     if let Some(snapshot) = merged.get_mut("snapshot").and_then(|c| c.as_table_mut()) {
         redact(snapshot, "aws_access_key_id");
         redact(snapshot, "aws_secret_access_key");
+    }
+    for table in ["onchain_events", "base_onchain_events"] {
+        if let Some(events) = merged.get_mut(table).and_then(|c| c.as_table_mut()) {
+            redact(events, "rpc_url");
+        }
     }
     toml::to_string(&merged).expect("table serialized successfully before redaction")
 }
@@ -1167,6 +1173,12 @@ private_key = "{PRIVATE_KEY}"
 [snapshot]
 aws_access_key_id = "AKIA_ACCESS_KEY"
 aws_secret_access_key = "AWS_SECRET_VALUE"
+
+[onchain_events]
+rpc_url = "https://opt-mainnet.example.com/v2/L2_API_KEY_IN_PATH"
+
+[base_onchain_events]
+rpc_url = "https://base-mainnet.example.com/v2/BASE_API_KEY_IN_PATH"
 "#
         ))
         .unwrap();
@@ -1178,6 +1190,8 @@ aws_secret_access_key = "AWS_SECRET_VALUE"
             "ADMIN_SECRET",
             "AKIA_ACCESS_KEY",
             "AWS_SECRET_VALUE",
+            "L2_API_KEY_IN_PATH",
+            "BASE_API_KEY_IN_PATH",
         ] {
             assert!(!printed.contains(secret), "leaked {secret}: {printed}");
         }
