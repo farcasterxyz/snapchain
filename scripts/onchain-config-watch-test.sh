@@ -396,22 +396,29 @@ check "window: count-of-one sentinel keeps the trailing window" \
     [ "$(seconds_until_window 12345 1 1 900)" = 1155 ]
 check "window: zero-count (defensive) immediate" \
     [ "$(seconds_until_window 12345 0 0 900)" = 0 ]
-check "window: at own window start" [ "$(seconds_until_window 0 0 4 100)" = 0 ]
-check "window: waits for own slot" [ "$(seconds_until_window 0 2 4 100)" = 200 ]
-# pos 250 is INSIDE slot 2's window [200,300) — but only window STARTS
-# trigger, so the wait wraps a full cycle: (200 - 250 + 500) % 500 = 450.
+check "window: at own window start" [ "$(seconds_until_window 0 0 4 1000)" = 0 ]
+check "window: waits for own slot" [ "$(seconds_until_window 0 2 4 1000)" = 2000 ]
+# pos 2500 is INSIDE slot 2's window [2000,3000) — but only window STARTS
+# trigger, so the wait wraps a full cycle: (2000 - 2500 + 5000) % 5000 = 4500.
 check "window: mid-own-window waits for the next cycle" \
-    [ "$(seconds_until_window 250 2 4 100)" = 450 ]
+    [ "$(seconds_until_window 2500 2 4 1000)" = 4500 ]
 check "window: sentinel slot is the trailing window" \
-    [ "$(seconds_until_window 0 4 4 100)" = 400 ]
+    [ "$(seconds_until_window 0 4 4 1000)" = 4000 ]
 check "window: wraps across cycle boundary" \
-    [ "$(seconds_until_window 499 1 4 100)" = 101 ]
+    [ "$(seconds_until_window 4999 1 4 1000)" = 1001 ]
 # Grace: the post-sleep re-check can land a beat late; the first tenth of the
 # window still counts as its start.
 check "window: grace absorbs drift just past the start" \
-    [ "$(seconds_until_window 205 2 4 100)" = 0 ]
+    [ "$(seconds_until_window 2050 2 4 1000)" = 0 ]
 check "window: past the grace waits for the next cycle" \
-    [ "$(seconds_until_window 211 2 4 100)" = 489 ]
+    [ "$(seconds_until_window 2110 2 4 1000)" = 4890 ]
+# The grace floor: window/10 alone can be outrun by one evaluation's RPC
+# latency, so short windows get a flat 60s grace (still < the 120s window
+# minimum, so grace can never reach the next slot's window).
+check "window: grace floor covers a slow evaluation on a short window" \
+    [ "$(seconds_until_window 450 2 4 200)" = 0 ]
+check "window: past the floored grace waits for the next cycle" \
+    [ "$(seconds_until_window 461 2 4 200)" = 939 ]
 
 echo
 if [[ "$FAILURES" -gt 0 ]]; then

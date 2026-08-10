@@ -281,10 +281,12 @@ if [[ -n "$CACHE_PATH" && -f "$CACHE_PATH" ]]; then
         exit 1
     fi
     log INFO "booting from cached config"
-    # The cache's content matches the watermark already on disk (both were
-    # written by the last successful pull), so the watcher's inequality check
-    # stays correct: once the RPC recovers, a counter that moved since that
-    # pull triggers the catch-up restart this boot could not perform.
+    # This boot verified no watermark (the pull failed), so spawn_watcher
+    # hands off an empty one and the watcher starts at 0: its first
+    # successful pull re-derives the truth by content comparison — identical
+    # content just advances the watermark, while a counter that moved since
+    # the cached pull triggers the catch-up restart this boot could not
+    # perform.
     spawn_watcher
     exit 0
 fi

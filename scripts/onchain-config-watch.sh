@@ -118,7 +118,17 @@ seconds_until_window() {
     local cycle=$(((count + 1) * window))
     local start=$((index * window))
     local pos=$((now % cycle))
+    # Grace is a tenth of the window, floored at 60s. The post-sleep re-check
+    # lands only after real work — up to six 30s-capped RPC round-trips plus
+    # two exec'd validations — so a tenth alone can be outrun by a
+    # slow-but-alive RPC (e.g. window 120 -> grace 12s vs an 18s evaluation),
+    # and every re-check would then miss its window: the change never applies
+    # on this node. The floor stays under the 120s window minimum, so a grace
+    # zone can never reach into the next slot's window.
     local grace=$((window / 10))
+    if [[ "$grace" -lt 60 ]]; then
+        grace=60
+    fi
     if [[ "$pos" -ge "$start" && "$pos" -le $((start + grace)) ]]; then
         echo 0
         return
@@ -350,7 +360,7 @@ fi
 # rollout that silently never lands. Refuse windows whose grace is below a
 # margin over worst-case evaluation latency instead of livelocking.
 if [[ "$WINDOW" -lt 120 ]]; then
-    log "ERROR: ONCHAIN_CONFIG_STAGGER_WINDOW must be >= 120 (grace = window/10 must exceed one evaluation's RPC+validation latency, or the restart window can never be hit); exiting"
+    log "ERROR: ONCHAIN_CONFIG_STAGGER_WINDOW must be >= 120 (the window must outlast a full node stop + boot, and must exceed the 60s grace floor); exiting"
     exit 1
 fi
 
