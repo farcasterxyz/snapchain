@@ -83,13 +83,14 @@ EOF
 }
 
 # run_script [env VAR=VAL ...] — invokes the script in the sandbox with the
-# stub binaries wired up; captures exit code in RC and output in OUT.
+# stub binaries wired up; captures exit code in RC and output in OUT. No
+# ONCHAIN_CONFIG_ENABLED is injected: the default (on) is itself under test.
 run_script() {
     RC=0
     OUT="$(cd "$DIR" && env \
         FC_BIN="$DIR/fc" SNAPCHAIN_BIN="$DIR/snapchain" \
         ONCHAIN_CONFIG_WATCH_BIN="$DIR/watch-stub" \
-        ONCHAIN_CONFIG_ENABLED=true "$@" \
+        "$@" \
         "$SCRIPT" config.toml 2>&1)" || RC=$?
 }
 
@@ -113,12 +114,38 @@ not() { ! "$@"; }
 
 fc_was_called() { [[ -f "$DIR/fc.args" ]]; }
 
-#### disabled → no-op, fc never runs
+#### the gate: on by default, false/0 opt out, garbage refuses
+setup
+run_script ONCHAIN_CONFIG_ENABLED=false
+check "opt-out (false): exits 0" [ "$RC" -eq 0 ]
+check "opt-out (false): fc not called" not fc_was_called
+check "opt-out (false): config untouched" not grep -q merged-from-registry "$DIR/config.toml"
+
+setup
+run_script ONCHAIN_CONFIG_ENABLED=0
+check "opt-out (0): fc not called" not fc_was_called
+
+#### default-on: unset runs the pull; so does the empty string the compose
+#### environment: block passes through when the host leaves the var unset
+setup
+run_script
+check "default-on (unset): exits 0" [ "$RC" -eq 0 ]
+check "default-on (unset): merge applied" grep -q merged-from-registry "$DIR/config.toml"
+
 setup
 run_script ONCHAIN_CONFIG_ENABLED=
-check "disabled: exits 0" [ "$RC" -eq 0 ]
-check "disabled: fc not called" not fc_was_called
-check "disabled: config untouched" not grep -q merged-from-registry "$DIR/config.toml"
+check "default-on (empty): merge applied" grep -q merged-from-registry "$DIR/config.toml"
+
+setup
+run_script ONCHAIN_CONFIG_ENABLED=true
+check "explicit true: merge applied" grep -q merged-from-registry "$DIR/config.toml"
+
+#### a typo'd kill switch must fail loudly, not silently enable
+setup
+run_script ONCHAIN_CONFIG_ENABLED=flase
+check "typo'd gate: exits nonzero" [ "$RC" -ne 0 ]
+check "typo'd gate: fc not called" not fc_was_called
+check "typo'd gate: names the value" grep -q "unrecognized ONCHAIN_CONFIG_ENABLED='flase'" <<< "$OUT"
 
 #### read node (file) → no-op
 setup
@@ -194,15 +221,25 @@ check "rpc-fail fallback: config restored from cache" grep -q last-known-good "$
 check "rpc-fail fallback: logs loudly" \
     grep -q '"level":"WARN".*config pull failed' <<< "$OUT"
 
-#### pull fails + no cache → refuse to boot
+#### pull fails + no cache → boot the static config, watcher armed
 setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "rpc-fail no cache: exits nonzero" [ "$RC" -ne 0 ]
+check "rpc-fail no cache: exits 0" [ "$RC" -eq 0 ]
+check "rpc-fail no cache: boots the untouched static config" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
+check "rpc-fail no cache: warns loudly" \
+    grep -q '"level":"WARN".*booting the static config WITHOUT registry-managed keys' <<< "$OUT"
+check "rpc-fail no cache: watcher spawned with empty watermark" \
+    grep -qx "watermark: " "$DIR/watch.spawned"
 
-#### pull fails + caching disabled entirely → refuse to boot
+#### pull fails + caching disabled entirely → same static fallback
 setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 run_script FC_STUB_EXIT=7
-check "rpc-fail cache disabled: exits nonzero" [ "$RC" -ne 0 ]
+check "rpc-fail cache disabled: exits 0" [ "$RC" -eq 0 ]
+check "rpc-fail cache disabled: boots the static config" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
 
 #### pull succeeds but merge fails validation + valid cache → fall back
 setup
@@ -211,34 +248,63 @@ run_script FC_STUB_APPEND="BAD" ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "bad-merge fallback: exits 0" [ "$RC" -eq 0 ]
 check "bad-merge fallback: config restored from cache" grep -q last-known-good "$DIR/config.toml"
 
-#### pull fails + cache is itself invalid → refuse to boot
+#### pull succeeds but merge fails validation + no cache → the static
+#### fallback must restore the PRISTINE config, not boot the merged residue
 setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
+run_script FC_STUB_APPEND="BAD"
+check "bad-merge no cache: exits 0" [ "$RC" -eq 0 ]
+check "bad-merge no cache: merged residue gone" not grep -q "BAD" "$DIR/config.toml"
+check "bad-merge no cache: config is byte-identical to pre-pull" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
+
+#### pull fails + cache is itself invalid → fall through to static
+setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 mkdir -p "$DIR/cache"
 printf 'fc_network = "Mainnet"\nBAD\n' > "$DIR/cache/config.toml"
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "corrupt cache: exits nonzero" [ "$RC" -ne 0 ]
-check "corrupt cache: refuses loudly" grep -q "cached config failed" <<< "$OUT"
+check "corrupt cache: exits 0" [ "$RC" -eq 0 ]
+check "corrupt cache: complains loudly" grep -q "cached config failed" <<< "$OUT"
+check "corrupt cache: static config booted, cache bytes gone" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
 
-#### pull fails + cache is for a different network → refuse to boot
+#### pull fails + cache is for a different network → fall through to static
 setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 mkdir -p "$DIR/cache"
 printf 'fc_network = "Testnet"\ncached = "last-known-good"\n' > "$DIR/cache/config.toml"
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "wrong-network cache: exits nonzero" [ "$RC" -ne 0 ]
-check "wrong-network cache: config NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "wrong-network cache: exits 0" [ "$RC" -eq 0 ]
+check "wrong-network cache: cache NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "wrong-network cache: static config booted" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
 check "wrong-network cache: names the mismatch" \
     grep -q "is for network 'testnet'" <<< "$OUT"
 
-#### pull fails + cache has a different consensus key → refuse to boot
+#### pull fails + cache has a different consensus key → fall through to static
 setup
 echo 'private_key = "current-key"' >> "$DIR/config.toml"
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 mkdir -p "$DIR/cache"
 printf 'fc_network = "Mainnet"\nprivate_key = "rotated-away-key"\ncached = "last-known-good"\n' \
     > "$DIR/cache/config.toml"
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
-check "rotated-key cache: exits nonzero" [ "$RC" -ne 0 ]
-check "rotated-key cache: config NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "rotated-key cache: exits 0" [ "$RC" -eq 0 ]
+check "rotated-key cache: cache NOT restored" not grep -q last-known-good "$DIR/config.toml"
+check "rotated-key cache: static config booted with the current key" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
 check "rotated-key cache: key values not printed" not grep -q "rotated-away-key" <<< "$OUT"
+
+#### snapshot unavailable → static fallback disarmed, refusal is correct
+setup
+mkdir -p "$DIR/ro-tmp"
+chmod 555 "$DIR/ro-tmp"
+run_script TMPDIR="$DIR/ro-tmp" FC_STUB_EXIT=7
+chmod 755 "$DIR/ro-tmp"
+check "disarmed fallback: exits nonzero" [ "$RC" -ne 0 ]
+check "disarmed fallback: says the snapshot failed" \
+    grep -q "cannot snapshot the static config" <<< "$OUT"
 
 #### cache publication leaves no temp files behind
 no_stray_cache_files() {
@@ -330,15 +396,21 @@ write_matching_cache
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "watcher: spawned on cache fallback" watcher_spawned
 
-#### C9: no watcher when disabled, on read nodes, or on refused boots
+#### C9: watcher spawned on the static-fallback path too (fresh node, RPC down)
 setup
-run_script ONCHAIN_CONFIG_ENABLED=
-check "watcher: not spawned when disabled" not watcher_spawned
+run_script FC_STUB_EXIT=7
+check "watcher: spawned on static fallback" watcher_spawned
+
+#### C9: no watcher when opted out, on read nodes, or on refused boots
+setup
+run_script ONCHAIN_CONFIG_ENABLED=false
+check "watcher: not spawned when opted out" not watcher_spawned
 setup
 run_script SNAPCHAIN_READ_NODE=true
 check "watcher: not spawned on read nodes" not watcher_spawned
 setup
-run_script FC_STUB_EXIT=7
+echo "BAD" >> "$DIR/config.toml" # static config itself invalid: nothing bootable
+run_script
 check "watcher: not spawned on a refused boot" not watcher_spawned
 
 #### C9: ONCHAIN_CONFIG_POLL_INTERVAL=0 opts out of the watcher
