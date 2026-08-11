@@ -45,20 +45,32 @@ FC_BIN="${FC_BIN:-/app/fc}"
 SNAPCHAIN_BIN="${SNAPCHAIN_BIN:-/app/snapchain}"
 CACHE_PATH="${ONCHAIN_CONFIG_CACHE:-}"
 
+# log LEVEL MESSAGE… — one JSON line per call, shaped like the node's own
+# tracing_subscriber .json() output ({"timestamp","level","fields":{"message"},
+# "target"}), because this stderr shares a docker-logs stream with the node and
+# one bare text line breaks JSON-line log parsing downstream. Levels follow
+# tracing: INFO/WARN/ERROR. Second-precision timestamps — BSD date (macOS,
+# where the tests also run) has no %N.
 log() {
-    echo "[apply-onchain-config] $*" >&2
+    local level="$1" msg
+    shift
+    msg="$*"
+    msg=${msg//\\/\\\\}
+    msg=${msg//\"/\\\"}
+    printf '{"timestamp":"%s","level":"%s","fields":{"message":"%s"},"target":"apply-onchain-config"}\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$level" "$msg" >&2
 }
 
 case "${ONCHAIN_CONFIG_ENABLED:-}" in
     true | 1) ;;
     *)
-        log "ONCHAIN_CONFIG_ENABLED not set; leaving $CONFIG_PATH untouched"
+        log INFO "ONCHAIN_CONFIG_ENABLED not set; leaving $CONFIG_PATH untouched"
         exit 0
         ;;
 esac
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
-    log "ERROR: config file not found: $CONFIG_PATH"
+    log ERROR "config file not found: $CONFIG_PATH"
     exit 1
 fi
 
@@ -89,7 +101,7 @@ config_value() {
 # defaults to false (validator).
 read_node="$(config_value read_node SNAPCHAIN_READ_NODE)"
 if [[ "$read_node" == "true" ]]; then
-    log "read_node = true; registry manages validator config only — skipping"
+    log INFO "read_node = true; registry manages validator config only — skipping"
     exit 0
 fi
 
@@ -100,7 +112,7 @@ network="$(echo "$fc_network" | tr '[:upper:]' '[:lower:]')"
 case "$network" in
     mainnet | testnet | devnet) ;;
     *)
-        log "ERROR: cannot determine network from fc_network=\"$fc_network\" in $CONFIG_PATH"
+        log ERROR "cannot determine network from fc_network='$fc_network' in $CONFIG_PATH"
         exit 1
         ;;
 esac
@@ -134,12 +146,12 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
             && cache_tmp="$(mktemp "$CACHE_PATH.XXXXXX")" \
             && cp "$CONFIG_PATH" "$cache_tmp" \
             && mv "$cache_tmp" "$CACHE_PATH" && cache_tmp=""; }; then
-            log "pull OK; cached last-known-good to $CACHE_PATH"
+            log INFO "pull OK; cached last-known-good to $CACHE_PATH"
         else
-            log "WARNING: pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
+            log WARN "pull OK but failed to write last-known-good cache to $CACHE_PATH; booting anyway"
         fi
     else
-        log "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"
+        log INFO "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"
     fi
     exit 0
 fi
@@ -157,24 +169,24 @@ if [[ -n "$CACHE_PATH" && -f "$CACHE_PATH" ]]; then
     # crash-looping beats booting as somebody else.
     cached_network="$(file_value "$CACHE_PATH" fc_network | tr '[:upper:]' '[:lower:]')"
     if [[ "$cached_network" != "$network" ]]; then
-        log "ERROR: cache at $CACHE_PATH is for network \"$cached_network\", this node is \"$network\"; refusing to boot from it"
+        log ERROR "cache at $CACHE_PATH is for network '$cached_network', this node is '$network'; refusing to boot from it"
         exit 1
     fi
     # Compare, never print: these are consensus signing keys.
     if [[ "$(file_value "$CACHE_PATH" private_key)" != "$(file_value "$CONFIG_PATH" private_key)" ]]; then
-        log "ERROR: cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); refusing to boot from it"
+        log ERROR "cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); refusing to boot from it"
         exit 1
     fi
-    log "WARNING: config pull failed; falling back to last-known-good $CACHE_PATH"
-    log "WARNING: env-derived config changes since that pull will NOT apply this boot"
+    log WARN "config pull failed; falling back to last-known-good $CACHE_PATH"
+    log WARN "env-derived config changes since that pull will NOT apply this boot"
     cp "$CACHE_PATH" "$CONFIG_PATH"
     if ! check_config; then
-        log "ERROR: cached config failed --check-config; refusing to boot"
+        log ERROR "cached config failed --check-config; refusing to boot"
         exit 1
     fi
-    log "booting from cached config"
+    log INFO "booting from cached config"
     exit 0
 fi
 
-log "ERROR: config pull failed and no last-known-good cache exists; refusing to boot"
+log ERROR "config pull failed and no last-known-good cache exists; refusing to boot"
 exit 1

@@ -159,7 +159,8 @@ write_matching_cache
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "rpc-fail fallback: exits 0" [ "$RC" -eq 0 ]
 check "rpc-fail fallback: config restored from cache" grep -q last-known-good "$DIR/config.toml"
-check "rpc-fail fallback: logs loudly" grep -q "WARNING: config pull failed" <<< "$OUT"
+check "rpc-fail fallback: logs loudly" \
+    grep -q '"level":"WARN".*config pull failed' <<< "$OUT"
 
 #### pull fails + no cache → refuse to boot
 setup
@@ -193,7 +194,8 @@ printf 'fc_network = "Testnet"\ncached = "last-known-good"\n' > "$DIR/cache/conf
 run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "wrong-network cache: exits nonzero" [ "$RC" -ne 0 ]
 check "wrong-network cache: config NOT restored" not grep -q last-known-good "$DIR/config.toml"
-check "wrong-network cache: names the mismatch" grep -q 'is for network "testnet"' <<< "$OUT"
+check "wrong-network cache: names the mismatch" \
+    grep -q "is for network 'testnet'" <<< "$OUT"
 
 #### pull fails + cache has a different consensus key → refuse to boot
 setup
@@ -211,6 +213,14 @@ setup
 run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "tmp cleanup on success: only the cache file remains" \
     [ "$(ls "$DIR/cache")" = "config.toml" ]
+
+#### log lines are node-shaped JSON (same fields as tracing_subscriber .json())
+setup
+run_script
+check "logs: JSON lines matching the node's shape" \
+    grep -Eq '^\{"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z","level":"INFO","fields":\{"message":"pull OK[^"]*"\},"target":"apply-onchain-config"\}$' \
+    <<< "$OUT"
+check "logs: no bare-text log lines" not grep -q '^\[apply-onchain-config\]' <<< "$OUT"
 
 #### missing config file → hard fail
 setup
