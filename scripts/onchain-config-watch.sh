@@ -146,10 +146,20 @@ seconds_until_window() {
     echo $(((start - pos + cycle) % cycle))
 }
 
+# Poll stderr is suppressed: fc's bare-text error lines would break the
+# JSON-line log stream every POLL_INTERVAL while the registry is unreachable
+# (or not yet deployed). The transition WARN below is the signal; run
+# `fc config version` by hand for the underlying error.
 fc_version() {
     "$FC_BIN" --network "$NETWORK" config version --config "$CONFIG_PATH" \
-        ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"}
+        ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"} 2> /dev/null
 }
+
+# Poll-failure state for transition logging: WARN once when polls start
+# failing, INFO once on recovery, quiet in between. A fleet whose registry
+# is not deployed yet polls-and-fails forever; logging every tick would
+# train operators to ignore the exact WARN that matters after activation.
+POLL_FAILING=""
 
 # The watermark means "the version THIS container verified its config
 # against". It arrives once, via environment, from the boot that verified it
@@ -189,8 +199,15 @@ evaluate() {
     # once per registry write and cannot get near that, so anything wider is a
     # garbage or hostile RPC response, treated as a failed poll.
     if ! v="$(fc_version)" || ! [[ "$v" =~ ^[0-9]{1,18}$ ]]; then
-        log WARN "configVersion poll failed; will retry in ${POLL_INTERVAL}s"
+        if [[ -z "$POLL_FAILING" ]]; then
+            log WARN "configVersion poll failed; retrying every ${POLL_INTERVAL}s, quiet until it recovers"
+            POLL_FAILING=1
+        fi
         return 0
+    fi
+    if [[ -n "$POLL_FAILING" ]]; then
+        log INFO "configVersion poll recovered"
+        POLL_FAILING=""
     fi
     wm="$(read_watermark)"
     # The counter is strictly monotonic onchain — even a rollback moves it
@@ -233,7 +250,7 @@ evaluate() {
         return 0
     fi
     EVAL_VERSION="$bound"
-    if ! "$SNAPCHAIN_BIN" --config-path "$tmp" --check-config; then
+    if ! "$SNAPCHAIN_BIN" --config-path "$tmp" --check-config > /dev/null; then
         log ERROR "version $bound renders a config that fails --check-config; NOT restarting (fix it onchain); will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
