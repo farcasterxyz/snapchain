@@ -197,11 +197,11 @@ emit_fc_output() {
 spawn_watcher() {
     local watch_bin="${ONCHAIN_CONFIG_WATCH_BIN:-$(dirname "$0")/onchain-config-watch.sh}"
     if [[ "${ONCHAIN_CONFIG_POLL_INTERVAL:-300}" == "0" ]]; then
-        log "ONCHAIN_CONFIG_POLL_INTERVAL=0; config changes will only apply on the next restart"
+        log INFO "ONCHAIN_CONFIG_POLL_INTERVAL=0; config changes will only apply on the next restart"
         return 0
     fi
     if [[ ! -x "$watch_bin" ]]; then
-        log "WARNING: watcher $watch_bin missing or not executable; config changes will only apply on the next restart"
+        log WARN "watcher $watch_bin missing or not executable; config changes will only apply on the next restart"
         return 0
     fi
     # The watcher never re-derives the network or re-reads shared state: this
@@ -213,7 +213,7 @@ spawn_watcher() {
     ONCHAIN_WATCH_NETWORK="$network" \
         ONCHAIN_WATCH_WATERMARK="$onchain_version" \
         "$watch_bin" "$CONFIG_PATH" < /dev/null &
-    log "started onchain-config watcher (pid $!)"
+    log INFO "started onchain-config watcher (pid $!)"
 }
 
 # Fallback-boot counter at $CACHE_PATH.fallback-boots: incremented on every
@@ -262,7 +262,7 @@ if version_report="$(mktemp "${TMPDIR:-/tmp}/onchain-config-version.XXXXXX")"; t
     pull_args+=(--report-version "$version_report")
 else
     version_report=""
-    log "WARNING: cannot create version-report temp file; watcher will start with an unset watermark"
+    log WARN "cannot create version-report temp file; watcher will start with an unset watermark"
 fi
 # Sweep snapshots orphaned by hard kills first: SIGKILL (OOM, docker kill)
 # skips the EXIT trap, and these carry consensus.private_key — nothing else
@@ -301,9 +301,9 @@ if [[ -n "$pull_ok" ]] && check_config; then
         # Width-bounded to 18 digits: the watcher compares this in bash's
         # signed-64-bit arithmetic, where a wider value wraps negative.
         if [[ "$onchain_version" =~ ^[0-9]{1,18}$ ]]; then
-            log "applied configVersion $onchain_version"
+            log INFO "applied configVersion $onchain_version"
         else
-            log "WARNING: pull reported no usable configVersion; watcher will start with an unset watermark"
+            log WARN "pull reported no usable configVersion; watcher will start with an unset watermark"
             onchain_version=""
         fi
     fi
@@ -315,7 +315,7 @@ if [[ -n "$pull_ok" ]] && check_config; then
         # boot, and a torn .prev is caught by --check-config at restore time.
         if [[ -f "$CACHE_PATH" ]] && ! cmp -s "$CONFIG_PATH" "$CACHE_PATH"; then
             cp "$CACHE_PATH" "$CACHE_PATH.prev" \
-                || log "WARNING: could not rotate previous known-good to $CACHE_PATH.prev"
+                || log WARN "could not rotate previous known-good to $CACHE_PATH.prev"
         fi
         # The merged config contains consensus.private_key: keep the cache
         # non-world-readable (mktemp creates 0600) and publish it with an
