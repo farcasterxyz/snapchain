@@ -49,9 +49,15 @@
 #                            onchain-config-watch.sh). Test hook.
 #
 # Alongside the cache this script maintains, when ONCHAIN_CONFIG_CACHE is set:
-#   $CACHE.prev     the previous known-good config, rotated out when a pull
-#                   changes the cache — the manual-rollback artifact that can
-#                   restore the old config without an RPC round-trip.
+#   $CACHE.prev            the previous known-good config, rotated out when a
+#                          pull changes the cache — the manual-rollback
+#                          artifact that can restore the old config without an
+#                          RPC round-trip.
+#   $CACHE.fallback-boots  count of consecutive boots that did NOT apply a
+#                          fresh pull; cleared by the next successful one.
+#                          The monitorable stale-fleet signal: alert on it
+#                          existing/climbing, because a node running stale is
+#                          otherwise indistinguishable from a healthy one.
 #
 # The rollout watermark (the configVersion() bound to the applied document,
 # reported by `fc config pull --report-version` from block-pinned reads) is
@@ -160,8 +166,25 @@ if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
     pull_args+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
 fi
 
+# stdout dropped ("config OK" is a bare-text line in a JSON log stream);
+# stderr kept — it only speaks on failure, where the diagnostics matter.
+# Loader-deep only: a config that passes can still fail later in startup
+# (e.g. a malformed consensus key panics post-exec), so "validated" here
+# means "parses and loads", not "boots".
 check_config() {
-    "$SNAPCHAIN_BIN" --config-path "$CONFIG_PATH" --check-config
+    "$SNAPCHAIN_BIN" --config-path "$CONFIG_PATH" --check-config > /dev/null
+}
+
+# Re-emit captured fc output as JSON log lines at the given level — fc
+# writes bare text, and one bare line in the shared docker-logs stream
+# breaks JSON-line parsing downstream.
+emit_fc_output() {
+    local level="$1" line
+    [[ -n "$fc_out" ]] || return 0
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && log "$level" "fc: $line"
+    done <<< "$fc_out"
+    return 0
 }
 
 # Hand off to the rollout watcher: a disowned background loop that polls
@@ -193,6 +216,30 @@ spawn_watcher() {
     log "started onchain-config watcher (pid $!)"
 }
 
+# Fallback-boot counter at $CACHE_PATH.fallback-boots: incremented on every
+# boot that did not apply a fresh pull, cleared by the next successful one.
+# A node running stale is otherwise indistinguishable from a healthy one in
+# every dashboard — this file (and its WARN line) is the monitorable signal,
+# and a value that keeps climbing is the flap/outage tripwire. Best-effort:
+# accounting must never stop a boot.
+record_fallback_boot() {
+    [[ -n "$CACHE_PATH" ]] || return 0
+    local f="$CACHE_PATH.fallback-boots" n
+    n="$(tr -d '[:space:]' < "$f" 2> /dev/null || true)"
+    [[ "$n" =~ ^[0-9]{1,9}$ ]] || n=0
+    n=$((n + 1))
+    { mkdir -p "$(dirname "$f")" && printf '%s\n' "$n" > "$f"; } 2> /dev/null \
+        || log WARN "could not record the fallback-boot counter at $f"
+    log WARN "fallback boot #$n since the last successful pull"
+    return 0
+}
+
+clear_fallback_counter() {
+    [[ -n "$CACHE_PATH" ]] || return 0
+    rm -f "$CACHE_PATH.fallback-boots" 2> /dev/null || true
+    return 0
+}
+
 # The pull reports the configVersion() bound to the very document it merged
 # (both reads pinned to one block hash inside fc) — the only value safe to
 # hand the watcher as its watermark. Best-effort: a boot must not fail over
@@ -217,20 +264,38 @@ else
     version_report=""
     log "WARNING: cannot create version-report temp file; watcher will start with an unset watermark"
 fi
-# Snapshot the entrypoint-written config before fc touches it: the fallback of
-# last resort. It must be an actual copy — a pull that succeeds but fails
-# --check-config leaves MERGED content in $CONFIG_PATH, so "boot what we
-# started with" cannot be reconstructed from the file itself. If the snapshot
-# cannot be taken, the static fallback is disarmed (that failure path refuses
-# to boot); the pull and cache paths are unaffected.
+# Sweep snapshots orphaned by hard kills first: SIGKILL (OOM, docker kill)
+# skips the EXIT trap, and these carry consensus.private_key — nothing else
+# cleans them up. /tmp is container-private, so the glob cannot touch
+# another node's files.
+rm -f "${TMPDIR:-/tmp}"/onchain-config-static.*
+
+# Snapshot the entrypoint-written config before fc touches it. It must be an
+# actual copy — a pull that succeeds but fails --check-config leaves MERGED
+# content in $CONFIG_PATH, so "boot what we started with" cannot be
+# reconstructed from the file itself. If the snapshot cannot be taken the
+# ladder still has its last rung: validating $CONFIG_PATH as it stands.
 if ! { static_tmp="$(mktemp "${TMPDIR:-/tmp}/onchain-config-static.XXXXXX")" \
     && cp "$CONFIG_PATH" "$static_tmp"; }; then
     [[ -n "$static_tmp" ]] && rm -f "$static_tmp"
     static_tmp=""
-    log WARN "cannot snapshot the static config; static-config fallback disarmed this boot"
+    log WARN "cannot snapshot the static config; will validate config.toml in place if the pull fails"
 fi
 
-if "$FC_BIN" "${pull_args[@]}" && check_config; then
+# Pull and validate as separate steps so the failure messages below can
+# tell the truth: "pull failed" sends the operator to RPC health, "merged
+# config failed validation" sends them to the registry document — chasing
+# the wrong one wastes the incident.
+pull_ok=""
+fc_out=""
+if fc_out="$("$FC_BIN" "${pull_args[@]}" 2>&1)"; then
+    pull_ok=1
+    emit_fc_output INFO
+else
+    emit_fc_output WARN
+fi
+
+if [[ -n "$pull_ok" ]] && check_config; then
     if [[ -n "$version_report" ]]; then
         onchain_version="$(tr -d '[:space:]' < "$version_report" 2>/dev/null || true)"
         # Width-bounded to 18 digits: the watcher compares this in bash's
@@ -272,8 +337,19 @@ if "$FC_BIN" "${pull_args[@]}" && check_config; then
     else
         log INFO "pull OK (no ONCHAIN_CONFIG_CACHE set; skipping last-known-good cache)"
     fi
+    clear_fallback_counter
     spawn_watcher
     exit 0
+fi
+
+# Classify the failure once; every message below carries it. A pull that
+# succeeded but rendered an invalid merge is the registry document's fault
+# (or this binary's) — fix it onchain, not in the RPC layer.
+if [[ -n "$pull_ok" ]]; then
+    failure_reason="merged config failed --check-config"
+    log ERROR "pull succeeded but the merged config failed --check-config; the registry document (or this binary) is at fault — falling back"
+else
+    failure_reason="config pull failed"
 fi
 
 # Pull or validation failed. Refusing to boot a validator because an RPC
@@ -297,7 +373,7 @@ try_cache_boot() {
     local cached_network
     cached_network="$(file_value "$CACHE_PATH" fc_network | tr '[:upper:]' '[:lower:]')"
     if [[ "$cached_network" != "$network" ]]; then
-        log ERROR "cache at $CACHE_PATH is for network '$cached_network', this node is '$network'; not booting from it"
+        log WARN "cache at $CACHE_PATH is for network '$cached_network', this node is '$network'; not booting from it"
         return 1
     fi
     # Compare, never print: these are consensus signing keys. Known limit:
@@ -307,14 +383,14 @@ try_cache_boot() {
     # above. Every compose path in this repo and the deployer writes the key
     # into config.toml; revisit if an env-keyed layout ever runs this script.
     if [[ "$(file_value "$CACHE_PATH" private_key)" != "$(file_value "$CONFIG_PATH" private_key)" ]]; then
-        log ERROR "cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); not booting from it"
+        log WARN "cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); not booting from it"
         return 1
     fi
-    log WARN "config pull failed; falling back to last-known-good $CACHE_PATH"
+    log WARN "$failure_reason; falling back to last-known-good $CACHE_PATH"
     log WARN "env-derived config changes since that pull will NOT apply this boot"
     cp "$CACHE_PATH" "$CONFIG_PATH" || return 1
     if ! check_config; then
-        log ERROR "cached config failed --check-config; not booting from it"
+        log WARN "cached config failed --check-config; not booting from it"
         return 1
     fi
     return 0
@@ -322,6 +398,7 @@ try_cache_boot() {
 
 if try_cache_boot; then
     log INFO "booting from cached config"
+    record_fallback_boot
     # This boot verified no watermark (the pull failed), so spawn_watcher
     # hands off an empty one and the watcher starts at 0: its first
     # successful pull re-derives the truth by content comparison — identical
@@ -345,10 +422,25 @@ fi
 # removed from the entrypoints, because at that point the registry is
 # load-bearing and a registry-less boot is not a working validator.
 if [[ -n "$static_tmp" ]] && cp "$static_tmp" "$CONFIG_PATH" && check_config; then
-    log WARN "config pull failed and no usable last-known-good cache; booting the static config WITHOUT registry-managed keys"
+    log WARN "$failure_reason and no usable last-known-good cache; booting the static config WITHOUT registry-managed keys"
+    record_fallback_boot
     spawn_watcher
     exit 0
 fi
 
-log ERROR "config pull failed and no fallback validates; refusing to boot"
+# Last rung: no snapshot (unwritable TMPDIR — the disk pressure that often
+# accompanies the RPC failures that land us here). fc writes config.toml
+# atomically, so after a FAILED pull the file is still the pristine static
+# config; after a successful pull whose merge failed validation it is the
+# merged content, which this same check just rejected and rejects again.
+# Validating in place therefore boots exactly the configs the snapshot rung
+# would have, without depending on the copy.
+if check_config; then
+    log WARN "$failure_reason; no snapshot available but $CONFIG_PATH validates as written; booting it WITHOUT registry-managed keys"
+    record_fallback_boot
+    spawn_watcher
+    exit 0
+fi
+
+log ERROR "$failure_reason and no fallback validates; refusing to boot"
 exit 1

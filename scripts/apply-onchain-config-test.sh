@@ -140,12 +140,21 @@ setup
 run_script ONCHAIN_CONFIG_ENABLED=true
 check "explicit true: merge applied" grep -q merged-from-registry "$DIR/config.toml"
 
-#### a typo'd kill switch must fail loudly, not silently enable
+#### a typo'd kill switch must fail loudly, not silently enable. DELIBERATE
+#### (reviewed 2026-08-11): this includes disable-shaped spellings — FALSE,
+#### off, no — refusing to boot rather than guessing at intent. The only
+#### accepted spellings are the exact lowercase true/1/false/0.
 setup
 run_script ONCHAIN_CONFIG_ENABLED=flase
 check "typo'd gate: exits nonzero" [ "$RC" -ne 0 ]
 check "typo'd gate: fc not called" not fc_was_called
 check "typo'd gate: names the value" grep -q "unrecognized ONCHAIN_CONFIG_ENABLED='flase'" <<< "$OUT"
+setup
+run_script ONCHAIN_CONFIG_ENABLED=FALSE
+check "uppercase FALSE: exits nonzero (pinned as deliberate)" [ "$RC" -ne 0 ]
+setup
+run_script ONCHAIN_CONFIG_ENABLED=off
+check "off: exits nonzero (pinned as deliberate)" [ "$RC" -ne 0 ]
 
 #### read node (file) → no-op
 setup
@@ -296,15 +305,31 @@ check "rotated-key cache: static config booted with the current key" \
     cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
 check "rotated-key cache: key values not printed" not grep -q "rotated-away-key" <<< "$OUT"
 
-#### snapshot unavailable → static fallback disarmed, refusal is correct
+#### snapshot unavailable + failed pull → validate config.toml in place and
+#### boot it (fc writes atomically, so the file is still the pristine static
+#### config; refusing a valid config over a missing COPY would be wrong)
 setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
 mkdir -p "$DIR/ro-tmp"
 chmod 555 "$DIR/ro-tmp"
 run_script TMPDIR="$DIR/ro-tmp" FC_STUB_EXIT=7
 chmod 755 "$DIR/ro-tmp"
-check "disarmed fallback: exits nonzero" [ "$RC" -ne 0 ]
-check "disarmed fallback: says the snapshot failed" \
-    grep -q "cannot snapshot the static config" <<< "$OUT"
+check "no-snapshot last rung: exits 0" [ "$RC" -eq 0 ]
+check "no-snapshot last rung: boots the pristine config" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
+check "no-snapshot last rung: says it validated in place" \
+    grep -q "validates as written" <<< "$OUT"
+
+#### snapshot unavailable + bad merge → the in-place file is merged residue,
+#### which fails validation: refusal is the only honest outcome left
+setup
+mkdir -p "$DIR/ro-tmp"
+chmod 555 "$DIR/ro-tmp"
+run_script TMPDIR="$DIR/ro-tmp" FC_STUB_APPEND="BAD"
+chmod 755 "$DIR/ro-tmp"
+check "no-snapshot bad merge: exits nonzero" [ "$RC" -ne 0 ]
+check "no-snapshot bad merge: names the real failure" \
+    grep -q "merged config failed --check-config" <<< "$OUT"
 
 #### cache publication leaves no temp files behind
 no_stray_cache_files() {
@@ -426,6 +451,60 @@ run_script ONCHAIN_CONFIG_WATCH_BIN="$DIR/does-not-exist" \
     ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
 check "missing watcher: exits 0" [ "$RC" -eq 0 ]
 check "missing watcher: warns" grep -q "missing or not executable" <<< "$OUT"
+
+#### snapshot hygiene: orphans from hard-killed boots (SIGKILL skips the EXIT
+#### trap) are swept at start, and normal paths leave nothing behind — these
+#### files carry consensus.private_key
+setup
+mkdir -p "$DIR/tmp"
+touch "$DIR/tmp/onchain-config-static.stale0"
+run_script TMPDIR="$DIR/tmp"
+check "snapshot sweep: stale orphan removed" \
+    not ls "$DIR/tmp"/onchain-config-static.* 2>/dev/null
+setup
+mkdir -p "$DIR/tmp"
+run_script TMPDIR="$DIR/tmp" FC_STUB_EXIT=7
+check "snapshot cleanup: nothing left after a fallback boot" \
+    not ls "$DIR/tmp"/onchain-config-static.* 2>/dev/null
+
+#### boot-side garbage --report-version content: wider than 18 digits would
+#### wrap negative in the watcher's arithmetic — must degrade to an empty
+#### watermark, never hand it over
+setup
+run_script FC_STUB_BOUND_VERSION=9999999999999999999999
+check "garbage bound version: exits 0" [ "$RC" -eq 0 ]
+check "garbage bound version: warns" grep -q "no usable configVersion" <<< "$OUT"
+check "garbage bound version: empty watermark handed off" \
+    grep -qx "watermark: " "$DIR/watch.spawned"
+
+#### cache-fallback watermark: fc may have written the version report before
+#### validation failed — the handoff must still be empty (nothing was applied)
+setup
+write_matching_cache
+run_script FC_STUB_APPEND="BAD" ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "cache-fallback watermark: empty handoff" \
+    grep -qx "watermark: " "$DIR/watch.spawned"
+
+#### fallback-boot counter: climbs across stale boots, cleared by success
+setup
+run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+run_script FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "fallback counter: counts both stale boots" \
+    grep -qx 2 "$DIR/cache/config.toml.fallback-boots"
+check "fallback counter: logged for monitors" \
+    grep -q "fallback boot #2 since the last successful pull" <<< "$OUT"
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "fallback counter: cleared by a successful pull" \
+    not test -f "$DIR/cache/config.toml.fallback-boots"
+
+#### every line this script emits is JSON — fc/snapchain child output is
+#### wrapped or dropped, because one bare line breaks JSON-line log parsing
+setup
+run_script ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+check "logs: success path emits no bare lines" not grep -qv '^{' <<< "$OUT"
+setup
+run_script FC_STUB_EXIT=7
+check "logs: fallback path emits no bare lines" not grep -qv '^{' <<< "$OUT"
 
 echo
 if [[ "$FAILURES" -gt 0 ]]; then
