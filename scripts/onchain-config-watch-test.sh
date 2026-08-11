@@ -55,6 +55,7 @@ version)
     consume "$here/version-seq" || exit 1
     ;;
 pull)
+    printf '%s\n' "$@" > "$here/fc.pull.args"
     line="$(consume "$here/pull-seq" 2>/dev/null || true)"
     case "$line" in
         NOAPPEND) ;;
@@ -178,6 +179,23 @@ check "change: watermark not advanced (boot re-derives it)" \
     not grep -q "recording watermark" <<< "$OUT"
 check "change: running config untouched" not grep -q merged-from-registry "$DIR/config.toml"
 check "change: no temp copies left" no_stray_tmp
+
+#### the accept-local-peers knob must reach the validation pull: a watcher
+#### pulling with a different flag than the boot merges a different document
+#### and would restart on every peer-only registry write
+setup
+echo 8 > "$DIR/version-seq"
+echo 8 > "$DIR/bound-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS=true
+check "accept-local-peers: flag passed to the pull" \
+    grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.pull.args"
+
+setup
+echo 8 > "$DIR/version-seq"
+echo 8 > "$DIR/bound-seq"
+run_tick ONCHAIN_WATCH_WATERMARK=7
+check "accept-local-peers: flag absent by default" \
+    not grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.pull.args"
 
 #### counter moved, document byte-identical → watermark only, no restart
 setup

@@ -202,6 +202,24 @@ run_script
 check "args: testnet network derived" grep -qx testnet "$DIR/fc.args"
 check "args: no --registry when env unset" not grep -qx -- --registry "$DIR/fc.args"
 check "args: no --rpc-url when env unset" not grep -qx -- --rpc-url "$DIR/fc.args"
+check "args: no bootstrap-peers opt-out when env unset" \
+    not grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.args"
+
+#### bootstrap-peers opt-out knob → flag threaded to the pull; typos refuse
+setup
+run_script ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS=true
+check "accept-local-peers: flag passed" \
+    grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.args"
+
+setup
+run_script ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS=false
+check "accept-local-peers=false: flag absent" \
+    not grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.args"
+
+setup
+run_script ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS=yes
+check "accept-local-peers garbage: refuses to boot" [ "$RC" -ne 0 ]
+check "accept-local-peers garbage: fc never runs" not fc_was_called
 
 #### env overlay wins for network too
 setup
