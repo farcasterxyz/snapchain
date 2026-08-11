@@ -1,9 +1,13 @@
 //! `fc` — command-line client for Farcaster's Snapchain network.
 //!
-//! ALPHA — This binary is a developer sketch, not a stable product. Flags, subcommand names,
-//! output format, and error semantics may change without notice. Don't depend on it from scripts
-//! you care about, and don't point it at mainnet without reading what each subcommand actually
-//! does.
+//! Stability varies by subcommand:
+//!
+//! * `config pull` is **stable**: its flags and behaviour only change with a deprecation
+//!   period. It is intended for production use from deploy scripts.
+//! * Every message-submission subcommand (and `devnet`/`subscribe`) is **ALPHA** — a developer
+//!   sketch, not a stable product. Flags, subcommand names, output format, and error semantics
+//!   may change without notice. Don't depend on them from scripts you care about, and don't
+//!   point them at mainnet without reading what each subcommand actually does.
 //!
 //! Subcommands:
 //!   key-add      submit a gasless KEY_ADD (generate fresh signer or reuse one with --signer-secret)
@@ -13,12 +17,14 @@
 //!   link         submit LINK_ADD / LINK_REMOVE / LINK_COMPACT_STATE (follows, blocks)
 //!   live-at      submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
 //!   verification submit VERIFICATION_ADD_ETH_ADDRESS / VERIFICATION_REMOVE
+//!   config       pull onchain-managed node config from the SnapchainConfigRegistry (stable)
 //!   devnet       devnet-only AdminService helpers (register FIDs)
 //!   subscribe    stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
 //! `factory::create_message_with_data` hard-codes `FarcasterNetwork::Mainnet`, so every message is
 //! re-tagged via `retarget_network` before submission.
 
+mod config_pull;
 mod eip712;
 mod factory;
 mod helpers;
@@ -49,10 +55,12 @@ const LONG_VERSION: &str = concat!(
 #[derive(Parser)]
 #[command(
     name = "fc",
-    about = "Submit Farcaster messages against a snapchain node",
-    long_about = "ALPHA — developer sketch for submitting Farcaster messages against a \
-                  snapchain HTTP/gRPC node. Flags, subcommand names, and output format are \
-                  unstable and may change without notice. Defaults target testnet.",
+    about = "Client for Farcaster's Snapchain network: submit messages, stream events, \
+             manage node config",
+    long_about = "Client for Farcaster's Snapchain network. `config pull` is stable and \
+                  intended for production use (defaults to mainnet). The message-submission \
+                  subcommands are ALPHA developer sketches — flags, names, and output format \
+                  may change without notice — and default to testnet.",
     version = env!("CARGO_PKG_VERSION"),
     long_version = LONG_VERSION,
 )]
@@ -61,9 +69,11 @@ struct Cli {
     #[arg(long, default_value = "https://iris.farcaster.xyz:3381", global = true)]
     node: String,
 
-    /// Network to tag messages with.
-    #[arg(long, value_enum, default_value = "testnet", global = true)]
-    network: NetworkArg,
+    /// Network to operate on. Defaults per subcommand: message submission
+    /// defaults to testnet (the safe direction for a tool that submits);
+    /// `config pull` defaults to mainnet (it only reads a registry).
+    #[arg(long, value_enum, global = true)]
+    network: Option<NetworkArg>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -88,11 +98,26 @@ enum Cmd {
     /// Submit a VERIFICATION_ADD_ETH_ADDRESS / VERIFICATION_REMOVE.
     #[command(subcommand)]
     Verification(VerificationCmd),
+    /// Manage node configuration from the onchain SnapchainConfigRegistry.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Devnet-only helpers that drive the AdminService directly.
     #[command(subcommand)]
     Devnet(DevnetCmd),
     /// Stream HubEvents from a snapchain gRPC node and log them to stdout as JSON.
     Subscribe(SubscribeArgs),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Fetch the registry's rendered config and merge it into a local config.toml.
+    ///
+    /// Stable, unlike the message-submission subcommands: flags and behaviour
+    /// only change with a deprecation period. Writes to the local filesystem and
+    /// talks to an Ethereum JSON-RPC endpoint (Ethereum L1 for mainnet, Sepolia
+    /// for testnet) — never to a snapchain node, so --node is ignored.
+    /// --network selects which registry to read and defaults to mainnet here.
+    Pull(config_pull::ConfigPullArgs),
 }
 
 #[derive(Subcommand)]
@@ -1148,7 +1173,7 @@ async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
     let cli = Cli::parse();
-    let network = cli.network.as_proto();
+    let network = cli.network.unwrap_or(NetworkArg::Testnet).as_proto();
     match cli.cmd {
         Cmd::KeyAdd(a) => run_key_add(a, &cli.node, network).await,
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
@@ -1157,6 +1182,9 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::Link(c) => run_link(c, &cli.node, network).await,
         Cmd::LiveAt(a) => run_live_at(a, &cli.node, network).await,
         Cmd::Verification(c) => run_verification(c, &cli.node, network).await,
+        Cmd::Config(ConfigCmd::Pull(a)) => {
+            config_pull::run(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
         Cmd::Devnet(c) => run_devnet(c).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }

@@ -305,23 +305,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if app_config.clear_db {
-        let db_dir = format!("{}", app_config.rocksdb_dir);
-        if std::path::Path::new(&db_dir).exists() {
-            let remove_result = std::fs::remove_dir_all(db_dir.clone());
-            if let Err(e) = remove_result {
-                error!("Failed to clear db at {:?}: {}", db_dir, e);
-            }
-            let create_result = std::fs::create_dir_all(db_dir.clone());
-            if let Err(e) = create_result {
-                error!("Failed to create db dir at {:?}: {}", db_dir, e);
-            }
-            warn!("Cleared db at {:?}", db_dir);
-        } else {
-            warn!("No db to clear at {:?}", db_dir);
-        }
-    }
-
     if app_config.statsd.prefix == "" {
         // TODO: consider removing this check
         return Err("statsd prefix must be specified in config".into());
@@ -339,6 +322,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.statsd.addr
         )),
     }?;
+
+    // Deploy scripts run `snapchain --check-config` between rewriting config.toml
+    // (fc config pull) and restarting the node, so a bad config fails here — before
+    // the running node is stopped — rather than as a crash loop after. Placed after
+    // the log_format and statsd checks so everything main() itself validates
+    // pure-config (no side effects) is covered; --clear-db stays behind the gate,
+    // since a validation run must never touch the database. Note the gate is
+    // otherwise loader-deep only — values that panic later in startup (e.g. a
+    // malformed consensus.private_key) are not exercised here.
+    if app_config.check_config {
+        println!("config OK");
+        return Ok(());
+    }
+
+    if app_config.clear_db {
+        let db_dir = format!("{}", app_config.rocksdb_dir);
+        if std::path::Path::new(&db_dir).exists() {
+            let remove_result = std::fs::remove_dir_all(db_dir.clone());
+            if let Err(e) = remove_result {
+                error!("Failed to clear db at {:?}: {}", db_dir, e);
+            }
+            let create_result = std::fs::create_dir_all(db_dir.clone());
+            if let Err(e) = create_result {
+                error!("Failed to create db dir at {:?}: {}", db_dir, e);
+            }
+            warn!("Cleared db at {:?}", db_dir);
+        } else {
+            warn!("No db to clear at {:?}", db_dir);
+        }
+    }
 
     let host = (statsd_host, statsd_port);
     let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();
