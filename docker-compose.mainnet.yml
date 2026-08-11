@@ -8,11 +8,13 @@ services:
     init: true # Auto-reap zombie processes and forward process signals
     environment:
       RUST_BACKTRACE: "full"
-      # Onchain-config controls. Declared here (not only interpolated inside
-      # the entrypoint text) so both enable paths work: export in the host
-      # shell / .env, or set the values directly on these lines. Interpolating
-      # ${VAR:-} in the entrypoint alone would bake an empty assignment at
-      # compose-parse time that silently overrides an environment: entry.
+      # Onchain-config controls. On by default — set ONCHAIN_CONFIG_ENABLED=false
+      # to opt out and make the config written below win verbatim. Declared here
+      # (not only interpolated inside the entrypoint text) so both override
+      # paths work: export in the host shell / .env, or set the values directly
+      # on these lines. Interpolating ${VAR:-} in the entrypoint alone would
+      # bake an empty assignment at compose-parse time that silently overrides
+      # an environment: entry.
       ONCHAIN_CONFIG_ENABLED: "${ONCHAIN_CONFIG_ENABLED:-}"
       ONCHAIN_CONFIG_REGISTRY: "${ONCHAIN_CONFIG_REGISTRY:-}"
       ONCHAIN_CONFIG_RPC_URL: "${ONCHAIN_CONFIG_RPC_URL:-}"
@@ -51,17 +53,20 @@ services:
         # Append validator sets from the dedicated validators.toml file.
         # See validators.toml for the full history of validator changes and operator details.
         cat /app/validators.toml >> config.toml
-        # Merge registry-managed validator config (no-op on read nodes and
-        # unless ONCHAIN_CONFIG_ENABLED is set; see the script header — the
-        # ONCHAIN_CONFIG_* controls come from the environment: block above).
-        # Enabling this as a validator requires ONCHAIN_CONFIG_RPC_URL: the
-        # heredoc above writes no l1_rpc_url, so fc's mainnet fallback has
-        # nothing to read and the pull fails (loudly) without it.
+        # Merge registry-managed validator config. On by default; no-op on
+        # read nodes, and ONCHAIN_CONFIG_ENABLED=false opts out entirely (see
+        # the script header — the ONCHAIN_CONFIG_* controls come from the
+        # environment: block above). Running this as a validator wants
+        # ONCHAIN_CONFIG_RPC_URL: the heredoc above writes no l1_rpc_url, so
+        # fc's mainnet fallback has nothing to read and the pull fails
+        # (loudly) every boot, leaving the static config in charge until it
+        # is set.
         # The -x guard keeps `docker compose pull && up` safe while the pinned
         # :latest image predates the script (compose files ship on main,
-        # images on release tags) — but only while the feature is off:
-        # enabled-but-missing must refuse rather than silently boot on
-        # potentially stale static config.
+        # images on release tags): with the feature on by default, an old
+        # image just boots its static config. Only an EXPLICIT enable refuses
+        # on a missing script — an operator who asked for the pull must not
+        # silently boot on potentially stale static config.
         if [ -x /app/apply-onchain-config.sh ]; then
           ONCHAIN_CONFIG_CACHE=/app/.onchain-config/config.mainnet.toml \
           /app/apply-onchain-config.sh config.toml || exit 1
