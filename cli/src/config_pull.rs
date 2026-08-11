@@ -43,13 +43,23 @@ sol! {
 
 /// Registry address baked in per network. The mainnet registry lives on
 /// Ethereum L1 (chain 1); the testnet registry lives on Sepolia (11155111).
-/// C5's single-salt CREATE2 plan may make the two addresses coincide — keep
-/// them separate constants anyway: a redeploy on either chain breaks the
+/// The single-salt CREATE2 deploy puts the SAME address on both chains, so
+/// only the chain-id preflight distinguishes the two registries — keep the
+/// constants separate anyway: a redeploy on either chain breaks the
 /// coincidence. Devnet deployments are ephemeral and always need `--registry`.
-fn baked_in_registry(_network: NetworkArg) -> Option<Address> {
-    // NEYN-13022: fill in the mainnet (L1) and testnet (Sepolia) addresses
-    // once the registry deploy lands. Devnet stays `None` permanently.
-    None
+fn baked_in_registry(network: NetworkArg) -> Option<Address> {
+    match network {
+        // Deliberately unset even though the CREATE2 address is known:
+        // baking it would make the L1 contract deploy the act that starts
+        // mainnet pulls fleet-wide (the pull is on by default in the deploy
+        // scripts). Fill it in at the mainnet cutover, after the one-node
+        // dry-run gate — not before the L1 registry exists and is verified.
+        NetworkArg::Mainnet => None,
+        NetworkArg::Testnet => Some(alloy_primitives::address!(
+            "00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
+        )),
+        NetworkArg::Devnet => None,
+    }
 }
 
 /// The chain each network's registry lives on. Devnet (local anvil, arbitrary
@@ -446,9 +456,11 @@ fn resolve_registry(flag: Option<&str>, network: NetworkArg) -> Result<Address, 
     baked_in_registry(network).ok_or_else(|| {
         match network {
             NetworkArg::Devnet => "devnet has no baked-in registry; pass --registry",
-            NetworkArg::Mainnet | NetworkArg::Testnet => {
-                "no registry deployed for this network yet (NEYN-13022); pass --registry"
+            NetworkArg::Mainnet => {
+                "the mainnet registry address is not baked in until the mainnet cutover; \
+                 pass --registry"
             }
+            NetworkArg::Testnet => "no baked-in registry for this network; pass --registry",
         }
         .into()
     })
@@ -774,6 +786,24 @@ fn splice_managed_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baked_in_registry_addresses() {
+        // Pinned against the checksummed string (not the macro literal) so a
+        // typo in either spelling fails the test. One CREATE2 address serves
+        // both chains; only testnet is baked in — mainnet stays None until
+        // its cutover, devnet permanently requires --registry.
+        assert_eq!(
+            baked_in_registry(NetworkArg::Testnet),
+            Some(
+                "0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
+                    .parse::<Address>()
+                    .unwrap()
+            )
+        );
+        assert_eq!(baked_in_registry(NetworkArg::Mainnet), None);
+        assert_eq!(baked_in_registry(NetworkArg::Devnet), None);
+    }
 
     /// The worked example from the rendering spec (§3.2), byte-for-byte.
     const ONCHAIN: &str = r#"[[consensus.validator_sets]]
