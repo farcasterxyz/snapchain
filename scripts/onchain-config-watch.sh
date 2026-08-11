@@ -88,8 +88,18 @@
 #                            shutdown and re-arming (default 60).
 #   ONCHAIN_CONFIG_WATCH_ONCE      Test seam: run one tick, no initial sleep.
 
+# log LEVEL MESSAGE… — one JSON line per call, shaped like the node's own
+# tracing_subscriber .json() output; same rationale and shape as the log()
+# in apply-onchain-config.sh (this loop's stderr shares the container's
+# docker-logs stream with the node).
 log() {
-    echo "[onchain-config-watch] $*" >&2
+    local level="$1" msg
+    shift
+    msg="$*"
+    msg=${msg//\\/\\\\}
+    msg=${msg//\"/\\\"}
+    printf '{"timestamp":"%s","level":"%s","fields":{"message":"%s"},"target":"onchain-config-watch"}\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$level" "$msg" >&2
 }
 
 # Pure. Seconds from `now` until the start of this node's next restart
@@ -179,7 +189,7 @@ evaluate() {
     # once per registry write and cannot get near that, so anything wider is a
     # garbage or hostile RPC response, treated as a failed poll.
     if ! v="$(fc_version)" || ! [[ "$v" =~ ^[0-9]{1,18}$ ]]; then
-        log "WARNING: configVersion poll failed; will retry in ${POLL_INTERVAL}s"
+        log WARN "configVersion poll failed; will retry in ${POLL_INTERVAL}s"
         return 0
     fi
     wm="$(read_watermark)"
@@ -192,10 +202,10 @@ evaluate() {
         EVAL=current
         return 0
     fi
-    log "configVersion moved ($wm -> $v); fetching and validating the new document"
+    log INFO "configVersion moved ($wm -> $v); fetching and validating the new document"
     if ! tmp="$(umask 077 && mktemp "${TMPDIR:-/tmp}/onchain-config-watch.XXXXXX")" \
         || ! cp "$CONFIG_PATH" "$tmp"; then
-        log "WARNING: cannot stage a config copy for validation; will retry"
+        log WARN "cannot stage a config copy for validation; will retry"
         [[ -n "${tmp:-}" ]] && rm -f "$tmp"
         return 0
     fi
@@ -207,24 +217,24 @@ evaluate() {
     if ! "$FC_BIN" --network "$NETWORK" config pull --config "$tmp" \
         --report-version "$tmp.version" \
         ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"}; then
-        log "ERROR: config pull for version $v failed; NOT restarting; will retry"
+        log ERROR "config pull for version $v failed; NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
     if ! bound="$(tr -d '[:space:]' < "$tmp.version" 2>/dev/null)" \
         || ! [[ "$bound" =~ ^[0-9]{1,18}$ ]]; then
-        log "ERROR: pull reported no usable configVersion; NOT restarting; will retry"
+        log ERROR "pull reported no usable configVersion; NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
     if [[ "$bound" -le "$wm" ]]; then
-        log "WARNING: pull landed on a backend at version $bound, at or below watermark $wm (stale RPC view); will retry"
+        log WARN "pull landed on a backend at version $bound, at or below watermark $wm (stale RPC view); will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
     EVAL_VERSION="$bound"
     if ! "$SNAPCHAIN_BIN" --config-path "$tmp" --check-config; then
-        log "ERROR: version $bound renders a config that fails --check-config; NOT restarting (fix it onchain); will retry"
+        log ERROR "version $bound renders a config that fails --check-config; NOT restarting (fix it onchain); will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
@@ -238,13 +248,13 @@ evaluate() {
         EVAL=noop
         return 0
     elif [[ "$cmp_rc" -ne 1 ]]; then
-        log "WARNING: cannot compare the pulled config against the running one (cmp exit $cmp_rc); NOT restarting; will retry"
+        log WARN "cannot compare the pulled config against the running one (cmp exit $cmp_rc); NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
     if ! slot_out="$("$FC_BIN" config slot --config "$tmp")" \
         || ! [[ "$slot_out" =~ ^[0-9]+\ [0-9]+$ ]]; then
-        log "ERROR: cannot compute stagger slot; NOT restarting; will retry"
+        log ERROR "cannot compute stagger slot; NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
     fi
@@ -259,7 +269,7 @@ tick() {
     case "$EVAL" in
         fail | current) return 0 ;;
         noop)
-            log "version $EVAL_VERSION does not change the rendered config; recording watermark without restart"
+            log INFO "version $EVAL_VERSION does not change the rendered config; recording watermark without restart"
             write_watermark "$EVAL_VERSION"
             return 0
             ;;
@@ -277,27 +287,27 @@ tick() {
         # A failed `date` must not fall through as epoch 0 — that computes
         # slot 0's window as "now" and restarts outside the real window.
         if ! now="$(date +%s)" || ! [[ "$now" =~ ^[0-9]+$ ]]; then
-            log "WARNING: cannot read the clock; NOT restarting; will retry"
+            log WARN "cannot read the clock; NOT restarting; will retry"
             return 0
         fi
         delta="$(seconds_until_window "$now" "$EVAL_INDEX" "$EVAL_COUNT" "$WINDOW")"
         [[ "$delta" -gt 0 ]] || break
-        log "version $EVAL_VERSION changes the config; waiting ${delta}s for restart window (slot $EVAL_INDEX of $((EVAL_COUNT + 1)))"
+        log INFO "version $EVAL_VERSION changes the config; waiting ${delta}s for restart window (slot $EVAL_INDEX of $((EVAL_COUNT + 1)))"
         sleep "$delta"
         evaluate
         case "$EVAL" in
             fail | current)
-                log "change no longer applies after the stagger wait; skipping restart"
+                log INFO "change no longer applies after the stagger wait; skipping restart"
                 return 0
                 ;;
             noop)
-                log "document reverted to the running config while waiting (version $EVAL_VERSION); recording watermark without restart"
+                log INFO "document reverted to the running config while waiting (version $EVAL_VERSION); recording watermark without restart"
                 write_watermark "$EVAL_VERSION"
                 return 0
                 ;;
         esac
     done
-    log "restarting node to apply config version $EVAL_VERSION (slot ${EVAL_INDEX:-?})"
+    log INFO "restarting node to apply config version $EVAL_VERSION (slot ${EVAL_INDEX:-?})"
     if bash -c "$RESTART_CMD"; then
         # Success means the signal was SENT, not that the container is dying:
         # a node hung in graceful shutdown leaves PID 1 up, and exiting here
@@ -306,13 +316,13 @@ tick() {
         # proceeds, the container (and this sleep) never gets past this line;
         # if we are still running afterwards, re-arm and retry next tick.
         sleep "$RESTART_GRACE"
-        log "ERROR: still running ${RESTART_GRACE}s after the restart trigger — node hung in shutdown?; will retry next tick"
+        log ERROR "still running ${RESTART_GRACE}s after the restart trigger — node hung in shutdown?; will retry next tick"
         return 0
     fi
     # A failed trigger must not end the watch (the unconditional exit here
     # was silent watcher death): leave the watermark alone and retry the
     # whole pipeline next tick.
-    log "ERROR: restart command failed; will retry next tick"
+    log ERROR "restart command failed; will retry next tick"
     return 0
 }
 
@@ -332,7 +342,7 @@ WINDOW="${ONCHAIN_CONFIG_STAGGER_WINDOW:-900}"
 RESTART_CMD="${ONCHAIN_CONFIG_RESTART_CMD:-kill -TERM 1}"
 RESTART_GRACE="${ONCHAIN_CONFIG_RESTART_GRACE:-60}"
 if ! [[ "$RESTART_GRACE" =~ ^[0-9]+$ ]] || [[ "$RESTART_GRACE" -eq 0 ]]; then
-    log "ERROR: ONCHAIN_CONFIG_RESTART_GRACE must be a positive integer; exiting"
+    log ERROR "ONCHAIN_CONFIG_RESTART_GRACE must be a positive integer; exiting"
     exit 1
 fi
 # Handed off by the boot that verified it (see read_watermark). Unset or
@@ -343,14 +353,14 @@ WATERMARK_MEM="${ONCHAIN_WATCH_WATERMARK:-0}"
 [[ "$WATERMARK_MEM" =~ ^[0-9]{1,18}$ ]] || WATERMARK_MEM="0"
 
 if [[ -z "${ONCHAIN_WATCH_NETWORK:-}" ]]; then
-    log "ERROR: ONCHAIN_WATCH_NETWORK not set (apply-onchain-config.sh sets it); exiting"
+    log ERROR "ONCHAIN_WATCH_NETWORK not set (apply-onchain-config.sh sets it); exiting"
     exit 1
 fi
 NETWORK="$ONCHAIN_WATCH_NETWORK"
 
 if ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ && "$WINDOW" =~ ^[0-9]+$ ]] \
     || [[ "$POLL_INTERVAL" -eq 0 || "$WINDOW" -eq 0 ]]; then
-    log "ERROR: ONCHAIN_CONFIG_POLL_INTERVAL/ONCHAIN_CONFIG_STAGGER_WINDOW must be positive integers; exiting"
+    log ERROR "ONCHAIN_CONFIG_POLL_INTERVAL/ONCHAIN_CONFIG_STAGGER_WINDOW must be positive integers; exiting"
     exit 1
 fi
 # A restart fires only when a FRESH evaluation lands inside [start,
@@ -360,7 +370,7 @@ fi
 # rollout that silently never lands. Refuse windows whose grace is below a
 # margin over worst-case evaluation latency instead of livelocking.
 if [[ "$WINDOW" -lt 120 ]]; then
-    log "ERROR: ONCHAIN_CONFIG_STAGGER_WINDOW must be >= 120 (the window must outlast a full node stop + boot, and must exceed the 60s grace floor); exiting"
+    log ERROR "ONCHAIN_CONFIG_STAGGER_WINDOW must be >= 120 (the window must outlast a full node stop + boot, and must exceed the 60s grace floor); exiting"
     exit 1
 fi
 
@@ -377,11 +387,11 @@ if [[ -n "${ONCHAIN_CONFIG_WATCH_ONCE:-}" ]]; then
     # set -e inside tick, so the harness exercises exactly the failure mode
     # production runs with — an unguarded failing command falls through here
     # just as it would in the loop, instead of aborting only under test.
-    tick || log "WARNING: watcher tick failed unexpectedly; continuing"
+    tick || log WARN "watcher tick failed unexpectedly; continuing"
     exit 0
 fi
 
-log "watching configVersion every ${POLL_INTERVAL}s (stagger window ${WINDOW}s, watermark ${WATERMARK_MEM})"
+log INFO "watching configVersion every ${POLL_INTERVAL}s (stagger window ${WINDOW}s, watermark ${WATERMARK_MEM})"
 
 # One log line an hour proves the loop is alive without flooding the
 # container logs; there is no autoheal for a dead watcher, only this.
@@ -396,9 +406,9 @@ while true; do
     sleep "$POLL_INTERVAL"
     # `|| log` keeps an unexpected tick failure from killing the loop (it
     # also suppresses set -e inside tick; every step handles its own errors).
-    tick || log "WARNING: watcher tick failed unexpectedly; continuing"
+    tick || log WARN "watcher tick failed unexpectedly; continuing"
     ticks=$((ticks + 1))
     if [[ $((ticks % HEARTBEAT_TICKS)) -eq 0 ]]; then
-        log "alive; watermark $(read_watermark)"
+        log INFO "alive; watermark $(read_watermark)"
     fi
 done

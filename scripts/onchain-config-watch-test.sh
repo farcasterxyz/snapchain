@@ -91,9 +91,15 @@ EOF
     # A coherent fake clock: date reads it, sleep advances it. Without the
     # advance, the post-sleep window re-check would recompute the same
     # positive delta forever and the re-evaluation loop could never converge.
+    # log() calls date with -u and a format string for its JSON timestamp;
+    # answer those with a fixed valid instant so the shape stays checkable.
     cat > "$DIR/date" <<'EOF'
 #!/bin/bash
-cat "$(dirname "$0")/clock" 2>/dev/null || echo 0
+if [[ "${1:-}" == "-u" ]]; then
+    echo "1970-01-01T00:00:00Z"
+else
+    cat "$(dirname "$0")/clock" 2>/dev/null || echo 0
+fi
 EOF
     cat > "$DIR/sleep" <<'EOF'
 #!/bin/bash
@@ -225,6 +231,12 @@ run_tick ONCHAIN_WATCH_WATERMARK=7
 check "poll failure: exits 0" [ "$RC" -eq 0 ]
 check "poll failure: no restart" not restarted
 check "poll failure: warns" grep -q "configVersion poll failed" <<< "$OUT"
+# The sandbox's fake-clock date stub feeds log()'s timestamp too, so pin the
+# shape but not the timestamp contents.
+check "logs: JSON lines matching the node's shape" \
+    grep -Eq '^\{"timestamp":"[^"]*","level":"WARN","fields":\{"message":"configVersion poll failed[^"]*"\},"target":"onchain-config-watch"\}$' \
+    <<< "$OUT"
+check "logs: no bare-text log lines" not grep -q '^\[onchain-config-watch\]' <<< "$OUT"
 
 #### garbage slot output → no restart
 setup
