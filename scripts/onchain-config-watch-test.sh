@@ -335,7 +335,14 @@ echo 8 > "$DIR/version-seq"
     ONCHAIN_CONFIG_RESTART_CMD=false \
     ONCHAIN_CONFIG_POLL_INTERVAL=1 \
     "$SCRIPT" config.toml > "$DIR/loop.log" 2>&1 & echo $! > "$DIR/loop.pid")
-/bin/sleep 1
+# Wait for the tick-2 marker (the poll failure that proves the loop survived
+# tick 1's failed restart) rather than a fixed real-time sleep: under load, a
+# fixed sleep races the background loop's scheduling and flakes. /bin/sleep
+# bypasses the PATH stub — this wait is real wall-clock, not the fake clock.
+for _ in $(seq 100); do
+    grep -q "configVersion poll failed" "$DIR/loop.log" 2>/dev/null && break
+    /bin/sleep 0.1
+done
 kill "$(cat "$DIR/loop.pid")" 2>/dev/null || true
 check "loop mode: restart failure logged" grep -q "restart command failed" "$DIR/loop.log"
 check "loop mode: loop continued past the failure" \
