@@ -1,5 +1,10 @@
-//! `fc config pull` — fetch the onchain-managed node configuration from the
-//! SnapchainConfigRegistry and merge it into a local `config.toml`.
+//! `fc config pull` / `fc config version` — read the onchain-managed node
+//! configuration from the SnapchainConfigRegistry.
+//!
+//! `pull` fetches the rendered document and merges it into a local
+//! `config.toml`; `version` prints the registry's `configVersion()` counter,
+//! the cheap poll the rollout gate (scripts/onchain-config-watch.sh) uses to
+//! decide whether a restart is warranted at all.
 //!
 //! The registry renders a TOML fragment whose byte-level format is specified in
 //! `farcasterxyz/contracts` (`docs/snapchain-config-registry.md`). This module is
@@ -36,9 +41,11 @@ use crate::{BoxedError, NetworkArg};
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 sol! {
-    /// The one read `config pull` needs from ISnapchainConfigRegistry
-    /// (farcasterxyz/contracts).
+    /// The two reads this module needs from ISnapchainConfigRegistry
+    /// (farcasterxyz/contracts): the rendered document for `pull`, and the
+    /// mutation counter for `version`.
     function configToml() external view returns (string memory);
+    function configVersion() external view returns (uint256);
 }
 
 /// Registry address baked in per network. The mainnet registry lives on
@@ -92,9 +99,20 @@ pub struct ConfigPullArgs {
     config: PathBuf,
 
     /// Print the merged document to stdout instead of writing the file
-    /// (consensus.private_key is shown redacted).
+    /// (credential-bearing keys are shown redacted).
     #[arg(long)]
     dry_run: bool,
+
+    /// Also read configVersion() and write it (a decimal line) to this file
+    /// after a successful merge. With this flag both registry reads are
+    /// pinned to one block hash (EIP-1898), so the reported counter is bound
+    /// to exactly the document that was merged — a load-balanced RPC cannot
+    /// pair a fresh counter with a stale document. The deploy scripts use the
+    /// value as the rollout watermark. Requires an EIP-1898-capable endpoint.
+    /// Conflicts with --dry-run: a report written for a merge that never
+    /// happened would gate that version out of a later real rollout.
+    #[arg(long, conflicts_with = "dry_run")]
+    report_version: Option<PathBuf>,
 
     /// Keep a non-empty `gossip.bootstrap_peers` already enumerated in the
     /// local config instead of adopting the registry's list — for operators
@@ -107,15 +125,78 @@ pub struct ConfigPullArgs {
     accept_local_bootstrap_peers_config: bool,
 }
 
+#[derive(clap::Args)]
+pub struct ConfigVersionArgs {
+    /// SnapchainConfigRegistry contract address. Overrides the baked-in
+    /// per-network address; required for devnet.
+    #[arg(long)]
+    registry: Option<String>,
+
+    /// Ethereum JSON-RPC URL for the chain the selected network's registry
+    /// lives on. Same resolution rules as `config pull`: mainnet may fall
+    /// back to `l1_rpc_url` from --config; testnet and devnet require the flag.
+    #[arg(long)]
+    rpc_url: Option<String>,
+
+    /// Optional node config.toml: supplies the mainnet `l1_rpc_url` fallback
+    /// and cross-checks `fc_network` against --network. Never written.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+/// `fc config version` — print the registry's `configVersion()` counter as a
+/// decimal integer on stdout. A read-only single eth_call at "latest", cheap
+/// enough to poll. This is the watch loop's TRIGGER only: it is not bound to
+/// any document, so the authoritative watermark value must come from
+/// `config pull --report-version`, whose reads are pinned to one block. The
+/// counter is strictly monotonic (increments on every mutation; an onchain
+/// revert moves it forward), so an observed value BELOW a stored watermark
+/// can only be a stale RPC view, never a change to apply.
+pub async fn run_version(args: ConfigVersionArgs, network: NetworkArg) -> Result<(), BoxedError> {
+    let local: toml::Table = match &args.config {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            toml::from_str(&raw)
+                .map_err(|e| sanitized_toml_error(&path.display().to_string(), &raw, &e))?
+        }
+        None => toml::Table::new(),
+    };
+    let env_fc_network = std::env::var("SNAPCHAIN_FC_NETWORK").ok();
+    check_network_matches(&local, network, env_fc_network.as_deref())?;
+    // No read_node gate: unlike `pull` this writes nothing, and the watcher
+    // only runs on validators anyway.
+
+    let registry = resolve_registry(args.registry.as_deref(), network)?;
+    let env_l1_rpc_url = std::env::var("SNAPCHAIN_L1_RPC_URL").ok();
+    let rpc_url = resolve_rpc_url(args.rpc_url, &local, network, env_l1_rpc_url.as_deref())?;
+    let client = http_client()?;
+    check_chain_id(&client, &rpc_url, network).await?;
+
+    let raw = eth_call(
+        &client,
+        &rpc_url,
+        registry,
+        configVersionCall {}.abi_encode(),
+        &serde_json::json!("latest"),
+    )
+    .await?;
+    let version = configVersionCall::abi_decode_returns(&raw)
+        .map_err(|e| format!("cannot ABI-decode configVersion() return: {e}"))?;
+    println!("{version}");
+    Ok(())
+}
+
 /// Mirrors `ValidatorSetConfig` in `snapchain/src/consensus/consensus.rs`.
 /// Redeclared locally so the CLI doesn't depend on snapchain proper at runtime;
 /// the dev-dependency parity test asserts the two shapes stay identical.
+/// Shared with `config slot`, which reads the same shape out of a merged file.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ValidatorSetConfig {
-    effective_at: u64,
-    validator_public_keys: Vec<String>,
-    shard_ids: Vec<u32>,
+pub(crate) struct ValidatorSetConfig {
+    pub(crate) effective_at: u64,
+    pub(crate) validator_public_keys: Vec<String>,
+    pub(crate) shard_ids: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,7 +271,35 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
     }
     let client = http_client()?;
     check_chain_id(&client, &rpc_url, network).await?;
-    let rendered = fetch_config_toml(&client, &rpc_url, registry).await?;
+
+    // When the version is being reported, pin BOTH registry reads to one
+    // block hash: eth_getBlockByNumber(latest) once, then eth_call each read
+    // at that hash. Separate "latest" calls against a load-balanced RPC can
+    // pair a fresh counter with a stale document — a watermark recorded that
+    // way would silently swallow the newer version forever. requireCanonical
+    // makes a reorg that drops the pinned block fail the call loudly (without
+    // it, EIP-1898 defaults to serving state for stored-but-orphaned blocks,
+    // and a watermark bound to an orphaned mutation would suppress the
+    // canonical document at the same version); the next attempt re-pins.
+    let (block, bound_version) = match &args.report_version {
+        Some(_) => {
+            let hash = latest_block_hash(&client, &rpc_url).await?;
+            let block = serde_json::json!({ "blockHash": hash, "requireCanonical": true });
+            let raw = eth_call(
+                &client,
+                &rpc_url,
+                registry,
+                configVersionCall {}.abi_encode(),
+                &block,
+            )
+            .await?;
+            let version = configVersionCall::abi_decode_returns(&raw)
+                .map_err(|e| format!("cannot ABI-decode configVersion() return: {e}"))?;
+            (block, Some(version))
+        }
+        None => (serde_json::json!("latest"), None),
+    };
+    let rendered = fetch_config_toml(&client, &rpc_url, registry, &block).await?;
 
     let onchain: toml::Table =
         toml::from_str(&rendered).map_err(|e| format!("registry returned invalid TOML: {e}"))?;
@@ -210,11 +319,18 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
 
     if args.dry_run {
         print!("{}", redact_secrets(local));
-        return Ok(());
+    } else {
+        write_replace(&config_path, &merged, &local_raw)?;
+        eprintln!("Wrote {}", config_path.display());
     }
 
-    write_replace(&config_path, &merged, &local_raw)?;
-    eprintln!("Wrote {}", config_path.display());
+    // Written only after the merge fully succeeded: the report means "this
+    // version's document is what the config now carries". No secret content;
+    // consumed immediately by the calling script, so a plain write suffices.
+    if let (Some(path), Some(version)) = (&args.report_version, &bound_version) {
+        std::fs::write(path, format!("{version}\n"))
+            .map_err(|e| format!("cannot write version report {}: {e}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -282,7 +398,7 @@ fn effective_read_node(
 /// Render a TOML error without echoing the offending source line. The local
 /// config contains the consensus private key; the default error Display quotes
 /// the source line, which would land verbatim in captured stderr.
-fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> String {
+pub(crate) fn sanitized_toml_error(context: &str, source: &str, err: &toml::de::Error) -> String {
     match err.span() {
         Some(span) => {
             let line = source[..span.start.min(source.len())].matches('\n').count() + 1;
@@ -581,7 +697,47 @@ async fn fetch_config_toml(
     client: &reqwest::Client,
     rpc_url: &str,
     registry: Address,
+    block: &serde_json::Value,
 ) -> Result<String, BoxedError> {
+    let raw = eth_call(
+        client,
+        rpc_url,
+        registry,
+        configTomlCall {}.abi_encode(),
+        block,
+    )
+    .await?;
+    Ok(configTomlCall::abi_decode_returns(&raw)
+        .map_err(|e| format!("cannot ABI-decode configToml() return: {e}"))?)
+}
+
+/// The latest block's hash, for pinning a pair of reads to one state
+/// (EIP-1898 eth_call block parameter).
+async fn latest_block_hash(client: &reqwest::Client, rpc_url: &str) -> Result<String, BoxedError> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "eth_getBlockByNumber", "params": ["latest", false],
+    });
+    let response = post_json_capped(client, rpc_url, &request, "eth_getBlockByNumber").await?;
+    response
+        .get("result")
+        .and_then(|r| r.get("hash"))
+        .and_then(|h| h.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "eth_getBlockByNumber returned no block hash".into())
+}
+
+/// One `eth_call` against the registry at `block` ("latest" or an EIP-1898
+/// {"blockHash": ...} pin), returning the decoded (hex-stripped) return
+/// bytes. Shared by `pull` (configToml) and `version` (configVersion);
+/// carries the response-size cap and the credential-scrubbing error handling.
+async fn eth_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    registry: Address,
+    calldata: Vec<u8>,
+    block: &serde_json::Value,
+) -> Result<Vec<u8>, BoxedError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -589,9 +745,9 @@ async fn fetch_config_toml(
         "params": [
             {
                 "to": format!("{registry}"),
-                "data": format!("0x{}", hex::encode(configTomlCall {}.abi_encode())),
+                "data": format!("0x{}", hex::encode(calldata)),
             },
-            "latest",
+            block,
         ],
     });
     let response = post_json_capped(client, rpc_url, &request, "eth_call").await?;
@@ -612,10 +768,8 @@ async fn fetch_config_toml(
         .get("result")
         .and_then(|r| r.as_str())
         .ok_or("eth_call response carries neither result nor error")?;
-    let raw = hex::decode(result.trim_start_matches("0x"))
-        .map_err(|e| format!("eth_call result is not hex: {e}"))?;
-    Ok(configTomlCall::abi_decode_returns(&raw)
-        .map_err(|e| format!("cannot ABI-decode configToml() return: {e}"))?)
+    Ok(hex::decode(result.trim_start_matches("0x"))
+        .map_err(|e| format!("eth_call result is not hex: {e}"))?)
 }
 
 /// Structural validation of the rendered document, before any of it touches the
@@ -1308,6 +1462,24 @@ bootstrap_peers = "x"
         assert_eq!(configTomlCall::SELECTOR, [0x5a, 0x62, 0xbd, 0x75]);
     }
 
+    /// Same pin for the rollout gate's poll: `forge inspect` on the as-built
+    /// registry reports 0xdd64d24d for configVersion().
+    #[test]
+    fn config_version_selector_matches_deployed_abi() {
+        assert_eq!(configVersionCall::SELECTOR, [0xdd, 0x64, 0xd2, 0x4d]);
+    }
+
+    /// configVersion() returns a bare 32-byte big-endian uint256; make sure the
+    /// decode path renders it as the decimal the watch script compares.
+    #[test]
+    fn config_version_decodes_bare_uint256() {
+        let mut raw = [0u8; 32];
+        raw[30] = 0x01; // 256 + 7
+        raw[31] = 0x07;
+        let version = configVersionCall::abi_decode_returns(&raw).unwrap();
+        assert_eq!(version.to_string(), "263");
+    }
+
     #[test]
     fn expected_chain_ids_per_network() {
         assert_eq!(expected_chain_id(NetworkArg::Mainnet), Some(1));
@@ -1365,6 +1537,34 @@ rpc_url = "https://base-mainnet.example.com/v2/BASE_API_KEY_IN_PATH"
             assert!(!printed.contains(secret), "leaked {secret}: {printed}");
         }
         assert!(printed.contains("<redacted>"));
+    }
+
+    /// A report written for a merge that never happened would record its
+    /// version as applied and gate it out of a later real rollout — the flag
+    /// pair must be rejected at parse time, not silently half-honored.
+    #[test]
+    fn report_version_conflicts_with_dry_run() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: ConfigPullArgs,
+        }
+        assert!(TestCli::try_parse_from([
+            "fc",
+            "--config",
+            "c.toml",
+            "--dry-run",
+            "--report-version",
+            "v.txt",
+        ])
+        .is_err());
+        // Each flag stays valid on its own.
+        assert!(TestCli::try_parse_from(["fc", "--config", "c.toml", "--dry-run"]).is_ok());
+        assert!(
+            TestCli::try_parse_from(["fc", "--config", "c.toml", "--report-version", "v.txt"])
+                .is_ok()
+        );
     }
 
     #[test]

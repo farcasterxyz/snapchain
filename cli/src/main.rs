@@ -25,6 +25,7 @@
 //! re-tagged via `retarget_network` before submission.
 
 mod config_pull;
+mod config_slot;
 mod eip712;
 mod factory;
 mod helpers;
@@ -118,6 +119,20 @@ enum ConfigCmd {
     /// for testnet) — never to a snapchain node, so --node is ignored.
     /// --network selects which registry to read and defaults to mainnet here.
     Pull(config_pull::ConfigPullArgs),
+    /// Print the registry's configVersion() counter (decimal, on stdout).
+    ///
+    /// Stable, like `pull`: the rollout gate polls this to decide whether a
+    /// restart is warranted. Read-only — talks to an Ethereum JSON-RPC
+    /// endpoint, never to a snapchain node, and writes nothing.
+    Version(config_pull::ConfigVersionArgs),
+    /// Print this validator's deterministic restart-stagger slot as
+    /// "<index> <count>".
+    ///
+    /// Stable, like `pull`: the rollout gate uses it to spread validator
+    /// restarts. Purely local — derives the node's public key from
+    /// consensus.private_key in --config and locates it in the file's
+    /// validator_sets. Writes nothing, prints no key material.
+    Slot(config_slot::ConfigSlotArgs),
 }
 
 #[derive(Subcommand)]
@@ -1185,6 +1200,10 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::Config(ConfigCmd::Pull(a)) => {
             config_pull::run(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
         }
+        Cmd::Config(ConfigCmd::Version(a)) => {
+            config_pull::run_version(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
+        Cmd::Config(ConfigCmd::Slot(a)) => config_slot::run(a),
         Cmd::Devnet(c) => run_devnet(c).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }

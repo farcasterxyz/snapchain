@@ -10,3 +10,4 @@ README.md
 # the negation below works under every .dockerignore matcher implementation.
 /scripts/*
 !/scripts/apply-onchain-config.sh
+!/scripts/onchain-config-watch.sh
