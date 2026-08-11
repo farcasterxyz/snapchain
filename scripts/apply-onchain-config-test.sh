@@ -331,6 +331,26 @@ check "no-snapshot bad merge: exits nonzero" [ "$RC" -ne 0 ]
 check "no-snapshot bad merge: names the real failure" \
     grep -q "merged config failed --check-config" <<< "$OUT"
 
+#### snapshot unavailable + pull fails + INVALID cache → the cache must be
+#### rejected without touching config.toml, so the last rung still boots the
+#### pristine static config (install-then-validate would poison it and
+#### crash-loop a perfectly bootable node)
+setup
+cp "$DIR/config.toml" "$DIR/pristine.toml"
+mkdir -p "$DIR/cache"
+printf 'fc_network = "Mainnet"\nBAD\n' > "$DIR/cache/config.toml"
+mkdir -p "$DIR/ro-tmp"
+chmod 555 "$DIR/ro-tmp"
+run_script TMPDIR="$DIR/ro-tmp" FC_STUB_EXIT=7 ONCHAIN_CONFIG_CACHE="$DIR/cache/config.toml"
+chmod 755 "$DIR/ro-tmp"
+check "no-snapshot corrupt cache: exits 0" [ "$RC" -eq 0 ]
+check "no-snapshot corrupt cache: rejects the cache" \
+    grep -q "cached config failed" <<< "$OUT"
+check "no-snapshot corrupt cache: no cache bytes in config.toml" \
+    not grep -q "BAD" "$DIR/config.toml"
+check "no-snapshot corrupt cache: boots the pristine static config" \
+    cmp -s "$DIR/config.toml" "$DIR/pristine.toml"
+
 #### cache publication leaves no temp files behind
 no_stray_cache_files() {
     local f name

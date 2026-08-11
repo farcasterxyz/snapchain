@@ -175,8 +175,12 @@ fi
 # Loader-deep only: a config that passes can still fail later in startup
 # (e.g. a malformed consensus key panics post-exec), so "validated" here
 # means "parses and loads", not "boots".
+# check_config [path] — validate the given file (default: the active config).
+# Validating a candidate at its own path needs no writable temp space, which
+# matters on the failure ladder: the disk pressure that disarms the snapshot
+# must not also disarm validation.
 check_config() {
-    "$SNAPCHAIN_BIN" --config-path "$CONFIG_PATH" --check-config > /dev/null
+    "$SNAPCHAIN_BIN" --config-path "${1:-$CONFIG_PATH}" --check-config > /dev/null
 }
 
 # Re-emit captured fc output as JSON log lines at the given level — fc
@@ -390,13 +394,23 @@ try_cache_boot() {
         log WARN "cache at $CACHE_PATH has a different consensus.private_key than the fresh config (key rotated or host repurposed?); not booting from it"
         return 1
     fi
-    log WARN "$failure_reason; falling back to last-known-good $CACHE_PATH"
-    log WARN "env-derived config changes since that pull will NOT apply this boot"
-    cp "$CACHE_PATH" "$CONFIG_PATH" || return 1
-    if ! check_config; then
+    # Validate the cache AT ITS OWN PATH before touching $CONFIG_PATH: an
+    # install-then-validate order would leave rejected cache bytes in the
+    # active config, and when the static snapshot is disarmed (unwritable
+    # TMPDIR) nothing downstream could repair that — the last rung would
+    # re-validate the poisoned file and refuse a node whose static config
+    # was perfectly bootable. In-place validation needs no temp space, so
+    # the disk pressure that disarms the snapshot cannot disarm this.
+    if ! check_config "$CACHE_PATH"; then
         log WARN "cached config failed --check-config; not booting from it"
         return 1
     fi
+    log WARN "$failure_reason; falling back to last-known-good $CACHE_PATH"
+    log WARN "env-derived config changes since that pull will NOT apply this boot"
+    # A failed install can still leave a torn $CONFIG_PATH (disk full
+    # mid-copy); the ladder's remaining rungs re-validate whatever is on
+    # disk, so a torn file is caught rather than booted.
+    cp "$CACHE_PATH" "$CONFIG_PATH" || return 1
     return 0
 }
 
@@ -414,10 +428,13 @@ if try_cache_boot; then
 fi
 
 # No usable cache — a fresh node's first boot, or a cache that failed its
-# guards (a failed guard may have left cache bytes in $CONFIG_PATH, which is
-# why this restores from the snapshot rather than trusting the file). Boot
-# the static config the entrypoint just wrote: byte-for-byte what this node
-# would run without the registry feature. Refusing here would make L1 RPC
+# guards or validation (both leave $CONFIG_PATH untouched: the cache is
+# validated at its own path before install). The file can still be dirty
+# here from a bad MERGE (fc leaves rejected merged content in place) or a
+# cache install that died mid-copy, which is why this restores from the
+# snapshot rather than trusting the file. Boot the static config the
+# entrypoint just wrote: byte-for-byte what this node would run without
+# the registry feature. Refusing here would make L1 RPC
 # reachability a boot prerequisite for every fresh validator — and would
 # crash-loop the whole fleet while fc still lacks baked-in registry
 # addresses. The entrypoints still ship complete static
@@ -433,12 +450,14 @@ if [[ -n "$static_tmp" ]] && cp "$static_tmp" "$CONFIG_PATH" && check_config; th
 fi
 
 # Last rung: no snapshot (unwritable TMPDIR — the disk pressure that often
-# accompanies the RPC failures that land us here). fc writes config.toml
-# atomically, so after a FAILED pull the file is still the pristine static
-# config; after a successful pull whose merge failed validation it is the
-# merged content, which this same check just rejected and rejects again.
-# Validating in place therefore boots exactly the configs the snapshot rung
-# would have, without depending on the copy.
+# accompanies the RPC failures that land us here). What can $CONFIG_PATH
+# hold now? After a FAILED pull, the pristine static config (fc writes
+# atomically) — the cache rung validates before installing, so a rejected
+# cache never reaches this file. After a successful pull whose merge failed
+# validation, the merged content, which this same check just rejected and
+# rejects again. After a cache install that died mid-copy, a torn file,
+# which this check refuses. Validating in place therefore boots exactly
+# the configs the snapshot rung would have, without depending on the copy.
 if check_config; then
     log WARN "$failure_reason; no snapshot available but $CONFIG_PATH validates as written; booting it WITHOUT registry-managed keys"
     record_fallback_boot
