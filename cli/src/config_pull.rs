@@ -6,7 +6,10 @@
 //! the consumer side: it replaces exactly three keys in the local file —
 //! `consensus.validator_sets`, `gossip.bootstrap_peers`, `gossip.direct_peers` —
 //! and leaves every other key's *value*, `consensus.private_key` above all,
-//! untouched. The file's *formatting* does not survive: the merge parses into
+//! untouched. One opt-out: with `--accept-local-bootstrap-peers-config`, a
+//! non-empty local `gossip.bootstrap_peers` is treated as operator-managed and
+//! survives the merge (see `splice_managed_keys`); by default the registry's
+//! list replaces it like the other managed keys. The file's *formatting* does not survive: the merge parses into
 //! `toml::Table` and re-serializes, so the first pull strips comments and
 //! re-sorts keys alphabetically. Operators who keep annotations in
 //! `config.toml`, or tooling that greps it by shape, must not point this
@@ -82,6 +85,16 @@ pub struct ConfigPullArgs {
     /// (consensus.private_key is shown redacted).
     #[arg(long)]
     dry_run: bool,
+
+    /// Keep a non-empty `gossip.bootstrap_peers` already enumerated in the
+    /// local config instead of adopting the registry's list — for operators
+    /// managing their own bootstrap topology (e.g. private addresses the
+    /// registry's public list cannot carry). Without this flag, or when the
+    /// local list is empty or absent, the registry's list applies.
+    /// `consensus.validator_sets` and `gossip.direct_peers` are always taken
+    /// from the registry regardless.
+    #[arg(long)]
+    accept_local_bootstrap_peers_config: bool,
 }
 
 /// Mirrors `ValidatorSetConfig` in `snapchain/src/consensus/consensus.rs`.
@@ -173,7 +186,11 @@ pub async fn run(args: ConfigPullArgs, network: NetworkArg) -> Result<(), BoxedE
         toml::from_str(&rendered).map_err(|e| format!("registry returned invalid TOML: {e}"))?;
     validate_onchain(&onchain)?;
 
-    splice_managed_keys(&mut local, &onchain)?;
+    splice_managed_keys(
+        &mut local,
+        &onchain,
+        args.accept_local_bootstrap_peers_config,
+    )?;
 
     let merged =
         toml::to_string(&local).map_err(|e| format!("cannot serialize merged config: {e}"))?;
@@ -694,11 +711,28 @@ fn validate_onchain(onchain: &toml::Table) -> Result<(), BoxedError> {
     Ok(())
 }
 
-/// Replace the three managed keys in `local` with the values from `onchain`,
+/// Replace the managed keys in `local` with the values from `onchain`,
 /// splicing the parsed values directly so the write-back carries exactly what
 /// the registry rendered. An empty peer string is a value, not "unset" (spec
 /// §2.4) — it replaces like any other.
-fn splice_managed_keys(local: &mut toml::Table, onchain: &toml::Table) -> Result<(), BoxedError> {
+///
+/// `accept_local_bootstrap_peers` is the `--accept-local-bootstrap-peers-config`
+/// opt-out: when set, a local config that already enumerates a non-empty
+/// `gossip.bootstrap_peers` belongs to an operator managing that list
+/// themselves (e.g. private addresses the registry's public list cannot
+/// carry), and it survives the merge. An absent key or an empty/
+/// whitespace-only string still adopts the registry list even with the flag,
+/// and without the flag the registry replaces the list unconditionally — the
+/// default keeps every node converging on the registry's canonical peers.
+/// `consensus.validator_sets` (consensus membership) and `gossip.direct_peers`
+/// are registry-authoritative either way. The registry document must carry
+/// all three keys in every mode — a document missing one is malformed and
+/// fails the pull.
+fn splice_managed_keys(
+    local: &mut toml::Table,
+    onchain: &toml::Table,
+    accept_local_bootstrap_peers: bool,
+) -> Result<(), BoxedError> {
     const MANAGED: [(&str, &str); 3] = [
         ("consensus", "validator_sets"),
         ("gossip", "bootstrap_peers"),
@@ -711,6 +745,21 @@ fn splice_managed_keys(local: &mut toml::Table, onchain: &toml::Table) -> Result
             .and_then(|t| t.get(key))
             .ok_or_else(|| format!("registry document is missing {table}.{key}"))?
             .clone();
+        if accept_local_bootstrap_peers && (table, key) == ("gossip", "bootstrap_peers") {
+            let enumerated = local
+                .get(table)
+                .and_then(|t| t.as_table())
+                .and_then(|t| t.get(key))
+                .is_some_and(|v| match v.as_str() {
+                    Some(s) => !s.trim().is_empty(),
+                    // A non-string value is operator data too (and a loader
+                    // error the node will report); never silently clobber it.
+                    None => true,
+                });
+            if enumerated {
+                continue;
+            }
+        }
         let target = local
             .entry(table.to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -746,12 +795,17 @@ direct_peers = "12D3KooWGmXDC2SfjSG7h7DchyVJHMB4GpA8JYpHf9iwz8L8BFqB"
         toml::from_str(ONCHAIN).unwrap()
     }
 
-    /// Validate + splice + serialize + re-parse, the same path `run` takes.
+    /// Validate + splice + serialize + re-parse, the same path `run` takes
+    /// with default flags.
     fn merge(local: &str) -> toml::Table {
+        merge_with(local, false)
+    }
+
+    fn merge_with(local: &str, accept_local_bootstrap_peers: bool) -> toml::Table {
         let mut local: toml::Table = toml::from_str(local).unwrap();
         let onchain = onchain_table();
         validate_onchain(&onchain).unwrap();
-        splice_managed_keys(&mut local, &onchain).unwrap();
+        splice_managed_keys(&mut local, &onchain, accept_local_bootstrap_peers).unwrap();
         let rendered = toml::to_string(&local).unwrap();
         toml::from_str(&rendered).unwrap()
     }
@@ -779,6 +833,8 @@ direct_peers = "12D3KooWGmXDC2SfjSG7h7DchyVJHMB4GpA8JYpHf9iwz8L8BFqB"
 
     #[test]
     fn merges_over_existing_gossip_table() {
+        // Default mode: an enumerated local bootstrap list is replaced like
+        // every other managed key.
         let merged = merge(&format!(
             r#"
 l1_rpc_url = "https://example.invalid/rpc"
@@ -798,6 +854,83 @@ direct_peers = ""
             merged["gossip"]["address"].as_str().unwrap(),
             "/ip4/0.0.0.0/udp/3382/quic-v1"
         );
+    }
+
+    #[test]
+    fn flag_keeps_enumerated_bootstrap_peers() {
+        // --accept-local-bootstrap-peers-config: a non-empty local bootstrap
+        // list is operator-managed and survives, while validator_sets and
+        // direct_peers stay registry-authoritative in the same merge.
+        let merged = merge_with(
+            &format!(
+                r#"
+[consensus]
+private_key = "{PRIVATE_KEY}"
+
+[gossip]
+bootstrap_peers = "/ip4/9.9.9.9/udp/3382/quic-v1"
+direct_peers = "12D3KooOldPeerThatMustGo"
+"#
+            ),
+            true,
+        );
+        assert_eq!(
+            merged["gossip"]["bootstrap_peers"].as_str().unwrap(),
+            "/ip4/9.9.9.9/udp/3382/quic-v1"
+        );
+        assert!(merged["gossip"]["direct_peers"]
+            .as_str()
+            .unwrap()
+            .starts_with("12D3KooWGmX"));
+        assert_eq!(
+            merged["consensus"]["validator_sets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn flag_still_adopts_registry_when_local_list_is_blank() {
+        // Empty or whitespace-only = not enumerated, even with the flag.
+        for blank in ["\"\"", "\"  \""] {
+            let merged = merge_with(
+                &format!(
+                    r#"
+[consensus]
+private_key = "{PRIVATE_KEY}"
+
+[gossip]
+bootstrap_peers = {blank}
+"#
+                ),
+                true,
+            );
+            assert_managed_keys_applied(&merged);
+        }
+    }
+
+    #[test]
+    fn flag_keeps_non_string_bootstrap_peers_for_the_loader_to_reject() {
+        // Wrong-typed operator data is still operator data under the flag:
+        // leave it in place so `snapchain --check-config` reports the real
+        // error instead of the merge silently papering over it. Without the
+        // flag it is replaced like any other value.
+        let raw = r#"
+[gossip]
+bootstrap_peers = ["/ip4/9.9.9.9/udp/3382/quic-v1"]
+"#;
+        let onchain = onchain_table();
+        validate_onchain(&onchain).unwrap();
+
+        let mut local: toml::Table = toml::from_str(raw).unwrap();
+        splice_managed_keys(&mut local, &onchain, true).unwrap();
+        assert!(local["gossip"]["bootstrap_peers"].is_array());
+
+        let mut local: toml::Table = toml::from_str(raw).unwrap();
+        splice_managed_keys(&mut local, &onchain, false).unwrap();
+        assert!(local["gossip"]["bootstrap_peers"].is_str());
     }
 
     #[test]
@@ -865,8 +998,14 @@ bootstrap_peers = "x"
         )
         .unwrap();
         validate_onchain(&onchain_empty_peers).unwrap();
-        splice_managed_keys(&mut local, &onchain_empty_peers).unwrap();
+        splice_managed_keys(&mut local, &onchain_empty_peers, false).unwrap();
         assert_eq!(local["gossip"]["direct_peers"].as_str(), Some(""));
+        // Default mode: the local bootstrap list is replaced like any other
+        // managed key (--accept-local-bootstrap-peers-config would keep it).
+        assert!(local["gossip"]["bootstrap_peers"]
+            .as_str()
+            .unwrap()
+            .starts_with("/ip4/10.0.0.148"));
     }
 
     #[test]
