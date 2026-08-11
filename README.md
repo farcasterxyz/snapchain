@@ -178,6 +178,14 @@ After setting up your Rust toolchain above, you can run tests with:
 cargo test
 ```
 
+The onchain-config shell scripts have their own stub-based suites, which are
+deliberately not part of CI — run them by hand after touching the scripts:
+
+```
+./scripts/apply-onchain-config-test.sh
+./scripts/onchain-config-watch-test.sh
+```
+
 ### Running the Application
 
 For development, you can run multiple nodes by running:

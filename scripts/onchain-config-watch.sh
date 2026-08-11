@@ -63,6 +63,10 @@
 #
 # Usage: onchain-config-watch.sh [config-path]   (default: config.toml)
 #
+# Tested by the sibling onchain-config-watch-test.sh — self-contained and
+# stub-based (fc/snapchain/date/sleep all stubbed), so it runs anywhere bash
+# does, but it is NOT wired into CI: run it by hand after any change here.
+#
 # Environment (set/inherited from apply-onchain-config.sh at spawn):
 #   ONCHAIN_WATCH_NETWORK    Network derived by the apply script at boot
 #                            (required; the value the node actually runs with

@@ -13,6 +13,10 @@
 #
 # Usage: apply-onchain-config.sh [config-path]   (default: config.toml)
 #
+# Tested by the sibling apply-onchain-config-test.sh — self-contained and
+# stub-based, so it runs anywhere bash does, but it is NOT wired into CI:
+# run it by hand after any change to this file.
+#
 # Environment:
 #   ONCHAIN_CONFIG_ENABLED   On by default (unset or empty runs the pull), so
 #                            the fleet converges by image upgrade alone.
