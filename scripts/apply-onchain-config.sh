@@ -37,6 +37,20 @@
 #                            is on Sepolia; the config's l1_rpc_url must stay on
 #                            Ethereum mainnet for ENS). On mainnet fc falls back
 #                            to l1_rpc_url from the config file.
+#   ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS
+#                            "true"/"1" passes --accept-local-bootstrap-peers-config
+#                            to every pull (boot and watcher alike), keeping a
+#                            bootstrap list enumerated in the local config —
+#                            e.g. private addresses the registry's public list
+#                            cannot carry — instead of adopting the registry's.
+#                            Unset/empty/"false"/"0" adopts the registry list
+#                            (the default every public node should keep). Any
+#                            other value refuses to boot, like a typo'd
+#                            ONCHAIN_CONFIG_ENABLED. The watcher inherits this
+#                            and MUST pull with the same flag: comparing a
+#                            differently-merged document would see every
+#                            peer-only registry write as a change and restart
+#                            for nothing.
 #   ONCHAIN_CONFIG_CACHE     Path for the last-known-good merged config. Must be
 #                            on a volume — config.toml itself lives in the
 #                            container's writable layer and is rewritten every
@@ -114,6 +128,17 @@ case "${ONCHAIN_CONFIG_ENABLED:-}" in
         ;;
 esac
 
+# Same strict parse as ONCHAIN_CONFIG_ENABLED: this knob decides which peer
+# list a validator dials, so a typo must fail loudly, not silently pick one.
+case "${ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS:-}" in
+    "" | false | 0) accept_local_peers="" ;;
+    true | 1) accept_local_peers=1 ;;
+    *)
+        log ERROR "unrecognized ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS='${ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS}' (use true/1 or false/0); refusing to boot rather than guess"
+        exit 1
+        ;;
+esac
+
 if [[ ! -f "$CONFIG_PATH" ]]; then
     log ERROR "config file not found: $CONFIG_PATH"
     exit 1
@@ -168,6 +193,9 @@ if [[ -n "${ONCHAIN_CONFIG_REGISTRY:-}" ]]; then
 fi
 if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
     pull_args+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
+fi
+if [[ -n "$accept_local_peers" ]]; then
+    pull_args+=(--accept-local-bootstrap-peers-config)
 fi
 
 # stdout dropped ("config OK" is a bare-text line in a JSON log stream);

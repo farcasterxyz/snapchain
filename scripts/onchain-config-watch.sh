@@ -78,7 +78,17 @@
 #                            (fallback boots) -> 0; the first successful pull
 #                            re-derives the truth by content comparison.
 #   ONCHAIN_CONFIG_REGISTRY, ONCHAIN_CONFIG_RPC_URL,
-#   FC_BIN, SNAPCHAIN_BIN    Same contract as apply-onchain-config.sh.
+#   ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS,
+#   FC_BIN, SNAPCHAIN_BIN    Same contract as apply-onchain-config.sh. The
+#                            accept-local-bootstrap-peers knob MUST match the
+#                            boot pull's (it is inherited from the spawning
+#                            script, so it does): pulling with a different
+#                            flag would merge a different document than the
+#                            one running, and every peer-only registry write
+#                            would look like a change and restart the node
+#                            for nothing. Lenient parse here (any non-empty
+#                            value other than false/0 enables): the apply
+#                            script already refused to boot on garbage.
 #   ONCHAIN_CONFIG_POLL_INTERVAL   Seconds between polls (default 300).
 #   ONCHAIN_CONFIG_STAGGER_WINDOW  Per-node restart window W in seconds
 #                            (default 900). Must exceed a full stop + boot +
@@ -402,6 +412,10 @@ fi
 if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
     REGISTRY_ARGS+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
 fi
+case "${ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS:-}" in
+    "" | false | 0) ;;
+    *) REGISTRY_ARGS+=(--accept-local-bootstrap-peers-config) ;;
+esac
 
 if [[ -n "${ONCHAIN_CONFIG_WATCH_ONCE:-}" ]]; then
     # Same error semantics as the production loop below: `|| log` suppresses
