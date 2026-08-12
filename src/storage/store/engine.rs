@@ -2720,7 +2720,7 @@ impl ShardEngine {
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
-                    panic!("State change commit failed: {}", err);
+                    return;
                 }
                 Ok((events, max_block_event_seqnum)) => {
                     self.commit_and_emit_events(shard_chunk, events, max_block_event_seqnum, txn)
