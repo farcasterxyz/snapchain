@@ -56,12 +56,12 @@ sol! {
 /// coincidence. Devnet deployments are ephemeral and always need `--registry`.
 fn baked_in_registry(network: NetworkArg) -> Option<Address> {
     match network {
-        // Deliberately unset even though the CREATE2 address is known:
-        // baking it would make the L1 contract deploy the act that starts
-        // mainnet pulls fleet-wide (the pull is on by default in the deploy
-        // scripts). Fill it in at the mainnet cutover, after the one-node
-        // dry-run gate — not before the L1 registry exists and is verified.
-        NetworkArg::Mainnet => None,
+        // The pull is on by default in the deploy scripts, so changing a
+        // baked address changes what an entire fleet pulls on next boot —
+        // verify any new deployment against a live node config first.
+        NetworkArg::Mainnet => Some(alloy_primitives::address!(
+            "00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
+        )),
         NetworkArg::Testnet => Some(alloy_primitives::address!(
             "00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
         )),
@@ -572,11 +572,11 @@ fn resolve_registry(flag: Option<&str>, network: NetworkArg) -> Result<Address, 
     baked_in_registry(network).ok_or_else(|| {
         match network {
             NetworkArg::Devnet => "devnet has no baked-in registry; pass --registry",
-            NetworkArg::Mainnet => {
-                "the mainnet registry address is not baked in until the mainnet cutover; \
-                 pass --registry"
+            // Unreachable while both networks have baked addresses; kept for
+            // match exhaustiveness (and correctness if one is ever unbaked).
+            NetworkArg::Mainnet | NetworkArg::Testnet => {
+                "no baked-in registry for this network; pass --registry"
             }
-            NetworkArg::Testnet => "no baked-in registry for this network; pass --registry",
         }
         .into()
     })
@@ -945,17 +945,13 @@ mod tests {
     fn baked_in_registry_addresses() {
         // Pinned against the checksummed string (not the macro literal) so a
         // typo in either spelling fails the test. One CREATE2 address serves
-        // both chains; only testnet is baked in — mainnet stays None until
-        // its cutover, devnet permanently requires --registry.
-        assert_eq!(
-            baked_in_registry(NetworkArg::Testnet),
-            Some(
-                "0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
-                    .parse::<Address>()
-                    .unwrap()
-            )
-        );
-        assert_eq!(baked_in_registry(NetworkArg::Mainnet), None);
+        // both chains — the deploy was verified bytecode-identical on L1 and
+        // Sepolia; devnet permanently requires --registry.
+        let canonical = "0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85"
+            .parse::<Address>()
+            .unwrap();
+        assert_eq!(baked_in_registry(NetworkArg::Mainnet), Some(canonical));
+        assert_eq!(baked_in_registry(NetworkArg::Testnet), Some(canonical));
         assert_eq!(baked_in_registry(NetworkArg::Devnet), None);
     }
 
