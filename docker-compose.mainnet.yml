@@ -18,6 +18,11 @@ services:
       ONCHAIN_CONFIG_ENABLED: "${ONCHAIN_CONFIG_ENABLED:-}"
       ONCHAIN_CONFIG_REGISTRY: "${ONCHAIN_CONFIG_REGISTRY:-}"
       ONCHAIN_CONFIG_RPC_URL: "${ONCHAIN_CONFIG_RPC_URL:-}"
+      # Validators whose bootstrap peers are private addresses the registry's
+      # public list can't carry (e.g. VPC-internal) set this to true to keep a
+      # non-empty local gossip.bootstrap_peers through the merge;
+      # validator_sets and direct_peers stay registry-managed either way.
+      ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS: "${ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS:-}"
     entrypoint:
       - "/bin/bash"
       - "-c"
