@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.2] - 2026-08-13
+
+### 🚀 Features
+
+- *(cli)* `fc config pull` — merge onchain-managed config from SnapchainConfigRegistry (#1002)
+- Rollout safety — version-gated restart, stagger, rollback, default-on (#1007)
+- *(scripts)* Env knob for the bootstrap-peers opt-out flag (#1011)
+- *(cli)* Bake the canonical mainnet registry address (#1022)
+
+### 🐛 Bug Fixes
+
+- *(compose)* Thread the accept-local-bootstrap-peers knob through environment (#1012)
+
+### 💼 Other
+
+- Apply-onchain-config.sh plus image and compose wiring (#1005)
+
 ## [0.14.1] - 2026-08-06
 
 ### 🚀 Features
