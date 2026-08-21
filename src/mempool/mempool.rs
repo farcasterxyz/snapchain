@@ -324,9 +324,14 @@ impl ValidatorMessageMempoolExt for proto::ValidatorMessage {
                 hex::encode(&onchain_event.transaction_hash) + &onchain_event.log_index.to_string(),
             )
         } else if let Some(fname_transfer) = &self.fname_transfer {
+            let timestamp = fname_transfer
+                .proof
+                .as_ref()
+                .map(|p| p.timestamp)
+                .unwrap_or(0);
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
-                fname_transfer.proof.as_ref().unwrap().timestamp,
+                timestamp,
                 fname_transfer.id.to_string(),
             )
         } else if let Some(block_event) = &self.block_event {
