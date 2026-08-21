@@ -170,7 +170,7 @@ impl Proposer for ShardProposer {
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
             Some(chunk) => chunk.hash.clone(),
-            None => vec![0, 32],
+            None => vec![0; 32],
         };
 
         let state_change =
