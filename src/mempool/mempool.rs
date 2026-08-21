@@ -307,7 +307,7 @@ impl MessageMempoolExt for proto::Message {
                 self.hex_hash(),
             );
         }
-        todo!();
+        MempoolKey::new(MempoolMessageKind::UserMessage, 0, self.hex_hash())
     }
 }
 
@@ -326,7 +326,7 @@ impl ValidatorMessageMempoolExt for proto::ValidatorMessage {
         } else if let Some(fname_transfer) = &self.fname_transfer {
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
-                fname_transfer.proof.as_ref().unwrap().timestamp,
+                fname_transfer.proof.as_ref().map(|p| p.timestamp).unwrap_or(0),
                 fname_transfer.id.to_string(),
             )
         } else if let Some(block_event) = &self.block_event {

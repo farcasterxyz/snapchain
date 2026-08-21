@@ -170,7 +170,7 @@ impl Proposer for ShardProposer {
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
             Some(chunk) => chunk.hash.clone(),
-            None => vec![0, 32],
+            None => vec![0; 32],
         };
 
         let state_change =
@@ -582,10 +582,11 @@ impl Proposer for BlockProposer {
             let header = block.header.as_ref().unwrap();
             let height = header.height.unwrap();
 
-            if height != self.get_confirmed_height().increment() {
+            let confirmed_height = self.get_confirmed_height();
+            if height != confirmed_height.increment() {
                 warn!(
                     shard = height.shard_index,
-                    our_height = height.block_number,
+                    our_height = confirmed_height.block_number,
                     proposal_height = height.block_number,
                     "Cannot validate height, not the next height"
                 );
