@@ -47,7 +47,7 @@ RUN target/release/setup_local_testnet --docker --admin-rpc-auth dev:dev
 
 #################################################################################
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # Easier debugging within container
 ARG GRPCURL_VERSION=1.9.1
