@@ -2245,7 +2245,7 @@ impl BlockEngine {
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
-                    panic!("State change commit failed: {}", err);
+                    return;
                 }
                 Ok(()) => {
                     self.db.commit(txn).unwrap();
