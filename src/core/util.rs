@@ -5,7 +5,6 @@ use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
 use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
-use itertools::Itertools;
 use tracing::error;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
@@ -104,23 +103,39 @@ pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValida
 
     let validator_set = validator_sets.get_validator_set(certificate.height.as_u64());
 
-    let mut expected_pubkeys = validator_set
+    let expected_pubkeys: Vec<[u8; 32]> = validator_set
         .validators
         .iter()
-        .map(|validator| validator.public_key.to_bytes());
+        .map(|validator| validator.public_key.to_bytes())
+        .collect();
 
     if !ThresholdParams::default().quorum.is_met(
         certificate.aggregated_signature.signatures.len() as u64,
         expected_pubkeys.len() as u64,
     ) {
-        error!(%certificate.height, "Block did not have quorum");
+        error!(
+            %certificate.height,
+            num_signatures_in_commits = commits.signatures.len(),
+            num_signatures_in_certificate = certificate.aggregated_signature.signatures.len(),
+            num_validators = expected_pubkeys.len(),
+            expected_validators = ?expected_pubkeys.iter().map(|v| hex::encode(v)).collect::<Vec<_>>(),
+            actual_signers_in_commits = ?commits.signatures.iter().map(|s| hex::encode(&s.signer)).collect::<Vec<_>>(),
+            actual_signers_in_certificate = ?certificate.aggregated_signature.signatures.iter().map(|s| hex::encode(&s.address.0)).collect::<Vec<_>>(),
+            "Block did not have quorum"
+        );
         return false;
     }
 
-    for signature in certificate.aggregated_signature.signatures {
+    for signature in &certificate.aggregated_signature.signatures {
         let address_bytes = &signature.address.0;
         if !expected_pubkeys.contains(address_bytes) {
-            error!(%certificate.height, "Block contained signatures from unexpected signers");
+            error!(
+                %certificate.height,
+                unexpected_signer = hex::encode(address_bytes),
+                expected_validators = ?expected_pubkeys.iter().map(|v| hex::encode(v)).collect::<Vec<_>>(),
+                actual_signers = ?certificate.aggregated_signature.signatures.iter().map(|s| hex::encode(&s.address.0)).collect::<Vec<_>>(),
+                "Block contained signatures from unexpected signers"
+            );
             return false;
         }
 
@@ -133,7 +148,13 @@ pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValida
 
         let public_key = PublicKey::try_from_bytes(address_bytes).unwrap();
         if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
-            error!(%certificate.height, "Block contained invalid signatures");
+            error!(
+                %certificate.height,
+                invalid_signer = hex::encode(address_bytes),
+                expected_validators = ?expected_pubkeys.iter().map(|v| hex::encode(v)).collect::<Vec<_>>(),
+                actual_signers = ?certificate.aggregated_signature.signatures.iter().map(|s| hex::encode(&s.address.0)).collect::<Vec<_>>(),
+                "Block contained invalid signatures"
+            );
             return false;
         }
     }
