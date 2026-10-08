@@ -5,10 +5,14 @@ use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use parking_lot::Mutex;
 use serial_test::serial;
-use snapchain::connectors::onchain_events::ChainClients;
+use snapchain::connectors::onchain_events::{Chain, ChainAPI, ChainClients, EnsError};
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
+use snapchain::core::validations::error::ValidationError;
+use snapchain::core::validations::verification::VerificationAddressClaim;
 use snapchain::mempool::block_receiver::{self, BlockReceiver};
+use snapchain::mempool::l1_gate::{self, GossipL1Gate};
+use snapchain::mempool::l1_validator::L1Validator;
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource, ReadNodeMempool,
 };
@@ -25,7 +29,7 @@ use snapchain::proto::{
 };
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{
-    get_gasless_key_record, CastStore, OnchainEventStore, UserDataStore,
+    get_gasless_key_record, CastStore, OnchainEventStore, UserDataStore, VerificationStore,
 };
 use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::mempool_poller::MempoolMessage;
@@ -109,6 +113,62 @@ where
         }
 
         tokio::time::sleep(tick).await;
+    }
+}
+
+/// Stand-in for the L1/Base RPCs a validator consults for ENS ownership and
+/// ERC-1271 contract signatures. Tests seed it with the on-chain state that
+/// genuine messages rely on; anything not seeded fails the check, as an
+/// unresolvable name or a rejected `isValidSignature` would on a real chain.
+#[derive(Default)]
+struct MockChainState {
+    ens_names: Mutex<HashMap<String, Vec<u8>>>,
+    /// `(contract address, claim signature)` pairs the contract accepts.
+    contract_signatures: Mutex<HashSet<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl MockChainState {
+    fn set_ens_owner(&self, name: &str, owner: Vec<u8>) {
+        self.ens_names.lock().insert(name.to_string(), owner);
+    }
+
+    fn accept_contract_signature(&self, address: Vec<u8>, claim_signature: Vec<u8>) {
+        self.contract_signatures
+            .lock()
+            .insert((address, claim_signature));
+    }
+
+    fn chain_clients(self: &Arc<Self>) -> ChainClients {
+        let mut chain_api_map: HashMap<Chain, Box<dyn ChainAPI>> = HashMap::new();
+        for chain in [Chain::EthMainnet, Chain::BaseMainnet] {
+            chain_api_map.insert(chain, Box::new(MockChainClient(self.clone())));
+        }
+        ChainClients { chain_api_map }
+    }
+}
+
+struct MockChainClient(Arc<MockChainState>);
+
+#[async_trait::async_trait]
+impl ChainAPI for MockChainClient {
+    async fn resolve_ens_name(&self, name: String) -> Result<alloy_primitives::Address, EnsError> {
+        match self.0.ens_names.lock().get(&name) {
+            Some(owner) => Ok(alloy_primitives::Address::from_slice(owner)),
+            None => Err(EnsError::ResolverNotFound(name)),
+        }
+    }
+
+    async fn verify_contract_signature(
+        &self,
+        _claim: VerificationAddressClaim,
+        body: &proto::VerificationAddAddressBody,
+    ) -> Result<(), ValidationError> {
+        let key = (body.address.clone(), body.claim_signature.clone());
+        if self.0.contract_signatures.lock().contains(&key) {
+            Ok(())
+        } else {
+            Err(ValidationError::InvalidSignature)
+        }
     }
 }
 
@@ -212,6 +272,10 @@ struct NodeForTest {
     /// to assert the periodic self-heal sweep disconnected an unhealthy
     /// direct peer.
     direct_peer_force_bounce_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Lifetime count of gossiped messages this validator's L1 gate rejected
+    /// on their L1 check. Tests poll this to assert a forged message reached
+    /// the gate and was refused, rather than inferring it from absence.
+    l1_rejection_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Node for NodeForTest {
@@ -426,6 +490,7 @@ impl NodeForTest {
         shards_data_dir: Option<String>,
         keep_db_on_drop: bool,
         direct_peers: Option<String>,
+        chain_state: Arc<MockChainState>,
     ) -> Self {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -554,6 +619,24 @@ impl NodeForTest {
         let handle = tokio::spawn(async move { mempool.run().await });
         join_handles.push(handle);
 
+        let l1_validator = Arc::new(L1Validator::new(
+            chain_state.chain_clients(),
+            node.shard_stores.clone(),
+            Box::new(routing::ShardRouter {}),
+            num_shards,
+            fc_network,
+            l1_gate::Config::default().cache_config(),
+        ));
+        let (gossip_l1_gate, gossip_l1_gate_worker) = GossipL1Gate::new(
+            l1_gate::Config::default(),
+            l1_validator.clone(),
+            fc_network,
+            mempool_tx.clone(),
+            statsd_client.clone(),
+        );
+        join_handles.push(tokio::spawn(gossip_l1_gate_worker.run()));
+        let l1_rejection_count = gossip_l1_gate.l1_rejection_count_handle();
+
         let hub_service = Arc::new(MyHubService::new(
             "".to_string(),
             "".to_string(),
@@ -571,9 +654,7 @@ impl NodeForTest {
             Box::new(routing::ShardRouter {}),
             mempool_tx.clone(),
             gossip_tx.clone(),
-            ChainClients {
-                chain_api_map: Default::default(),
-            },
+            l1_validator,
             "".to_string(),
             "".to_string(),
             None,
@@ -622,7 +703,6 @@ impl NodeForTest {
         }
 
         let node_for_dispatch = node.clone();
-        let mempool_tx_for_router = mempool_tx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 if let Some(system_event) = system_rx.recv().await {
@@ -631,13 +711,13 @@ impl NodeForTest {
                             node_for_dispatch.dispatch(event_shard, event);
                         }
                         SystemMessage::Mempool(req) => {
-                            // Mirror main.rs: forward gossip-received mempool
-                            // messages into the local mempool. Without this,
-                            // mempool-gossip propagation between validators is
-                            // not actually exercised by the test harness — the
-                            // cast still propagates via consensus, masking
-                            // bugs in the gossip ingress path.
-                            let _ = mempool_tx_for_router.try_send(req);
+                            // Mirror main.rs: gossip-received mempool messages
+                            // pass the L1 gate into the local mempool. Without
+                            // this, mempool-gossip propagation between
+                            // validators is not actually exercised by the test
+                            // harness — the cast still propagates via
+                            // consensus, masking bugs in the gossip ingress path.
+                            gossip_l1_gate.admit(req);
                         }
                         SystemMessage::BlockRequest {
                             block_event_seqnum,
@@ -671,6 +751,7 @@ impl NodeForTest {
             hub_service,
             boot_resub_done,
             direct_peer_force_bounce_count,
+            l1_rejection_count,
         }
     }
 
@@ -687,6 +768,14 @@ impl NodeForTest {
     /// counter.
     pub fn direct_peer_force_bounce_count(&self) -> u64 {
         self.direct_peer_force_bounce_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-side accessor: lifetime count of gossiped messages rejected by
+    /// their L1 check. Mirrors the `l1_gate.rejected{reason=l1_check_failed}`
+    /// statsd counter.
+    pub fn l1_rejection_count(&self) -> u64 {
+        self.l1_rejection_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -801,6 +890,8 @@ pub struct TestNetwork {
     /// `Some(...)` by `enable_all_to_all_direct_peers` so both `start` and
     /// `restart` carry the same config across the validator's lifetime.
     direct_peers_per_node: Vec<Option<String>>,
+    /// L1/Base state shared by every validator's chain clients.
+    chain_state: Arc<MockChainState>,
 }
 
 /// Derives a libp2p `PeerId` from a snapchain `Keypair` by going through
@@ -890,6 +981,7 @@ impl TestNetwork {
             read_nodes: vec![],
             test_fids: HashMap::new(),
             direct_peers_per_node: vec![None; num_validator_nodes as usize],
+            chain_state: Arc::new(MockChainState::default()),
         }
     }
 
@@ -957,6 +1049,7 @@ impl TestNetwork {
             None,
             false,
             direct_peers,
+            self.chain_state.clone(),
         )
         .await;
         // Pad the slot vector if needed and place the node at its assigned index.
@@ -1016,6 +1109,7 @@ impl TestNetwork {
             None,
             false,
             direct_peers,
+            self.chain_state.clone(),
         )
         .await;
         while self.nodes.len() <= index {
@@ -1065,6 +1159,7 @@ impl TestNetwork {
             Some(shards_data_dir),
             false, // resume's lifetime ends with the test, default cleanup is fine
             direct_peers,
+            self.chain_state.clone(),
         )
         .await;
         while self.nodes.len() <= index {
@@ -1227,6 +1322,18 @@ impl TestNetwork {
     }
 
     pub async fn register_fid(&mut self, fid: u64) {
+        self.register_fid_via(fid, false).await;
+    }
+
+    /// Like `register_fid`, but submits the registration to every live
+    /// validator's mempool rather than only the first. Shard 0 then merges it
+    /// no matter which validator proposes, so `wait_for_fid_on_block_engine`
+    /// does not depend on validator 0 winning a shard-0 proposal.
+    pub async fn register_fid_on_all_validators(&mut self, fid: u64) {
+        self.register_fid_via(fid, true).await;
+    }
+
+    async fn register_fid_via(&mut self, fid: u64, all_validators: bool) {
         let signer = factory::signers::generate_signer();
         let address = factory::address::generate_random_address();
 
@@ -1255,22 +1362,28 @@ impl TestNetwork {
             ),
         ];
 
-        for event in on_chain_events {
-            let result = self
-                .first_live_node()
-                .add_message(
-                    MempoolMessage::OnchainEvent(event),
-                    MempoolSource::Local,
-                    None,
-                )
-                .await;
+        let nodes: Vec<&NodeForTest> = if all_validators {
+            self.live_nodes().collect()
+        } else {
+            vec![self.first_live_node()]
+        };
+        for node in nodes {
+            for event in on_chain_events.iter() {
+                let result = node
+                    .add_message(
+                        MempoolMessage::OnchainEvent(event.clone()),
+                        MempoolSource::Local,
+                        None,
+                    )
+                    .await;
 
-            assert!(
-                result.is_ok(),
-                "Failed to register FID {}: {:?}",
-                fid,
-                result.err()
-            );
+                assert!(
+                    result.is_ok(),
+                    "Failed to register FID {}: {:?}",
+                    fid,
+                    result.err()
+                );
+            }
         }
 
         self.test_fids.insert(fid, (signer, address));
@@ -3111,5 +3224,271 @@ async fn test_direct_peers_restart_recovery() {
         );
     }
 
+    assert_blocks_match_across_validators(&network);
+}
+
+/// Reads the by-name ENS proof over gRPC, returning it only once every live
+/// validator answers with the identical proof.
+async fn ens_proof_via_grpc(network: &TestNetwork, name: &str) -> Option<proto::UserNameProof> {
+    let mut agreed: Option<proto::UserNameProof> = None;
+    for node in network.live_nodes() {
+        let mut client = node.client().await;
+        let proof = client
+            .get_username_proof(proto::UsernameProofRequest {
+                name: name.as_bytes().to_vec(),
+            })
+            .await
+            .ok()?
+            .into_inner();
+        match &agreed {
+            None => agreed = Some(proof),
+            Some(existing) if *existing == proof => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// Publishes `message` through the read node's mempool, which re-broadcasts it
+/// over mempool gossip, until `committed` holds or 30s pass. Early publishes can
+/// race gossipsub mesh formation, hence the resubmission.
+async fn gossip_until<F, Fut>(network: &TestNetwork, message: &proto::Message, committed: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let read_node = network.read_nodes.first().expect("read node started");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let _ = read_node.submit_message_via_mempool(message.clone()).await;
+        if committed().await {
+            return true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+    false
+}
+
+/// Publishes `forged` over gossip until every validator's L1 gate has rejected
+/// it, then waits for a block on every shard so that a copy admitted by any
+/// other path would have had a chance to merge before the caller checks.
+async fn gossip_until_rejected_by_every_validator(network: &TestNetwork, forged: &proto::Message) {
+    let baselines: Vec<u64> = network
+        .live_nodes()
+        .map(|node| node.l1_rejection_count())
+        .collect();
+    let rejected_everywhere = gossip_until(network, forged, || async {
+        network
+            .live_nodes()
+            .zip(&baselines)
+            .all(|(node, baseline)| node.l1_rejection_count() > *baseline)
+    })
+    .await;
+    assert!(
+        rejected_everywhere,
+        "not every validator's L1 gate rejected the forged message"
+    );
+    network.wait_for_next_block_on_all_shards().await;
+}
+
+/// Adapted from the NS-97 disclosure PoC. A `UsernameProof` for an ENS name the
+/// publisher does not own is rejected on gRPC submit, and must be rejected just
+/// the same when published over mempool gossip, since consensus only checks the
+/// name's format.
+#[tokio::test]
+#[serial]
+async fn test_forged_ens_proof_via_gossip_is_rejected() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    // A stolen name replaces the victim's proof in one shard's by-name index,
+    // so both fids must land on the same shard.
+    let router = ShardRouter {};
+    let victim_fid = 20260;
+    let attacker_fid = (20261..20360)
+        .find(|fid| router.route_fid(*fid, num_shards) == router.route_fid(victim_fid, num_shards))
+        .expect("found an attacker fid on the victim's shard");
+
+    // ENS resolves to a 20-byte address, so the victim's genuine proof only
+    // passes the ownership check if their custody is an Ethereum address.
+    let victim_custody = alloy_signer_local::PrivateKeySigner::random();
+    network
+        .register_fid_with_eth_custody(victim_fid, &victim_custody)
+        .await;
+    network.wait_for_fid(victim_fid).await.unwrap();
+    network
+        .register_and_wait_for_fid(attacker_fid)
+        .await
+        .unwrap();
+    network.wait_for_next_block_on_all_shards().await;
+    network.start_read_node().await;
+    let target_height = network.max_block_height();
+    assert!(
+        network.read_wait_for_block(target_height).await.is_some(),
+        "read node did not catch up to validators before submission"
+    );
+
+    let (victim_signer, victim_address) = network.test_fids.get(&victim_fid).unwrap().clone();
+    let (attacker_signer, attacker_address) = network.test_fids.get(&attacker_fid).unwrap().clone();
+    let name = "victim.eth";
+    network
+        .chain_state
+        .set_ens_owner(name, victim_address.clone());
+    let now = factory::time::farcaster_time();
+
+    // Positive control: a genuine proof published the same way does merge, so
+    // the gossip path is live and the L1 check admits what it should.
+    let victim_proof = messages_factory::username_proof::create_username_proof(
+        victim_fid,
+        proto::UserNameType::UsernameTypeEnsL1,
+        name.to_string(),
+        victim_address.clone(),
+        "legit-ens-proof-signature".to_string(),
+        (now - 60) as u64,
+        Some(&victim_signer),
+    );
+    let victim_committed = gossip_until(&network, &victim_proof, || async {
+        ens_proof_via_grpc(&network, name).await.map(|p| p.fid) == Some(victim_fid)
+    })
+    .await;
+    assert!(
+        victim_committed,
+        "victim's genuine ENS proof never committed"
+    );
+
+    // Newer than the victim's proof, so it would win last-writer-wins if merged.
+    let forged_proof = messages_factory::username_proof::create_username_proof(
+        attacker_fid,
+        proto::UserNameType::UsernameTypeEnsL1,
+        name.to_string(),
+        attacker_address.clone(),
+        "garbage-not-an-ens-signature".to_string(),
+        now as u64,
+        Some(&attacker_signer),
+    );
+    assert!(
+        network
+            .first_live_node()
+            .submit_message_via_grpc(forged_proof.clone())
+            .await
+            .is_err(),
+        "gRPC submit unexpectedly accepted the forged ENS proof"
+    );
+
+    gossip_until_rejected_by_every_validator(&network, &forged_proof).await;
+
+    let proof = ens_proof_via_grpc(&network, name)
+        .await
+        .expect("validators disagree on the stored proof");
+    assert_eq!(proof.fid, victim_fid, "forged ENS proof merged via gossip");
+    assert_eq!(proof.owner, victim_address);
+    assert_blocks_match_across_validators(&network);
+}
+
+fn contract_verification_add(
+    fid: u64,
+    address: &[u8],
+    claim_signature: Vec<u8>,
+    signer: &SigningKey,
+) -> proto::Message {
+    messages_factory::create_message_with_data(
+        fid,
+        MessageType::VerificationAddEthAddress,
+        proto::message_data::Body::VerificationAddAddressBody(proto::VerificationAddAddressBody {
+            address: address.to_vec(),
+            claim_signature,
+            block_hash: vec![0x11; 32],
+            verification_type: 1,
+            chain_id: 1,
+            protocol: proto::Protocol::Ethereum as i32,
+        }),
+        None,
+        Some(signer),
+    )
+}
+
+/// Looks for the verification in shard 0 (where verifications route once
+/// `VerificationsOnShardZero` is active) and in every data shard.
+fn has_verification(node: &dyn Node, fid: u64, address: &[u8]) -> bool {
+    let found = |store| {
+        matches!(
+            VerificationStore::get_verification_add(store, fid, address, None),
+            Ok(Some(_))
+        )
+    };
+    found(&node.block_stores().verification_store)
+        || node
+            .shard_stores()
+            .values()
+            .any(|stores| found(&stores.verification_store))
+}
+
+/// A `verification_type = 1` (ERC-1271 contract) verification add whose claim
+/// signature the contract rejects must not merge via mempool gossip: consensus
+/// accepts any contract signature and leaves the check to admission.
+#[tokio::test]
+#[serial]
+async fn test_forged_contract_verification_via_gossip_is_rejected() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    let victim_fid = 20460;
+    let attacker_fid = 20461;
+    for fid in [victim_fid, attacker_fid] {
+        network.register_fid_on_all_validators(fid).await;
+        network.wait_for_fid(fid).await.unwrap();
+        network.wait_for_fid_on_block_engine(fid).await.unwrap();
+    }
+    network.wait_for_next_block_on_all_shards().await;
+    network.start_read_node().await;
+    let target_height = network.max_block_height();
+    assert!(
+        network.read_wait_for_block(target_height).await.is_some(),
+        "read node did not catch up to validators before submission"
+    );
+
+    let (victim_signer, _) = network.test_fids.get(&victim_fid).unwrap().clone();
+    let (attacker_signer, _) = network.test_fids.get(&attacker_fid).unwrap().clone();
+    let contract: Vec<u8> = (0..20).map(|_| rand::random::<u8>()).collect();
+    let genuine_signature = vec![0xab; 65];
+    network
+        .chain_state
+        .accept_contract_signature(contract.clone(), genuine_signature.clone());
+
+    // Positive control: the contract accepts the victim's claim signature.
+    let victim_verification =
+        contract_verification_add(victim_fid, &contract, genuine_signature, &victim_signer);
+    let victim_committed = gossip_until(&network, &victim_verification, || async {
+        network
+            .live_nodes()
+            .all(|node| has_verification(node, victim_fid, &contract))
+    })
+    .await;
+    assert!(
+        victim_committed,
+        "victim's genuine contract verification never committed"
+    );
+
+    let forged_verification =
+        contract_verification_add(attacker_fid, &contract, vec![0xcd; 65], &attacker_signer);
+    assert!(
+        network
+            .first_live_node()
+            .submit_message_via_grpc(forged_verification.clone())
+            .await
+            .is_err(),
+        "gRPC submit unexpectedly accepted the forged contract verification"
+    );
+
+    gossip_until_rejected_by_every_validator(&network, &forged_verification).await;
+
+    for (i, node) in network.live_nodes().enumerate() {
+        assert!(
+            !has_verification(node, attacker_fid, &contract),
+            "validator {i} merged the forged contract verification via gossip"
+        );
+    }
     assert_blocks_match_across_validators(&network);
 }

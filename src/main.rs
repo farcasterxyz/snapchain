@@ -4,6 +4,8 @@ use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::SnapchainValidatorContext;
 use snapchain::mempool::block_receiver::BlockReceiver;
+use snapchain::mempool::l1_gate::GossipL1Gate;
+use snapchain::mempool::l1_validator::L1Validator;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -52,7 +54,7 @@ async fn start_servers(
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     block_stores: BlockStores,
-    chain_clients: ChainClients,
+    l1_validator: Arc<L1Validator>,
     replicator: Option<Arc<replication::replicator::Replicator>>,
     local_state_store: LocalStateStore,
 ) {
@@ -101,7 +103,7 @@ async fn start_servers(
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         gossip_tx,
-        chain_clients,
+        l1_validator,
         VERSION.unwrap_or("unknown").to_string(),
         local_peer_id_str,
         fname_lookup,
@@ -592,6 +594,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None
         };
 
+        let l1_validator = Arc::new(L1Validator::new(
+            chains_clients,
+            node.shard_stores.clone(),
+            Box::new(routing::ShardRouter {}),
+            app_config.consensus.num_shards,
+            app_config.fc_network,
+            app_config.l1_gate.cache_config(),
+        ));
+
         start_servers(
             &app_config,
             local_peer_id_str.clone(),
@@ -604,7 +615,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             node.block_stores.clone(),
-            chains_clients,
+            l1_validator,
             replicator,
             local_state_store.clone(),
         )
@@ -823,6 +834,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        let l1_validator = Arc::new(L1Validator::new(
+            chains_clients,
+            node.shard_stores.clone(),
+            Box::new(routing::ShardRouter {}),
+            app_config.consensus.num_shards,
+            app_config.fc_network,
+            app_config.l1_gate.cache_config(),
+        ));
+        let (gossip_l1_gate, gossip_l1_gate_worker) = GossipL1Gate::new(
+            app_config.l1_gate.clone(),
+            l1_validator.clone(),
+            app_config.fc_network,
+            mempool_tx.clone(),
+            statsd_client.clone(),
+        );
+        tokio::spawn(gossip_l1_gate_worker.run());
+
         start_servers(
             &app_config,
             local_peer_id_str.clone(),
@@ -835,7 +863,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             node.block_stores.clone(),
-            chains_clients,
+            l1_validator,
             replicator,
             local_state_store.clone(),
         )
@@ -905,12 +933,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Forward to appropriate consensus actors
                             node.dispatch(shard, event);
                         },
-                        SystemMessage::Mempool(msg) => {
-                            let res = mempool_tx.try_send(msg);
-                            if let Err(e) = res {
-                                warn!("Failed to add to local mempool: {:?}", e);
-                            }
-                        },
+                        SystemMessage::Mempool(msg) => gossip_l1_gate.admit(msg),
                         SystemMessage::BlockRequest {block_event_seqnum, block_tx } => {
                             let block= node.block_stores.get_block_by_event_seqnum(block_event_seqnum);
                             block_tx.send(block).unwrap();

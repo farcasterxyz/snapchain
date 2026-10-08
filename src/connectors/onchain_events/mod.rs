@@ -11,7 +11,7 @@ use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent, SolType};
 use async_trait::async_trait;
 use ens::EnsResolver::EnsResolverInstance;
-use ens::{namehash, EnsError, EnsRegistry};
+use ens::{namehash, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,6 +39,7 @@ use crate::{
 };
 
 pub(crate) mod ens;
+pub use ens::EnsError;
 
 sol!(
     #[allow(missing_docs)]
