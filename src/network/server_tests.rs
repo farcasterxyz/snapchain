@@ -13,6 +13,7 @@ mod tests {
     use crate::connectors::fname::{FetchError, FnameTransferLookup};
     use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients};
     use crate::core::validations::{self, verification::VerificationAddressClaim};
+    use crate::mempool::l1_validator::{L1CacheConfig, L1Validator};
     use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
@@ -557,6 +558,14 @@ mod tests {
             Chain::BaseMainnet,
             Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
         );
+        let l1_validator = Arc::new(L1Validator::new(
+            chain_clients,
+            stores.clone(),
+            Box::new(routing::EvenOddRouterForTest {}),
+            num_shards,
+            proto::FarcasterNetwork::Devnet,
+            L1CacheConfig::default(),
+        ));
         (
             stores.clone(),
             senders.clone(),
@@ -575,7 +584,7 @@ mod tests {
                 message_router,
                 mempool_tx.clone(),
                 gossip_tx.clone(),
-                chain_clients,
+                l1_validator,
                 "0.1.2".to_string(),
                 "asddef".to_string(),
                 None,
@@ -5843,6 +5852,7 @@ mod tests {
         };
 
         let result = service
+            .l1_validator()
             .validate_ens_username_proof(fid, &username_proof)
             .await;
 
@@ -5876,6 +5886,7 @@ mod tests {
         };
 
         let result = service
+            .l1_validator()
             .validate_ens_username_proof(fid, &username_proof)
             .await;
         assert!(result.is_ok());
@@ -6029,6 +6040,7 @@ mod tests {
 
         // Proof owner does not match owner of ens name
         let result = service
+            .l1_validator()
             .validate_ens_username_proof(fid, &username_proof)
             .await;
         assert!(result.is_err());
@@ -6067,6 +6079,7 @@ mod tests {
         };
 
         let result = service
+            .l1_validator()
             .validate_ens_username_proof(fid, &username_proof)
             .await;
 
@@ -6115,6 +6128,7 @@ mod tests {
         };
 
         let result = service
+            .l1_validator()
             .validate_ens_username_proof(fid, &username_proof)
             .await;
 
@@ -7878,6 +7892,14 @@ mod tests {
             Chain::EthMainnet,
             Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
         );
+        let l1_validator = Arc::new(L1Validator::new(
+            chain_clients,
+            partial_stores.clone(),
+            Box::new(routing::EvenOddRouterForTest {}),
+            2,
+            proto::FarcasterNetwork::Devnet,
+            L1CacheConfig::default(),
+        ));
         let partial = MyHubService::new(
             format!("{}:{}", USER_NAME, PASSWORD),
             "".to_string(),
@@ -7892,7 +7914,7 @@ mod tests {
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx,
             gossip_tx,
-            chain_clients,
+            l1_validator,
             "0.1.2".to_string(),
             "asddef".to_string(),
             None,
