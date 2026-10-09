@@ -31,27 +31,27 @@ The recommended way to run `fc` is out of the snapchain Docker image. The image 
 which proto version `fc` was built against — see [Versioning](#versioning) below.
 
 ```bash
-docker run --rm farcasterxyz/snapchain:<version> fc --help
+docker run --rm farcasterxyz/snapchain:<version> ./fc --help
 ```
 
 Example: stream HubEvents from a public testnet node:
 
 ```bash
 docker run --rm farcasterxyz/snapchain:<version> \
-  fc subscribe --shard 1 --grpc-node https://iris.farcaster.xyz:3383
+  ./fc subscribe --shard 1 --grpc-node https://iris.farcaster.xyz:3383
 ```
 
 Example: submit a CAST_ADD against the default HTTP endpoint:
 
 ```bash
 docker run --rm -e SIGNER_SECRET=0x... farcasterxyz/snapchain:<version> \
-  fc cast-add --fid 123 --text "hello snapchain"
+  ./fc cast-add --fid 123 --text "hello snapchain"
 ```
 
 If you already have a snapchain node running in a container, you can `docker exec` instead:
 
 ```bash
-docker exec <node-container> fc subscribe --shard 1 --grpc-node http://localhost:3383
+docker exec <node-container> ./fc subscribe --shard 1 --grpc-node http://localhost:3383
 ```
 
 ### Building from source

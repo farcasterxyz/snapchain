@@ -1,0 +1,161 @@
+# Manage a node with snapchain.sh
+
+`snapchain.sh` installs, starts, stops and upgrades a mainnet **read node** with Docker Compose. It is the script the bootstrap one-liner in [Getting Started](/getting-started) downloads and runs. If you are operating a validator, read [Validators vs. read nodes](/node-types) first; the script does not set up a validator.
+
+## Install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
+```
+
+The bootstrap script:
+
+1. Installs `jq` if it is missing.
+2. Creates `~/snapchain` and downloads `snapchain.sh` into it. The node always lives in `~/snapchain`, whatever directory you run the one-liner from.
+3. Runs `./snapchain.sh upgrade`, reading answers from your terminal so the prompts work even though the script was piped into `bash`.
+
+During the first run you are asked to:
+
+- **Agree that you will not receive rewards** for running the node. Type `Yes`. The answer is stored in `.env` as `AGREE_NO_REWARDS_FOR_ME=true`.
+- **Enter your FID or Farcaster username.** The script resolves it through the Farcaster name server and stores the FID as `HUB_OPERATOR_FID`. It is used to pick the day of the week for auto-upgrades (see [below](#auto-upgrade)).
+
+On Linux the script re-runs itself with `sudo`, so expect a password prompt, and the auto-upgrade job is installed in root's crontab.
+
+## Commands
+
+Run every command from `~/snapchain`:
+
+| Command | What it does |
+| --- | --- |
+| `./snapchain.sh upgrade` | Full install or upgrade. Updates the script itself, installs Docker if needed, refreshes the compose and config files, sets up Grafana, installs the auto-upgrade cron job, restarts the node and tails its logs. |
+| `./snapchain.sh up` | Starts the `snapchain` and `statsd` containers and tails the node logs. Does not fetch new files. |
+| `./snapchain.sh down` | Stops every container in the compose project, Grafana included. |
+| `./snapchain.sh logs` | Tails the last 100 lines of the node's logs and follows them. |
+| `./snapchain.sh autoupgrade` | The non-interactive upgrade the cron job runs. See [Auto-upgrade](#auto-upgrade). |
+| `./snapchain.sh help` | Prints usage. Running the script with no arguments does the same. |
+
+Every command first checks for `AGREE_NO_REWARDS_FOR_ME=true` in `.env`. If it is missing and the script is not attached to a terminal (for example under cron), it stops all containers and exits. Run `./snapchain.sh upgrade` by hand once to record the agreement.
+
+## What `upgrade` does
+
+In order:
+
+1. Installs `jq` if missing.
+2. **Updates itself.** Downloads `scripts/snapchain.sh` from the [`@latest`](https://github.com/farcasterxyz/snapchain/tree/@latest) git tag. If the hash differs from the copy on disk, it replaces itself and re-runs.
+3. Installs Docker with the official convenience script if `docker` is not on the `PATH`, and adds your user to the `docker` group.
+4. Adds missing defaults to `.env` and prompts for `HUB_OPERATOR_FID` if it is not set.
+5. **Fetches config files** from the `@latest` tag:
+   - `docker-compose.mainnet.yml`, saved as `docker-compose.yml`
+   - `validators.toml`
+   - `grafana/grafana-dashboard.json` and `grafana/grafana.ini`
+6. Starts `statsd` and Grafana, adds Graphite as a Grafana data source, and imports the Snapchain dashboard as the home dashboard.
+7. Installs the auto-upgrade cron job unless `SKIP_CRONTAB` is set.
+8. Restarts the `snapchain` container. The compose file uses the `farcasterxyz/snapchain:latest` image with `pull_policy: always`, so this pulls the newest release.
+9. Tails the node logs. Press `Ctrl-C` to stop following; the node keeps running.
+
+:::info
+The `@latest` git tag is moved to each release commit, so a script upgrade picks up the compose file that shipped with the most recent release, not whatever is on `main`.
+:::
+
+## Auto-upgrade
+
+`upgrade` adds a weekly cron entry like this one:
+
+```
+0 3 * * 2 /home/ubuntu/snapchain/snapchain.sh autoupgrade >> /home/ubuntu/snapchain/snapchain-autoupgrade.log 2>&1
+```
+
+- **Day:** a weekday (Monday–Friday) derived from a hash of `HUB_OPERATOR_FID`, so upgrades across the network are spread over the week.
+- **Hour:** picked at random between 00:00 and 06:00 in the host's local timezone when the entry is created.
+- **Log:** `~/snapchain/snapchain-autoupgrade.log`.
+
+`autoupgrade` updates the script, re-fetches the compose and config files, restarts `statsd`, Grafana and the node, and then runs `docker system prune --volumes -f`.
+
+:::warning
+`docker system prune --volumes -f` applies to the whole Docker host, not just Snapchain. It removes stopped containers, unused networks, dangling images and unused anonymous volumes. If the host runs other Docker workloads, set `SKIP_CRONTAB=true` and upgrade by hand.
+:::
+
+To turn auto-upgrade off, add `SKIP_CRONTAB=true` to `.env` and delete the existing entry with `sudo crontab -e` (Linux) or `crontab -e` (macOS).
+
+## Files in `~/snapchain`
+
+| Path | Purpose | Overwritten on upgrade? |
+| --- | --- | --- |
+| `snapchain.sh` | This script | Yes |
+| `docker-compose.yml` | Node, `statsd` and Grafana services, and the inline node config | Yes |
+| `validators.toml` | Validator set history, appended to the node config at startup | Yes |
+| `.env` | Script settings (see below) | No, only missing keys are added |
+| `.rocks/` | The node's database | No |
+| `.rocks.snapshot/` | Scratch space for snapshot downloads | No |
+| `.onchain-config/` | Cache for registry-managed config (validators only; unused on read nodes) | No |
+| `grafana/` | Grafana config, dashboard and data | Config and dashboard yes, `grafana/data` no |
+| `snapchain-autoupgrade.log` | Output of the cron job | Appended |
+
+### Customizing the node
+
+Do not edit `docker-compose.yml`: `upgrade` and `autoupgrade` replace it. Put changes in a `docker-compose.override.yml` next to it instead. Docker Compose merges that file automatically and the script never touches it.
+
+Any node config key can be set from the environment with a `SNAPCHAIN_` prefix, using `__` between nested keys. Environment values take precedence over the config file the compose entrypoint writes.
+
+```yaml
+# ~/snapchain/docker-compose.override.yml
+services:
+  snapchain:
+    environment:
+      RUST_LOG: "info,snapchain=debug"
+      # pruning.event_pruning_schedule — move event pruning off 00:00 UTC
+      SNAPCHAIN_PRUNING__EVENT_PRUNING_SCHEDULE: "0 30 2 * * *"
+```
+
+### `.env` keys
+
+| Key | Effect |
+| --- | --- |
+| `AGREE_NO_REWARDS_FOR_ME` | Must be `true` for any command to run. |
+| `HUB_OPERATOR_FID` | Chooses the auto-upgrade weekday. |
+| `SKIP_CRONTAB` | If present, `upgrade` does not install the auto-upgrade job. |
+| `GRAFANA_CREDS` | `user:password` the script uses to configure Grafana. Defaults to `admin:admin`. |
+| `SKIP_SELF_UPGRADE` | If present, the script does not replace itself. Useful when testing local changes to the script. |
+| `STATSD_PUBLISH`, `STATSD_ADMIN_PUBLISH` | Host ports for `statsd` (default `8125` and `8126`). |
+| `FC_NETWORK_ID`, `STATSD_METRICS_SERVER` | Written for compatibility with Hubble's script. The node does not read them; its network and statsd settings come from `docker-compose.yml`. |
+
+## Monitoring
+
+- **Sync status:** `curl -s localhost:3381/v1/info | jq`. Each shard's `blockDelay` is the number of seconds its newest block is behind the wall clock; a synced node stays in single digits. See the [Info API](/reference/httpapi/info) for every field.
+- **Dashboard:** Grafana runs at [http://localhost:3000](http://localhost:3000) with the default login `admin` / `admin`. Port 3000 is published on all interfaces, so change the password and keep the port closed in your firewall.
+- **Logs:** `./snapchain.sh logs`.
+
+## Ports
+
+| Port | Protocol | Use |
+| --- | --- | --- |
+| 3381 | TCP | HTTP API |
+| 3382 | UDP | Gossip (libp2p over QUIC) |
+| 3383 | TCP | gRPC API |
+| 3000 | TCP | Grafana (local use only) |
+| 8125 / 8126 | UDP / TCP | `statsd` (local use only) |
+
+3381–3383 must be reachable from the internet for the node to peer and serve clients.
+
+## Testnet
+
+`snapchain.sh` only runs mainnet. To run a testnet read node, use the testnet compose file directly:
+
+```bash
+mkdir ~/snapchain-testnet && cd ~/snapchain-testnet
+curl -sSLO https://raw.githubusercontent.com/farcasterxyz/snapchain/@latest/docker-compose.testnet.yml
+docker compose -f docker-compose.testnet.yml up -d snapchain
+docker compose -f docker-compose.testnet.yml logs -f snapchain
+```
+
+Testnet is unstable and may be reset. It stores data in `.rocks.testnet`, so it does not collide with a mainnet database, but both compose files publish ports 3381–3383 and cannot run on the same host at the same time.
+
+## Troubleshooting
+
+**`upgrade` stops with `auto-upgrade: Unable to determine upgrade day`.** `HUB_OPERATOR_FID` is `0`, which happens when the FID prompt is skipped or the lookup fails. The script exits before restarting the node. Set `HUB_OPERATOR_FID` to your FID in `.env`, or add `SKIP_CRONTAB=true`, then run `./snapchain.sh upgrade` again.
+
+**Containers stop overnight and the log says you have not agreed to the terms of service.** `.env` is missing `AGREE_NO_REWARDS_FOR_ME=true`. Run `./snapchain.sh upgrade` interactively once.
+
+**`Neither 'docker-compose' nor 'docker compose' is available`.** Docker is installed without the Compose plugin. Install the `docker-compose-plugin` package for your distribution.
+
+**`mempoolSize` is `4294967295` in `/v1/info`.** That value means "not reported" and is normal on read nodes. See [Validators vs. read nodes](/node-types#mempool).
