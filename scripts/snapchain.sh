@@ -465,9 +465,24 @@ start_snapchain() {
 }
 
 cleanup() {
-  # Prune unused docker cruft. Make sure to call this only when hub is already running
-  echo "Pruning unused docker images and volumes"
-  docker system prune --volumes -f
+  # Remove unused Snapchain images only. Never run a host-wide docker system prune:
+  # that deletes stopped containers, unused networks, dangling images and anonymous
+  # volumes belonging to every other project on this machine (see #1031).
+  if key_exists "SKIP_DOCKER_CLEANUP"; then
+    echo "✅ SKIP_DOCKER_CLEANUP is set. Skipping docker image cleanup."
+    return 0
+  fi
+
+  echo "Pruning unused farcasterxyz/snapchain images"
+  # Prefer the filter form when available; fall back to an explicit image list.
+  if ! docker image prune -f --filter "reference=farcasterxyz/snapchain"; then
+    local dangling
+    dangling=$(docker images farcasterxyz/snapchain -f "dangling=true" -q 2>/dev/null || true)
+    if [[ -n "$dangling" ]]; then
+      # shellcheck disable=SC2086
+      echo "$dangling" | xargs -r docker rmi || true
+    fi
+  fi
 }
 
 set_compose_command() {
@@ -650,6 +665,7 @@ if [ $# -eq 0 ] || [ "$1" == "help" ]; then
     echo "  help     Show this help"
     echo ""
     echo "add SKIP_CRONTAB=true to your .env to skip installing the autoupgrade crontab"
+    echo "add SKIP_DOCKER_CLEANUP=true to your .env to skip pruning old snapchain images"
     exit 0
 fi
 
