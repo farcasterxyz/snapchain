@@ -149,3 +149,46 @@ validator_public_keys = [
   "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
   "3376e30a4d8e7ea596f3c066f7e9f3a960fad76ed0b6fb7de66552cbe9318b5e",
 ]
+
+# v18 (registry configVersion 18): moria (bd465c...) and isengard (be846f...)
+# replace uno (80d780...) and degen (3376e3...) on block shard 0
+[[consensus.validator_sets]]
+effective_at = 48_632_000
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "bd465c947fe1acfac219fec2fb2ae1e8a13e2acd0498c413f2e54c946ea95095",
+  "be846f1454da8fee9ab3e0e3d77f24e408639f97d70124c47679e791eae53cd2",
+]
+
+# v18: same swap on message shard 2
+[[consensus.validator_sets]]
+effective_at = 49_147_000
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "bd465c947fe1acfac219fec2fb2ae1e8a13e2acd0498c413f2e54c946ea95095",
+  "be846f1454da8fee9ab3e0e3d77f24e408639f97d70124c47679e791eae53cd2",
+]
+
+# v18: same swap on message shard 1
+[[consensus.validator_sets]]
+effective_at = 49_311_000
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "bd465c947fe1acfac219fec2fb2ae1e8a13e2acd0498c413f2e54c946ea95095",
+  "be846f1454da8fee9ab3e0e3d77f24e408639f97d70124c47679e791eae53cd2",
+]
