@@ -12,9 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - Document snapchain.sh and validator vs. read node differences (#1034)
 
-### ⚙️ Miscellaneous Tasks
+### ⚙️ Validator Set
 
 - Add registry v18 validator sets to validators.toml (#1038)
+- h/t @christopherwxyz and @marcinlad for running snapchain validators
 
 ## [0.14.2] - 2026-08-13
 
