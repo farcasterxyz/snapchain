@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.3] - 2026-10-15
+
+### 🐛 Bug Fixes
+
+- *(mempool)* Validate gossiped ENS proofs and contract verifications on validators (#1029)
+
+### 📚 Documentation
+
+- Document snapchain.sh and validator vs. read node differences (#1034)
+
+### ⚙️ Validator Set
+
+- Add registry v18 validator sets to validators.toml (#1038)
+- h/t @christopherwxyz and @marcinlad for running snapchain validators
+
 ## [0.14.2] - 2026-08-13
 
 ### 🚀 Features
