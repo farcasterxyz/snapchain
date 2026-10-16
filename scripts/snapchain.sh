@@ -210,7 +210,13 @@ store_operator_fid_env() {
     if [[ -z $input ]]; then
         response=""
     elif [[ $input =~ ^-?[0-9]+$ ]]; then
+        # Prefer the fname transfer lookup, but accept a bare numeric FID when the
+        # transfer list is empty (FIDs without an fname used to become 0 and then
+        # abort upgrade via setup_crontab — see #1030).
         response=$(curl -s "https://fnames.farcaster.xyz/transfers?fid=$input" | jq '.transfers[-1].to')
+        if [ "$response" == "null" ] || [ -z "$response" ]; then
+            response="$input"
+        fi
     else
         response=$(curl -s "https://fnames.farcaster.xyz/transfers?name=$input" | jq '.transfers[-1].to')
     fi
@@ -427,24 +433,40 @@ setup_crontab() {
       fi
     fi
 
-    local content_to_hash
+    local day_of_week
     local hub_operator_fid
     hub_operator_fid=$(grep "^HUB_OPERATOR_FID=" .env | cut -d= -f2)
-    # If the HUB_OPERATOR_FID is set and it is not 0, then use it to determine the day of week
+    # Prefer a stable day from FID / peer identity. If neither is available,
+    # reuse or create AUTOUPGRADE_DAY — never exit 1 here, or `upgrade` aborts
+    # before start_snapchain and leaves the node stopped (#1030).
     if [[ -n "$hub_operator_fid" ]] && [[ "$hub_operator_fid" != "0" ]]; then
+        local content_to_hash sha
         content_to_hash=$(echo -n "$hub_operator_fid")
         echo "auto-upgrade: Using HUB FID to determine upgrade day $content_to_hash"
+        sha=$(echo -n "${content_to_hash}" | $HASH_CMD | awk '{ print $1 }')
+        day_of_week=$(( ( 0x${sha:0:8} % 5 ) + 1 ))
     elif [ -f "./.hub/default_id.protobuf" ]; then
+        local content_to_hash sha
         content_to_hash=$(cat ./.hub/default_id.protobuf)
         echo "auto-upgrade: Using Peer Identity to determine upgrade day"
+        sha=$(echo -n "${content_to_hash}" | $HASH_CMD | awk '{ print $1 }')
+        day_of_week=$(( ( 0x${sha:0:8} % 5 ) + 1 ))
+    elif key_exists "AUTOUPGRADE_DAY"; then
+        day_of_week=$(grep "^AUTOUPGRADE_DAY=" .env | cut -d= -f2)
+        if ! [[ "$day_of_week" =~ ^[1-5]$ ]]; then
+            day_of_week=$(( (RANDOM % 5) + 1 ))
+            # Replace the invalid value in .env
+            grep -v "^AUTOUPGRADE_DAY=" .env > .env.tmp && mv .env.tmp .env
+            echo "AUTOUPGRADE_DAY=$day_of_week" >> .env
+            echo "auto-upgrade: Replaced invalid AUTOUPGRADE_DAY with $day_of_week"
+        else
+            echo "auto-upgrade: Using saved AUTOUPGRADE_DAY=$day_of_week"
+        fi
     else
-        echo "auto-upgrade: Unable to determine upgrade day"
-        exit 1
+        day_of_week=$(( (RANDOM % 5) + 1 ))
+        echo "AUTOUPGRADE_DAY=$day_of_week" >> .env
+        echo "auto-upgrade: No FID available; saved AUTOUPGRADE_DAY=$day_of_week for future runs"
     fi
-
-    # Pick a random weekday based on the sha of the operator FID or peer identity
-    local sha=$(echo -n "${content_to_hash}" | $HASH_CMD | awk '{ print $1 }')
-    local day_of_week=$(( ( 0x${sha:0:8} % 5 ) + 1 ))
     # Pick a random hour between midnight and 6am
     local hour=$((RANDOM % 7))
     local crontab_entry="0 $hour * * $day_of_week $(pwd)/snapchain.sh autoupgrade >> $(pwd)/snapchain-autoupgrade.log 2>&1"
