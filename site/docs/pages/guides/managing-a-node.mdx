@@ -21,6 +21,12 @@ During the first run you are asked to:
 
 On Linux the script re-runs itself with `sudo`, so expect a password prompt, and the auto-upgrade job is installed in root's crontab.
 
+:::info
+The one-liner needs an interactive terminal. The bootstrap ends with `exec ./snapchain.sh upgrade < /dev/tty`, which fails when there is no TTY, for example `ssh host "curl ... | bash"` or a CI job. Use `ssh -t` so the prompts can reach you, or pre-fill `AGREE_NO_REWARDS_FOR_ME=true` and `HUB_OPERATOR_FID=<fid>` in `~/snapchain/.env` and run `./snapchain.sh upgrade` yourself.
+
+`upgrade` finishes by following the node's logs, so it doesn't exit on its own. Press Ctrl-C once the node is up; it keeps running in the background.
+:::
+
 ## Commands
 
 Run every command from `~/snapchain`:
