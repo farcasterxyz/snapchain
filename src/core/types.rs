@@ -236,7 +236,10 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
     }
 }
 
+#[derive(Debug)]
 pub struct InvalidSignatureError();
+
+
 impl fmt::Display for InvalidSignatureError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Invalid signature")
@@ -256,12 +259,16 @@ impl informalsystems_malachitebft_core_types::SigningScheme for Ed25519 {
     type PublicKey = PublicKey;
     type PrivateKey = PrivateKey;
 
-    fn decode_signature(_bytes: &[u8]) -> Result<Self::Signature, Self::DecodingError> {
-        todo!()
+    fn decode_signature(bytes: &[u8]) -> Result<Self::Signature, Self::DecodingError> {
+        if bytes.len() != 64 {
+            return Err(InvalidSignatureError());
+        }
+
+        Ok(Signature(bytes.to_vec()))
     }
 
-    fn encode_signature(_signature: &Self::Signature) -> Vec<u8> {
-        todo!()
+    fn encode_signature(signature: &Self::Signature) -> Vec<u8> {
+        signature.0.clone()
     }
 }
 
@@ -753,6 +760,37 @@ impl CommitsExt for Commits {
             round,
             value,
             signatures,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_codec_round_trips_ed25519_bytes() {
+        let bytes: Vec<u8> = (0..64).collect();
+        let signature = <Ed25519 as informalsystems_malachitebft_core_types::SigningScheme>::decode_signature(&bytes)
+            .expect("64-byte Ed25519 signatures must decode");
+
+        assert_eq!(
+            <Ed25519 as informalsystems_malachitebft_core_types::SigningScheme>::encode_signature(
+                &signature,
+            ),
+            bytes,
+        );
+    }
+
+    #[test]
+    fn signature_codec_rejects_invalid_lengths() {
+        for length in [0, 63, 65] {
+            let bytes = vec![0u8; length];
+            assert!(
+                <Ed25519 as informalsystems_malachitebft_core_types::SigningScheme>::decode_signature(&bytes)
+                    .is_err(),
+                "signature length {length} must be rejected",
+            );
         }
     }
 }
