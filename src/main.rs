@@ -18,7 +18,7 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
-use snapchain::storage::db::snapshot::{download_snapshots, BootstrapMethod};
+use snapchain::storage::db::snapshot::{download_snapshots, missing_shard_dirs, BootstrapMethod};
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
@@ -436,6 +436,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await
         .unwrap();
+    } else if app_config.snapshot.bootstrap_method == BootstrapMethod::Snapshot
+        && app_config.snapshot.load_db_from_snapshot
+    {
+        // The DB has data, but an interrupted first restore can leave some shards
+        // out. Restore just those instead of letting them sync from genesis: a
+        // missing shard 0 also makes every submitted message fail validation.
+        let mut shard_ids = app_config.consensus.shard_ids.clone();
+        shard_ids.push(0);
+        let missing = missing_shard_dirs(&app_config.rocksdb_dir, &shard_ids);
+        if !missing.is_empty() {
+            warn!(
+                "Shards {:?} have no data in {}; restoring them from snapshot",
+                missing, app_config.rocksdb_dir
+            );
+            download_snapshots(
+                app_config.fc_network,
+                &app_config.snapshot,
+                app_config.rocksdb_dir.clone(),
+                missing,
+            )
+            .await
+            .unwrap();
+        }
     };
 
     let keypair = app_config.consensus.keypair().clone();
