@@ -3,6 +3,7 @@ use super::rpc_extensions::{
     FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
 };
 use crate::connectors::fname::FnameTransferLookup;
+use crate::connectors::onchain_events::get_request_fid_from_signer_event;
 use crate::core::error::HubError;
 use crate::core::types::SnapchainValidatorContext;
 use crate::core::util::{get_farcaster_time, FarcasterTime};
@@ -393,13 +394,19 @@ fn channel_infos_by_owner_address(
 
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
 /// `SignerEventBody`. Off-chain–only fields (scopes, ttl, last_used_at, expires_at,
-/// nonce, request_fid) are intentionally left at their proto defaults; the
-/// originating event is attached so callers that need raw on-chain payload still
-/// get it. `added_at` is the block timestamp (Unix epoch seconds).
+/// nonce) are intentionally left at their proto defaults; the originating event is
+/// attached so callers that need raw on-chain payload still get it. `request_fid`
+/// is decoded from the event's `SignedKeyRequestMetadata`, which the KeyRegistry
+/// validator checked when the key was added. `added_at` is the block timestamp
+/// (Unix epoch seconds).
 fn signer_from_onchain_event(event: &OnChainEvent) -> Signer {
-    let (key, key_type) = match &event.body {
-        Some(Body::SignerEventBody(body)) => (body.key.clone(), body.key_type),
-        _ => (Vec::new(), 0),
+    let (key, key_type, request_fid) = match &event.body {
+        Some(Body::SignerEventBody(body)) => (
+            body.key.clone(),
+            body.key_type,
+            get_request_fid_from_signer_event(body),
+        ),
+        _ => (Vec::new(), 0, None),
     };
     Signer {
         source: SignerSource::Onchain as i32,
@@ -411,7 +418,7 @@ fn signer_from_onchain_event(event: &OnChainEvent) -> Signer {
         ttl: None,
         expires_at: None,
         scopes: Vec::new(),
-        request_fid: None,
+        request_fid,
         nonce: None,
         onchain_event: Some(event.clone()),
     }
@@ -3621,5 +3628,47 @@ impl HubService for MyHubService {
             })
             .await
             .map(Response::new)
+    }
+}
+
+#[cfg(test)]
+mod signer_tests {
+    use super::*;
+    use crate::proto::{SignerEventBody, SignerEventType};
+
+    fn signer_event(metadata: Vec<u8>, metadata_type: u32) -> OnChainEvent {
+        OnChainEvent {
+            fid: 1,
+            block_timestamp: 1_700_000_000,
+            body: Some(Body::SignerEventBody(SignerEventBody {
+                key: vec![7; 32],
+                key_type: 1,
+                event_type: SignerEventType::Add as i32,
+                metadata,
+                metadata_type,
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn onchain_signer_carries_request_fid_from_metadata() {
+        // Same SignedKeyRequestMetadata as onchain_events::tests::test_get_request_fid (requestFid 9152).
+        let metadata = hex::decode("000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000023c000000000000000000000000002ef790dd7993a35fd847c053eddae940d05559600000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000065420dd50000000000000000000000000000000000000000000000000000000000000041bd0677376b4740f956a6d591e863d948bc2771d5ac109bfa57bd24127c35ca4b3cd00d56593750802eff94cd28e65b32ab06012a4940f0a5b8c25ca1e54050761b00000000000000000000000000000000000000000000000000000000000000").unwrap();
+        let signer = signer_from_onchain_event(&signer_event(metadata, 1));
+        assert_eq!(signer.request_fid, Some(9152));
+        assert_eq!(signer.source, SignerSource::Onchain as i32);
+    }
+
+    #[test]
+    fn onchain_signer_without_metadata_has_no_request_fid() {
+        assert_eq!(
+            signer_from_onchain_event(&signer_event(vec![], 1)).request_fid,
+            None
+        );
+        assert_eq!(
+            signer_from_onchain_event(&signer_event(vec![1, 2, 3], 1)).request_fid,
+            None
+        );
     }
 }
