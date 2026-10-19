@@ -118,8 +118,10 @@ services:
       # - '2003:2003' # Carbon line receiver
       # - '2004:2004' # Carbon pickle receiver
       # - '7002:7002' # Carbon cache query
-      - '${STATSD_PUBLISH:-8125}:8125/udp' # StatsD
-      - '${STATSD_ADMIN_PUBLISH:-8126}:8126' # StatsD admin
+      # Bound to loopback by default. Set MONITORING_BIND=0.0.0.0 to publish on
+      # all interfaces (and firewall the ports yourself).
+      - '${MONITORING_BIND:-127.0.0.1}:${STATSD_PUBLISH:-8125}:8125/udp' # StatsD
+      - '${MONITORING_BIND:-127.0.0.1}:${STATSD_ADMIN_PUBLISH:-8126}:8126' # StatsD admin
     networks:
       - snapchain
 
@@ -138,7 +140,7 @@ services:
       - ./grafana/grafana.ini:/etc/grafana/grafana.ini
       - ./grafana/data:/var/lib/grafana  # Persistent Grafana data
     ports:
-      - '3000:3000' # Grafana web
+      - '${MONITORING_BIND:-127.0.0.1}:3000:3000' # Grafana web
     networks:
       - snapchain
 
