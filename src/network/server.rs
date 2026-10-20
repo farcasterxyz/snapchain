@@ -1031,6 +1031,72 @@ impl MyHubService {
             .collect()
     }
 
+    /// The data shards this node hosts, in shard order.
+    fn hosted_shard_stores(&self) -> Vec<(u32, &Stores)> {
+        let mut shards: Vec<(u32, &Stores)> = self
+            .shard_stores
+            .iter()
+            .map(|(id, stores)| (*id, stores))
+            .collect();
+        shards.sort_by_key(|(id, _)| *id);
+        shards
+    }
+
+    /// Reads one page from every hosted shard and returns them together, for reads
+    /// whose rows are spread across shards (replies, mentions, reactions to a cast).
+    ///
+    /// Uses the same three-state cursors as the channel follower reads. A shard that
+    /// ran out on an earlier page is skipped rather than restarted, and the token is
+    /// `None` once every shard is done. The old per-shard `Option` tokens could do
+    /// neither: an exhausted shard came back as `None`, which means "start over", so
+    /// it re-sent its rows on every later page, and a client paging until there was
+    /// no token never stopped because the token was always `Some`.
+    fn page_across_shards(
+        &self,
+        page_token: Option<Vec<u8>>,
+        read: impl Fn(&Stores, Option<Vec<u8>>) -> Result<MessagesPage, HubError>,
+    ) -> Result<MessagesResponse, Status> {
+        let shards = self.hosted_shard_stores();
+        let mut cursors = decode_shard_cursors(page_token, &shards)?;
+        let mut messages = Vec::new();
+        let mut next_cursors = Vec::with_capacity(shards.len());
+        for (shard_id, stores) in &shards {
+            let token = match cursors.remove(shard_id) {
+                Some(ShardScan::Fresh) => None,
+                Some(ShardScan::Resume(token)) => Some(token),
+                Some(ShardScan::Exhausted) => {
+                    next_cursors.push(ShardCursor {
+                        shard_id: *shard_id,
+                        scan: ShardScan::Exhausted,
+                    });
+                    continue;
+                }
+                None => {
+                    return Err(Status::internal(format!(
+                        "no cursor for shard {shard_id} after validation"
+                    )))
+                }
+            };
+            // As before, a shard whose read fails contributes nothing.
+            let page = read(stores, token).unwrap_or(MessagesPage {
+                messages: vec![],
+                next_page_token: None,
+            });
+            messages.extend(page.messages);
+            next_cursors.push(ShardCursor {
+                shard_id: *shard_id,
+                scan: match page.next_page_token {
+                    Some(token) => ShardScan::Resume(token),
+                    None => ShardScan::Exhausted,
+                },
+            });
+        }
+        Ok(MessagesResponse {
+            messages,
+            next_page_token: encode_shard_cursors(next_cursors)?,
+        })
+    }
+
     fn get_stores_for_shard(&self, shard_id: u32) -> Result<&Stores, Status> {
         match self.shard_stores.get(&shard_id) {
             Some(store) => Ok(store),
@@ -2211,49 +2277,17 @@ impl HubService for MyHubService {
             }
             None => return Err(Status::not_found("Parent not specified".to_string())),
         };
-        let num_shards = self.shard_stores.len();
-        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
-            serde_json::from_slice(&token_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
-        } else {
-            vec![None; num_shards]
-        };
-        if per_shard_tokens.len() != num_shards {
-            return Err(Status::invalid_argument(
-                "Page token does not match number of shards".to_string(),
-            ));
-        }
-        let pages: Vec<MessagesPage> = self
-            .shard_stores
-            .iter()
-            .zip(per_shard_tokens.into_iter())
-            .map(|(shard_entry, shard_token)| {
-                let page_options = PageOptions {
+        let response = self.page_across_shards(req.page_token, |stores, token| {
+            CastStore::get_casts_by_parent(
+                &stores.cast_store,
+                &parent,
+                &PageOptions {
                     page_size: req.page_size.map(|s| s as usize),
-                    page_token: shard_token,
+                    page_token: token,
                     reverse: req.reverse.unwrap_or(false),
-                };
-                let cast_store = &shard_entry.1.cast_store;
-                return CastStore::get_casts_by_parent(cast_store, &parent, &page_options)
-                    .unwrap_or(MessagesPage {
-                        messages: vec![],
-                        next_page_token: None,
-                    });
-            })
-            .collect();
-        let combined_messages: Vec<Message> = pages
-            .iter()
-            .flat_map(|page| page.messages.clone())
-            .collect();
-        let next_page_tokens: Vec<Option<Vec<u8>>> =
-            pages.into_iter().map(|page| page.next_page_token).collect();
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
-        let response = MessagesResponse {
-            messages: combined_messages,
-            next_page_token: Some(new_page_token),
-        };
-
+                },
+            )
+        })?;
         Ok(Response::new(response))
     }
 
@@ -2264,57 +2298,17 @@ impl HubService for MyHubService {
         let req = request.into_inner();
         let mention = req.fid;
 
-        let num_shards = self.shard_stores.len();
-
-        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
-            serde_json::from_slice(&token_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
-        } else {
-            vec![None; num_shards]
-        };
-
-        if per_shard_tokens.len() != num_shards {
-            return Err(Status::invalid_argument(
-                "Page token does not match number of shards".to_string(),
-            ));
-        }
-
-        let pages: Vec<MessagesPage> =
-            self.shard_stores
-                .iter()
-                .zip(per_shard_tokens.into_iter())
-                .map(|(shard_entry, shard_token)| {
-                    let page_options = PageOptions {
-                        page_size: req.page_size.map(|s| s as usize),
-                        page_token: shard_token,
-                        reverse: req.reverse.unwrap_or(false),
-                    };
-
-                    let store = &shard_entry.1.cast_store;
-                    return CastStore::get_casts_by_mention(store, mention, &page_options)
-                        .unwrap_or(MessagesPage {
-                            messages: vec![],
-                            next_page_token: None,
-                        });
-                })
-                .collect();
-
-        let combined_messages: Vec<Message> = pages
-            .iter()
-            .flat_map(|page| page.messages.clone())
-            .collect();
-
-        let next_page_tokens: Vec<Option<Vec<u8>>> =
-            pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
-
-        let response = MessagesResponse {
-            messages: combined_messages,
-            next_page_token: Some(new_page_token),
-        };
-
+        let response = self.page_across_shards(req.page_token, |stores, token| {
+            CastStore::get_casts_by_mention(
+                &stores.cast_store,
+                mention,
+                &PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: token,
+                    reverse: req.reverse.unwrap_or(false),
+                },
+            )
+        })?;
         Ok(Response::new(response))
     }
 
@@ -2336,63 +2330,18 @@ impl HubService for MyHubService {
             _ => return Err(Status::not_found("Target not specified".to_string())),
         };
 
-        let num_shards = self.shard_stores.len();
-
-        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
-            serde_json::from_slice(&token_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
-        } else {
-            vec![None; num_shards]
-        };
-
-        if per_shard_tokens.len() != num_shards {
-            return Err(Status::invalid_argument(
-                "Page token does not match number of shards".to_string(),
-            ));
-        }
-
-        let pages: Vec<MessagesPage> = self
-            .shard_stores
-            .iter()
-            .zip(per_shard_tokens.into_iter())
-            .map(|(shard_entry, shard_token)| {
-                let page_options = PageOptions {
+        let response = self.page_across_shards(req.page_token, |stores, token| {
+            ReactionStore::get_reactions_by_target(
+                &stores.reaction_store,
+                &target,
+                reaction_type,
+                &PageOptions {
                     page_size: req.page_size.map(|s| s as usize),
-                    page_token: shard_token,
+                    page_token: token,
                     reverse: req.reverse.unwrap_or(false),
-                };
-
-                let store = &shard_entry.1.reaction_store;
-
-                return ReactionStore::get_reactions_by_target(
-                    store,
-                    &target,
-                    reaction_type,
-                    &page_options,
-                )
-                .unwrap_or(MessagesPage {
-                    messages: vec![],
-                    next_page_token: None,
-                });
-            })
-            .collect();
-
-        let combined_messages: Vec<Message> = pages
-            .iter()
-            .flat_map(|page| page.messages.clone())
-            .collect();
-
-        let next_page_tokens: Vec<Option<Vec<u8>>> =
-            pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
-
-        let response = MessagesResponse {
-            messages: combined_messages,
-            next_page_token: Some(new_page_token),
-        };
-
+                },
+            )
+        })?;
         Ok(Response::new(response))
     }
 
@@ -2414,68 +2363,18 @@ impl HubService for MyHubService {
             None => return Err(Status::not_found("Target not specified".to_string())),
         };
 
-        let num_shards = self.shard_stores.len();
-
-        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
-            serde_json::from_slice(&token_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
-        } else {
-            vec![None; num_shards]
-        };
-
-        if per_shard_tokens.len() != num_shards {
-            return Err(Status::invalid_argument(
-                "Page token does not match number of shards".to_string(),
-            ));
-        }
-
-        let pages: Vec<MessagesPage> = self
-            .shard_stores
-            .iter()
-            .zip(per_shard_tokens.into_iter())
-            .map(|(shard_entry, shard_token)| {
-                let page_options = PageOptions {
+        let response = self.page_across_shards(req.page_token, |stores, token| {
+            ReactionStore::get_reactions_by_target(
+                &stores.reaction_store,
+                &target,
+                reaction_type,
+                &PageOptions {
                     page_size: req.page_size.map(|s| s as usize),
-                    page_token: shard_token,
+                    page_token: token,
                     reverse: req.reverse.unwrap_or(false),
-                };
-
-                let store = &shard_entry.1.reaction_store;
-
-                return ReactionStore::get_reactions_by_target(
-                    store,
-                    &target,
-                    reaction_type,
-                    &page_options,
-                )
-                .unwrap_or(MessagesPage {
-                    messages: vec![],
-                    next_page_token: None,
-                });
-            })
-            .collect();
-
-        let combined_messages: Vec<Message> = pages
-            .iter()
-            .flat_map(|page| page.messages.clone())
-            .collect();
-
-        let next_page_tokens: Vec<Option<Vec<u8>>> =
-            pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = if next_page_tokens.iter().any(|token| token.is_some()) {
-            Some(serde_json::to_vec(&next_page_tokens).map_err(|e| {
-                Status::internal(format!("Failed to serialize next_page_token: {}", e))
-            })?)
-        } else {
-            None // Return None if no subsequent page exists
-        };
-
-        let response = MessagesResponse {
-            messages: combined_messages,
-            next_page_token: new_page_token,
-        };
-
+                },
+            )
+        })?;
         Ok(Response::new(response))
     }
 
