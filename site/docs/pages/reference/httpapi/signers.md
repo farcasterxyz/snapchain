@@ -12,7 +12,7 @@ state needed to add or remove a gasless key.
 | Parameter     | Description                                             | Example                |
 | ------------- | ------------------------------------------------------- | ---------------------- |
 | fid           | The FID being requested                                 | `fid=2`                |
-| requesterFids | Optional app FIDs whose app-nonces should be returned   | `requesterFids=9152`   |
+| requesterFids | Optional app FIDs whose app-nonces should be returned. Repeated/indexed, one entry per fid | `requesterFids[0]=9152` |
 | pageSize      | Optional page size                                      | `pageSize=100`         |
 | pageToken     | Optional page token for pagination                      | `pageToken=DAEDAAAGlQ...` |
 | reverse       | Optional reverse order flag                             | `reverse=true`         |
@@ -20,8 +20,11 @@ state needed to add or remove a gasless key.
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/signersByFid?fid=3&pageSize=1
+curl "http://127.0.0.1:3381/v1/signersByFid?fid=3&pageSize=1"
 ```
+
+Quote the URL. Unquoted, the shell treats `&` as a job-control operator and drops
+everything after it, so `pageSize` is silently never sent.
 
 **Response**
 
@@ -59,15 +62,50 @@ curl http://127.0.0.1:3381/v1/signersByFid?fid=3&pageSize=1
 
 | Field               | Description                                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `source`            | How the key was registered. `SIGNER_SOURCE_ONCHAIN` for keys added by a KeyRegistry transaction.                  |
+| `source`            | How the key was registered: `SIGNER_SOURCE_ONCHAIN` for a KeyRegistry transaction, `SIGNER_SOURCE_OFFCHAIN` for a gasless `KEY_ADD`. |
 | `currentUserNonce`  | The fid's user nonce. A custody-authorized `KEY_ADD` or `KEY_REMOVE` must use a nonce strictly greater than this. |
 | `gaslessSignerCount`| Active gasless keys for this fid.                                                                                 |
 | `gaslessSignerLimit`| Per-fid cap on active gasless keys.                                                                               |
 | `requesterFidNonces`| App-nonces keyed by requester fid, for each fid passed in `requesterFids`. Missing counters are reported as `0`.   |
 
-`metadata` is base64-encoded, unlike the hex used elsewhere in this API. It decodes to
-an ABI-encoded `SignedKeyRequestMetadata`, whose `requestFid` identifies the app that
-requested the key.
+The two registration paths report the requesting app differently, which matters to
+any client attributing a cast to the software that posted it:
+
+- **Onchain** signers carry `metadata` under `onChainEvent.signerEventBody`. It is
+  base64-encoded, unlike the hex used elsewhere in this API, and decodes to an
+  ABI-encoded `SignedKeyRequestMetadata` whose `requestFid` identifies the app.
+- **Gasless** signers carry no `metadata` at all. They report `requestFid` as a
+  top-level field on the signer, alongside `scopes`, `ttl`, `expiresAt` and `nonce`.
+
+A client that reads only the metadata blob silently resolves every gasless key to
+"unknown".
+
+A gasless key's expiry slides: `lastUsedAt` is updated whenever the key signs a
+message, and `expiresAt` is always `lastUsedAt + ttl`. A key in regular use does not
+expire on a fixed date, while one that is abandoned ages out on its own.
+
+```json
+{
+  "source": "SIGNER_SOURCE_OFFCHAIN",
+  "key": "0xc0d14558a96c5aac71c4595898eb42f04a6940be351b11ab01431cb748a4d24d",
+  "keyType": 1,
+  "fid": 3355268,
+  "addedAt": 1792497138,
+  "lastUsedAt": 1792519567,
+  "ttl": 7776000,
+  "expiresAt": 1800295567,
+  "scopes": [
+    "MESSAGE_TYPE_CAST_ADD",
+    "MESSAGE_TYPE_CAST_REMOVE",
+    "MESSAGE_TYPE_REACTION_ADD",
+    "MESSAGE_TYPE_REACTION_REMOVE",
+    "MESSAGE_TYPE_LINK_ADD",
+    "MESSAGE_TYPE_LINK_REMOVE"
+  ],
+  "requestFid": 3355268,
+  "nonce": 1
+}
+```
 
 See [writing messages](/guides/writing-messages) for how these fields are used when
 registering a gasless key.
