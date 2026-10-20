@@ -5054,6 +5054,24 @@ pub struct Router<Service: HubService> {
     nodes: Arc<NodeRegistry>,
 }
 
+/// A browser asks before a cross-origin request that isn't "simple", such as
+/// POST /v1/submitMessage with content-type application/octet-stream. Without
+/// an answer to that OPTIONS preflight, a web page can read from the node but
+/// never submit to it.
+pub(crate) fn cors_preflight_response(cors_origin: &str) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(
+            "Access-Control-Allow-Origin",
+            HeaderValue::from_str(cors_origin).unwrap(),
+        )
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "content-type")
+        .header("Access-Control-Max-Age", "86400")
+        .body(Full::new(Bytes::new()).boxed())
+        .unwrap()
+}
+
 impl<Service> Router<Service>
 where
     Service: HubService,
@@ -5070,6 +5088,9 @@ where
         req: Request<hyper::body::Incoming>,
         config: &Config,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+        if req.method() == Method::OPTIONS {
+            return Ok(cors_preflight_response(&config.cors_origin));
+        }
         let mut response = match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/info") => {
                 self.handle_request::<InfoRequest, InfoResponse, _>(req, |service, req| {
