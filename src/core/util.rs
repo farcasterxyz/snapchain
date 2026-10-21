@@ -3,7 +3,7 @@ use libp2p::identity::ed25519::PublicKey;
 
 use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
-use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
+use crate::core::types::{Address, CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
 use itertools::Itertools;
 use tracing::error;
@@ -100,6 +100,18 @@ pub fn calculate_message_hash(data_bytes: &[u8]) -> Vec<u8> {
 }
 
 pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValidatorSets) -> bool {
+    // Commits can come from untrusted peers, and to_commit_certificate panics on these
+    if commits.height.is_none()
+        || commits.value.is_none()
+        || commits
+            .signatures
+            .iter()
+            .any(|signature| signature.signer.len() != size_of::<Address>())
+    {
+        error!("Commits are missing a height or value, or have a malformed signer");
+        return false;
+    }
+
     let certificate = commits.to_commit_certificate();
 
     let validator_set = validator_sets.get_validator_set(certificate.height.as_u64());
