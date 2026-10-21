@@ -871,6 +871,120 @@ mod tests {
         );
     }
 
+    fn cast_with_body_suffix(
+        format_version: u32,
+        chain: Option<proto::ChainCast>,
+        extra: &[u8],
+    ) -> proto::Message {
+        messages_factory::casts::create_cast_add_with_body_suffix(
+            1234,
+            format_version,
+            chain,
+            extra,
+            None,
+            &generate_signer(),
+        )
+    }
+
+    /// Pins the `ChainedCasts` boundary. Below it a node accepts exactly what v0.14.3 accepted,
+    /// which skipped fields 9 and 10 as unknown; at and above it, `chain` is validated and any
+    /// `format_version` is valid.
+    #[test]
+    fn chain_and_format_version_activate_at_v22() {
+        let root = |fid, hash_len| {
+            Some(CastId {
+                fid,
+                hash: vec![1; hash_len],
+            })
+        };
+        let chain = |root, index, count| Some(proto::ChainCast { root, index, count });
+        let part = chain(root(1234, 20), 1, 3);
+
+        // The first cast, a part, a part of a growing chain, and the last index the cap allows.
+        for (format_version, valid) in [
+            (1, chain(None, 0, 3)),
+            (u32::MAX, part.clone()),
+            (1, chain(root(1234, 20), 7, 0)),
+            (1, chain(root(1234, 20), 99, 100)),
+        ] {
+            let msg = cast_with_body_suffix(format_version, valid, &[]);
+            for version in [
+                EngineVersion::V21,
+                EngineVersion::V22,
+                EngineVersion::latest(),
+            ] {
+                assert!(validate_with_version(&msg, version).is_ok());
+            }
+        }
+
+        // Each rule, broken once: accepted below the boundary, rejected with its error from V22.
+        for (bad, error) in [
+            (
+                chain(root(1234, 20), 3, 3),
+                ValidationError::ChainIndexOutOfRange,
+            ),
+            (
+                chain(root(1234, 20), 100, 0),
+                ValidationError::ChainIndexOutOfRange,
+            ),
+            (chain(None, 0, 101), ValidationError::ChainIndexOutOfRange),
+            (
+                chain(root(1234, 20), 0, 3),
+                ValidationError::ChainRootInvalid,
+            ),
+            (chain(None, 1, 3), ValidationError::ChainRootInvalid),
+            (
+                chain(root(5678, 20), 1, 3),
+                ValidationError::ChainRootInvalid,
+            ),
+            (chain(root(0, 20), 1, 3), ValidationError::FidIsMissing),
+            (chain(root(1234, 19), 1, 3), ValidationError::HashIsMissing),
+            // The root is checked as a `CastId` before its fid is compared.
+            (chain(root(5678, 19), 1, 3), ValidationError::HashIsMissing),
+        ] {
+            let msg = cast_with_body_suffix(1, bad, &[]);
+            assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
+            assert_eq!(validate_with_version(&msg, EngineVersion::V22), Err(error));
+        }
+
+        // Field 9 as bytes, and field 10 as a varint.
+        for bad_field in [&[0x4a, 0x02, 0xff, 0xff][..], &[0x50, 0x01]] {
+            let msg = cast_with_body_suffix(0, None, bad_field);
+            assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
+            assert_eq!(
+                validate_with_version(&msg, EngineVersion::V22),
+                Err(ValidationError::InvalidData)
+            );
+        }
+
+        // Sent in `data` alone, v0.14.3 hashes `data` without the added fields: a signed one fails
+        // the hash, and an unsigned one is ignored. From V22 the hash covers them.
+        for (format_version, added) in [(1, None), (0, part)] {
+            let mut signed = cast_with_body_suffix(format_version, added.clone(), &[]);
+            signed.data = Some(
+                proto::MessageData::decode(signed.data_bytes.take().unwrap().as_slice()).unwrap(),
+            );
+            assert_eq!(
+                validate_with_version(&signed, EngineVersion::V21),
+                Err(ValidationError::InvalidHash)
+            );
+            assert!(validate_with_version(&signed, EngineVersion::V22).is_ok());
+
+            let mut unsigned = messages_factory::casts::create_cast_add(1234, "part", None, None);
+            if let Some(proto::message_data::Body::CastAddBody(body)) =
+                &mut unsigned.data.as_mut().unwrap().body
+            {
+                body.format_version = format_version;
+                body.chain = added;
+            }
+            assert!(validate_with_version(&unsigned, EngineVersion::V21).is_ok());
+            assert_eq!(
+                validate_with_version(&unsigned, EngineVersion::V22),
+                Err(ValidationError::InvalidHash)
+            );
+        }
+    }
+
     #[test]
     fn test_channel_bodies_validate_stateless_fields() {
         use proto::message_data::Body;

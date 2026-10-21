@@ -39,17 +39,17 @@ mod tests {
         hex::encode(b)
     }
 
-    const PRE_V22_TESTNET_UNIX_TIMESTAMP: u64 = 1_784_124_000;
+    const PRE_V23_TESTNET_UNIX_TIMESTAMP: u64 = 1_784_124_000;
 
-    fn pre_v22_testnet_time(offset_seconds: u64) -> FarcasterTime {
-        FarcasterTime::from_unix_seconds(PRE_V22_TESTNET_UNIX_TIMESTAMP + offset_seconds)
+    fn pre_v23_testnet_time(offset_seconds: u64) -> FarcasterTime {
+        FarcasterTime::from_unix_seconds(PRE_V23_TESTNET_UNIX_TIMESTAMP + offset_seconds)
     }
 
-    fn pre_v22_testnet_message_timestamp(offset_seconds: u64) -> u32 {
-        pre_v22_testnet_time(offset_seconds).to_u64() as u32
+    fn pre_v23_testnet_message_timestamp(offset_seconds: u64) -> u32 {
+        pre_v23_testnet_time(offset_seconds).to_u64() as u32
     }
 
-    async fn new_pre_v22_testnet_engine() -> (ShardEngine, tempfile::TempDir) {
+    async fn new_pre_v23_testnet_engine() -> (ShardEngine, tempfile::TempDir) {
         test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet),
             ..EngineOptions::default()
@@ -57,7 +57,7 @@ mod tests {
         .await
     }
 
-    async fn commit_pre_v22_message(engine: &mut ShardEngine, message: &proto::Message) {
+    async fn commit_pre_v23_message(engine: &mut ShardEngine, message: &proto::Message) {
         let block_time = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
         assert_eq!(
             EngineVersion::version_for(&block_time, FarcasterNetwork::Testnet),
@@ -691,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_verification_messages() {
-        let timestamp = pre_v22_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v22_testnet_engine().await;
+        let timestamp = pre_v23_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
         test_helper::register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
@@ -711,7 +711,7 @@ mod tests {
             None,
         );
 
-        commit_pre_v22_message(&mut engine, &verification_add).await;
+        commit_pre_v23_message(&mut engine, &verification_add).await;
 
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
@@ -723,16 +723,16 @@ mod tests {
             None,
         );
 
-        commit_pre_v22_message(&mut engine, &verification_remove).await;
+        commit_pre_v23_message(&mut engine, &verification_remove).await;
 
         let verification_result = engine.get_verifications_by_fid(FID_FOR_TEST);
         assert_eq!(0, verification_result.unwrap().messages.len());
     }
 
     #[tokio::test]
-    async fn s4_data_shard_verification_admission_splits_at_v22() {
-        let pre_v22_block_time = pre_v22_testnet_time(0);
-        let timestamp = pre_v22_block_time.to_u64() as u32;
+    async fn s4_data_shard_verification_admission_splits_at_v23() {
+        let pre_v23_block_time = pre_v23_testnet_time(0);
+        let timestamp = pre_v23_block_time.to_u64() as u32;
         let verification_add = messages_factory::verifications::create_verification_add(
             FID3_FOR_TEST,
             0,
@@ -749,30 +749,30 @@ mod tests {
             None,
         );
 
-        let (mut pre_v22_engine, _tmpdir) = new_pre_v22_testnet_engine().await;
+        let (mut pre_v23_engine, _tmpdir) = new_pre_v23_testnet_engine().await;
         register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
-            &mut pre_v22_engine,
+            &mut pre_v23_engine,
         )
         .await;
-        commit_pre_v22_message(&mut pre_v22_engine, &verification_add).await;
+        commit_pre_v23_message(&mut pre_v23_engine, &verification_add).await;
 
-        let (mut post_v22_engine, _tmpdir) = test_helper::new_engine().await;
+        let (mut post_v23_engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
-            &mut post_v22_engine,
+            &mut post_v23_engine,
         )
         .await;
         for message in [&verification_add, &verification_remove] {
-            let error = post_v22_engine
+            let error = post_v23_engine
                 .validate_user_message(
                     message,
                     &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
-                    EngineVersion::V22,
+                    EngineVersion::V23,
                     &mut RocksDbTransactionBatch::new(),
                 )
                 .unwrap_err();
@@ -786,8 +786,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_ethereum_address_with_verification() {
-        let timestamp = pre_v22_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v22_testnet_engine().await;
+        let timestamp = pre_v23_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -810,7 +810,7 @@ mod tests {
             None,
         );
 
-        commit_pre_v22_message(&mut engine, &verification_add).await;
+        commit_pre_v23_message(&mut engine, &verification_add).await;
 
         // Verify the verification was added
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
@@ -867,8 +867,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
-        let timestamp = pre_v22_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v22_testnet_engine().await;
+        let timestamp = pre_v23_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -896,7 +896,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_pre_v22_message(&mut engine, &verification_add).await;
+        commit_pre_v23_message(&mut engine, &verification_add).await;
 
         // Step 2: Set the Ethereum address as primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -906,7 +906,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v22_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v23_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -931,7 +931,7 @@ mod tests {
             Some(timestamp + 2),
             None,
         );
-        commit_pre_v22_message(&mut engine, &verification_remove).await;
+        commit_pre_v23_message(&mut engine, &verification_remove).await;
 
         // Step 4: Verify the primary address was automatically revoked
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -1008,8 +1008,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
-        let timestamp = pre_v22_testnet_message_timestamp(0);
-        let (mut engine, _tmpdir) = new_pre_v22_testnet_engine().await;
+        let timestamp = pre_v23_testnet_message_timestamp(0);
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -1037,7 +1037,7 @@ mod tests {
             Some(timestamp),
             None,
         );
-        commit_pre_v22_message(&mut engine, &primary_verification_add).await;
+        commit_pre_v23_message(&mut engine, &primary_verification_add).await;
 
         let other_address = "182327170fc284caaa5b1bc3e3878233f529d741";
         let other_address_bytes = hex::decode(other_address).unwrap();
@@ -1052,7 +1052,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v22_message(&mut engine, &other_verification_add).await;
+        commit_pre_v23_message(&mut engine, &other_verification_add).await;
 
         // Set the primary address
         let primary_address_msg = messages_factory::user_data::create_user_data_add(
@@ -1062,7 +1062,7 @@ mod tests {
             Some(timestamp + 1),
             None,
         );
-        commit_pre_v22_message(&mut engine, &primary_address_msg).await;
+        commit_pre_v23_message(&mut engine, &primary_address_msg).await;
 
         // Verify the primary address was set
         let user_data_result = engine.get_user_data_by_fid_and_type(
@@ -1080,7 +1080,7 @@ mod tests {
         );
 
         // This should succeed
-        commit_pre_v22_message(&mut engine, &other_verification_remove).await;
+        commit_pre_v23_message(&mut engine, &other_verification_remove).await;
 
         // Verify the primary address is STILL set (should not be revoked)
         let user_data_result_after = engine.get_user_data_by_fid_and_type(
@@ -2405,6 +2405,133 @@ mod tests {
             "invalid network",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_chain_casts_merge_without_lookups() {
+        // `chain` is checked from the message alone: a part merges before its first cast exists,
+        // and a second cast at the same index merges too (readers take the latest). Both added
+        // fields come back from the store, also for the cast sent in `data` alone.
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let chain = proto::ChainCast {
+            root: Some(CastId {
+                fid: FID_FOR_TEST,
+                hash: vec![1; 20],
+            }),
+            index: 1,
+            count: 2,
+        };
+        let now = time::farcaster_time();
+        for timestamp in [now, now + 1] {
+            let mut part = messages_factory::casts::create_cast_add_with_body_suffix(
+                FID_FOR_TEST,
+                1,
+                Some(chain.clone()),
+                &[],
+                Some(timestamp),
+                &test_helper::default_signer(),
+            );
+            crate::storage::store::account::message_bytes_decode(&mut part);
+            if timestamp > now {
+                part.data_bytes = None;
+            }
+            commit_message(&mut engine, &part).await;
+        }
+
+        let stored = engine.get_casts_by_fid(FID_FOR_TEST).unwrap().messages;
+        assert_eq!(stored.len(), 2);
+        for cast in stored {
+            let Some(proto::message_data::Body::CastAddBody(body)) = cast.data.unwrap().body else {
+                panic!("not a cast");
+            };
+            assert_eq!(
+                (body.format_version, body.chain.as_ref()),
+                (1, Some(&chain))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bad_chain_bytes_stored_before_v22_still_prune() {
+        // Before ChainedCasts a node stores any bytes in a cast's fields 9 and 10. Pruning reads the
+        // stored cast back, and one that decoded to no `data` would stop the node at its trie key.
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let mut bad = messages_factory::casts::create_cast_add_with_body_suffix(
+            FID_FOR_TEST,
+            0,
+            None,
+            &[0x50, 0x01], // field 10 as a varint
+            Some(pre_v23_testnet_message_timestamp(0)),
+            &test_helper::default_signer(),
+        );
+        crate::storage::store::account::message_bytes_decode(&mut bad);
+        commit_pre_v23_message(&mut engine, &bad).await;
+
+        // Storage holds 4 casts in tests, so the 4th newer cast prunes the bad one.
+        for offset in 1..=4 {
+            let cast = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                &format!("msg{offset}"),
+                Some(pre_v23_testnet_message_timestamp(offset)),
+                None,
+            );
+            commit_pre_v23_message(&mut engine, &cast).await;
+        }
+        assert!(!message_exists_in_trie(&mut engine, &bad));
+    }
+
+    #[tokio::test]
+    async fn test_unsigned_added_fields_in_data_are_dropped_before_v22() {
+        // Nodes before ChainedCasts drop `format_version` and `chain` from a block's `data`, so a
+        // cast signed without them merges, and is stored without them, the same on old and new
+        // nodes.
+        let (mut engine, _tmpdir) = new_pre_v23_testnet_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let mut cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "part",
+            Some(pre_v23_testnet_message_timestamp(0)),
+            None,
+        );
+        if let Some(proto::message_data::Body::CastAddBody(body)) =
+            &mut cast.data.as_mut().unwrap().body
+        {
+            body.format_version = 1;
+            body.chain = Some(proto::ChainCast {
+                root: None,
+                index: 0,
+                count: 2,
+            });
+        }
+        commit_pre_v23_message(&mut engine, &cast).await;
+
+        let stored = engine.get_casts_by_fid(FID_FOR_TEST).unwrap().messages;
+        let Some(proto::message_data::Body::CastAddBody(body)) =
+            &stored[0].data.as_ref().unwrap().body
+        else {
+            panic!("not a cast");
+        };
+        assert_eq!((body.format_version, &body.chain), (0, &None));
     }
 
     #[tokio::test]
@@ -4266,7 +4393,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn replicator_replay_bypasses_post_v22_direct_admission_reject() {
+        async fn replicator_replay_bypasses_post_v23_direct_admission_reject() {
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             let add = verification_add(messages_factory::farcaster_time());
             engine
@@ -4327,7 +4454,7 @@ mod tests {
             );
         }
 
-        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V22
+        // End-to-end cutover straddle. A verification merged LIVE on a data shard before the V23
         // cutover, then the SAME verification arriving again by shard-0 forced replay after
         // cutover. This is the window case `routing.rs` documents: self-supersede keeps the store,
         // by-address index, and trie mutually consistent (the replay is a state no-op), while the
@@ -4336,7 +4463,7 @@ mod tests {
         // the verification twice even though state converges.
         //
         // `commit_replicator_message_for_test` stands in for the pre-cutover live merge: it seeds
-        // the row the data shard would already hold from the pre-V22 regime, which post-V22 direct
+        // the row the data shard would already hold from the pre-V23 regime, which post-V23 direct
         // admission now rejects (that rejection is exactly what makes shard 0 the only live path).
         #[tokio::test]
         async fn cutover_straddle_live_then_replay_converges_state_but_re_emits_event() {
@@ -5220,7 +5347,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_active_merge_on_chain_event_block_event_folds_replica_and_hints() {
-            // Devnet runs V22, so the arm folds the fanned-out REGISTER into this shard's own
+            // Devnet runs V23, so the arm folds the fanned-out REGISTER into this shard's own
             // replica: it materializes all three secondary indexes (ByChannelKey,
             // ChannelKeyByLabel, ByOwnerAddress), emits exactly one REGISTER hint, and — being a
             // secondary-index-only fold — never touches the trie.
@@ -5547,7 +5674,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
-            // On Mainnet the block's timestamp (0) resolves to a pre-V22 version, so
+            // On Mainnet the block's timestamp (0) resolves to a pre-V23 version, so
             // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The
             // caller warns and swallows the error, so the block still commits — but no state is
             // produced: the merge is short-circuited before any fold or trie write.
@@ -5592,7 +5719,7 @@ mod tests {
     // every error warns and yields fewer hints, and the merge result + trie are untouched.
     //
     // Most tests drive the real BlockEvent replay + forced merge + trie + hint sequence. Two edges
-    // — the pre-V22 gate and the Solana-protocol skip — call the emitter directly with an explicit
+    // — the pre-V23 gate and the Solana-protocol skip — call the emitter directly with an explicit
     // version because no running network can construct those states through replay.
     // ----------------------------------------------------------------------------------------
     mod channel_ownership_events_verification_hint_tests {
@@ -5613,7 +5740,7 @@ mod tests {
             hex::decode(VERIFIED_ADDRESS_HEX).unwrap()
         }
 
-        // A fresh devnet engine (V22 active) with FID3_FOR_TEST registered so the fixture
+        // A fresh devnet engine (V23 active) with FID3_FOR_TEST registered so the fixture
         // verification can merge.
         async fn new_verifier_engine() -> (ShardEngine, tempfile::TempDir) {
             let (mut engine, tmpdir) = test_helper::new_engine().await;
@@ -5979,7 +6106,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
             );
             assert_eq!(hints.len(), 1, "the hook emits the hint");
             // Persist the hint's writes: only the event store is touched, never the trie.
@@ -5998,35 +6125,35 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_pre_v22_gate_suppresses_hints_on_a_populated_replica() {
-            // The pre-V22 gate on the exact state no running network exhibits: a populated
+        async fn test_pre_v23_gate_suppresses_hints_on_a_populated_replica() {
+            // The pre-V23 gate on the exact state no running network exhibits: a populated
             // replica with the feature off. Built on devnet (so the replica exists), then the
-            // hook is called directly with a pre-V22 vs V22 version — the ONLY difference between
+            // hook is called directly with a pre-V23 vs V23 version — the ONLY difference between
             // "no hints" and "the hint" is the version, proving the gate is the discriminator.
             let (mut engine, _tmp) = new_verifier_engine().await;
             register_channel(&mut engine, "pets", verified_address()).await;
             let add = verification_add(messages_factory::farcaster_time());
 
             let mut txn_pre = RocksDbTransactionBatch::new();
-            let pre_v22 = engine.emit_channel_owner_hints_for_verification(
+            let pre_v23 = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn_pre,
                 EngineVersion::V19,
             );
             assert!(
-                pre_v22.is_empty(),
-                "pre-V22 (feature off) emits no hint even on a populated replica"
+                pre_v23.is_empty(),
+                "pre-V23 (feature off) emits no hint even on a populated replica"
             );
 
-            let mut txn_v22 = RocksDbTransactionBatch::new();
-            let v22 = engine.emit_channel_owner_hints_for_verification(
+            let mut txn_v23 = RocksDbTransactionBatch::new();
+            let v23 = engine.emit_channel_owner_hints_for_verification(
                 &add,
-                &mut txn_v22,
-                EngineVersion::V22,
+                &mut txn_v23,
+                EngineVersion::V23,
             );
-            assert_eq!(v22.len(), 1, "the same inputs at V22 emit the hint");
+            assert_eq!(v23.len(), 1, "the same inputs at V23 emit the hint");
             assert_hint(
-                &v22[0],
+                &v23[0],
                 "pets",
                 &verified_address(),
                 proto::ChannelOwnerChangeCause::VerificationAdd,
@@ -6054,7 +6181,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &solana_add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
             );
             assert!(
                 hints.is_empty(),
@@ -6080,7 +6207,7 @@ mod tests {
                     .emit_channel_owner_hints_for_verification(
                         &verification_add(messages_factory::farcaster_time()),
                         &mut txn,
-                        EngineVersion::V22,
+                        EngineVersion::V23,
                     )
                     .len(),
                 1,
@@ -6113,7 +6240,7 @@ mod tests {
                 let hints = engine.emit_channel_owner_hints_for_verification(
                     msg,
                     &mut txn,
-                    EngineVersion::V22,
+                    EngineVersion::V23,
                 );
                 assert!(
                     hints.is_empty(),
@@ -6140,7 +6267,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
                 3,
             );
 
@@ -6176,7 +6303,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification(
                 &add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
             );
 
             assert_eq!(
@@ -6249,7 +6376,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
                 3,
             );
             assert_eq!(hints.len(), 3, "the cap truncated to 3 hints");
@@ -6282,7 +6409,7 @@ mod tests {
             let hints = engine.emit_channel_owner_hints_for_verification_capped(
                 &add,
                 &mut txn,
-                EngineVersion::V22,
+                EngineVersion::V23,
                 256,
             );
 

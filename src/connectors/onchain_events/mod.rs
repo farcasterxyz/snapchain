@@ -2052,9 +2052,9 @@ mod tests {
             "devnet activates channel registrations at genesis, so a bad registry is fatal there"
         );
 
-        // Mainnet and testnet have no V22 entry scheduled yet. Asserted via
+        // Mainnet and testnet have no V23 entry scheduled yet. Asserted via
         // `channel_registrations_active` rather than a pinned version so this
-        // starts reporting `true` — correctly — the moment V22 is scheduled,
+        // starts reporting `true` — correctly — the moment V23 is scheduled,
         // rather than failing.
         for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
             let subscriber = offline_subscriber_on(

@@ -66,6 +66,8 @@ pub mod casts {
             mentions_positions: vec![],
             parent: None,
             r#type: CastType::Cast as i32,
+            format_version: 0,
+            chain: None,
         };
         create_message_with_data(
             fid,

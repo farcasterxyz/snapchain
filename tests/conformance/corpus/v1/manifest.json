@@ -2,7 +2,7 @@
   "corpus_version": 1,
   "protocol": {
     "network": "Devnet",
-    "engine_version": "V22"
+    "engine_version": "V23"
   },
   "vectors": [
     {
@@ -27,6 +27,39 @@
       "expected_state": {
         "shard_id": 1,
         "post_state_root": "f4002357cb70255b96989a673ff575478e96ce53"
+      }
+    },
+    {
+      "id": "cast_add_chain_part",
+      "description": "CastAdd in article Markdown that is the second cast of a three-cast chain (FIP: Cast Format and Chained Casts).",
+      "message_type": "CastAdd",
+      "fid": 1234,
+      "timestamp": 94608000,
+      "signer_private_key": "1000000000000000000000000000000000000000000000000000000000000000",
+      "input": {
+        "chain": {
+          "count": 3,
+          "index": 1,
+          "root": {
+            "fid": 1234,
+            "hash": "0303030303030303030303030303030303030303"
+          }
+        },
+        "format_version": 1,
+        "text": "Part two.",
+        "type": "CAST"
+      },
+      "message_file": "messages/cast_add_chain_part.pb",
+      "expected": {
+        "data_bytes": "080110d2091880b58e2d20012a2e2209506172742074776f2e4801521f0a1908d2091214030303030303030303030303030303030303030310011803",
+        "hash": "b4068eb367669e2e84390e021acae60226f18cb0",
+        "signature": "1c949df3b650c288b4040896bd7137af5758909f03eeb7eb3360a17e889f31b63a5c95a989d927f129c45a31e47ae3a2bf7fb5fc33e3978acbbbee69d38e950a",
+        "signer": "69104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d7",
+        "message_bytes": "0a3c080110d2091880b58e2d20012a2e2209506172742074776f2e4801521f0a1908d20912140303030303030303030303030303030303030303100118031214b4068eb367669e2e84390e021acae60226f18cb0180122401c949df3b650c288b4040896bd7137af5758909f03eeb7eb3360a17e889f31b63a5c95a989d927f129c45a31e47ae3a2bf7fb5fc33e3978acbbbee69d38e950a2801322069104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d73a3c080110d2091880b58e2d20012a2e2209506172742074776f2e4801521f0a1908d2091214030303030303030303030303030303030303030310011803"
+      },
+      "expected_state": {
+        "shard_id": 1,
+        "post_state_root": "b71580ffade39a59b640ab920210af3f652cc3db"
       }
     },
     {
