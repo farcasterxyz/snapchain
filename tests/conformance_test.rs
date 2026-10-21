@@ -85,6 +85,41 @@ fn vectors() -> Vec<VectorSpec> {
             }),
         },
         VectorSpec {
+            id: "cast_add_chain_part",
+            description:
+                "CastAdd in article Markdown that is the second cast of a three-cast chain (FIP: Cast Format and Chained Casts).",
+            message_type: MessageType::CastAdd,
+            fid: VECTOR_FID,
+            input: json!({
+                "text": "Part two.",
+                "type": "CAST",
+                "format_version": 1,
+                "chain": { "root": { "fid": VECTOR_FID, "hash": "03".repeat(20) }, "index": 1, "count": 3 }
+            }),
+            state_root: true,
+            build: Box::new(|signer, ts| {
+                messages_factory::create_message_with_data(
+                    VECTOR_FID,
+                    MessageType::CastAdd,
+                    proto::message_data::Body::CastAddBody(proto::CastAddBody {
+                        text: "Part two.".to_string(),
+                        format_version: 1,
+                        chain: Some(proto::ChainCast {
+                            root: Some(proto::CastId {
+                                fid: VECTOR_FID,
+                                hash: vec![0x03u8; 20],
+                            }),
+                            index: 1,
+                            count: 3,
+                        }),
+                        ..Default::default()
+                    }),
+                    Some(ts),
+                    Some(signer),
+                )
+            }),
+        },
+        VectorSpec {
             id: "cast_remove",
             description: "CastRemove targeting a fixed cast hash.",
             message_type: MessageType::CastRemove,

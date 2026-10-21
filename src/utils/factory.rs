@@ -103,10 +103,10 @@ pub mod events_factory {
     }
 
     // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
-    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V22) is
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V23) is
     // active; tests construct it directly to exercise the receiver-side admission arm. The
     // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
-    // network (devnet -> V22 active; mainnet -> pre-V22 inactive), mirroring the KEY_ADD tests.
+    // network (devnet -> V23 active; mainnet -> pre-V23 inactive), mirroring the KEY_ADD tests.
     pub fn create_merge_on_chain_event_event(
         on_chain_event: OnChainEvent,
         seqnum: u64,
@@ -424,6 +424,8 @@ pub mod messages_factory {
                 mentions_positions: vec![],
                 parent,
                 r#type: cast_type.unwrap_or(CastType::Cast) as i32,
+                format_version: 0,
+                chain: None,
             };
             create_message_with_data(
                 fid,
@@ -450,6 +452,39 @@ pub mod messages_factory {
                 timestamp,
                 private_key,
             )
+        }
+
+        /// A cast signed over `data_bytes`, with `extra` appended to its encoded body, for bytes the
+        /// schema cannot express, such as a malformed `chain` (field 10).
+        pub fn create_cast_add_with_body_suffix(
+            fid: u64,
+            format_version: u32,
+            chain: Option<proto::ChainCast>,
+            extra: &[u8],
+            timestamp: Option<u32>,
+            private_key: &SigningKey,
+        ) -> message::Message {
+            let mut msg = create_cast_add(fid, "chain part", timestamp, Some(private_key));
+            let mut data = msg.data.take().unwrap();
+            let Some(message::message_data::Body::CastAddBody(mut body)) = data.body.take() else {
+                unreachable!()
+            };
+            body.format_version = format_version;
+            body.chain = chain;
+            let mut body_bytes = body.encode_to_vec();
+            body_bytes.extend_from_slice(extra);
+            let mut data_bytes = data.encode_to_vec();
+            prost::encoding::encode_key(
+                5,
+                prost::encoding::WireType::LengthDelimited,
+                &mut data_bytes,
+            );
+            prost::encoding::encode_varint(body_bytes.len() as u64, &mut data_bytes);
+            data_bytes.extend_from_slice(&body_bytes);
+            msg.hash = calculate_message_hash(&data_bytes);
+            msg.signature = private_key.sign(&msg.hash).to_bytes().to_vec();
+            msg.data_bytes = Some(data_bytes);
+            msg
         }
 
         pub fn create_cast_with_parent(

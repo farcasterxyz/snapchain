@@ -114,6 +114,8 @@ mod tests {
                         hash: hex::decode(p.hash.replace("0x", "")).unwrap(),
                     })
                 }),
+                format_version: 0,
+                chain: None,
             };
             // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
             // The fixtures predate the embed-limit change, so validate them at V19 — the version

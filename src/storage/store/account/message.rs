@@ -4,11 +4,15 @@ use crate::core::types::FidOnDisk;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::{PageOptions, RocksdbError};
 use crate::storage::util::increment_vec_u8;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use crate::{
-    proto::{CastId, Message as MessageProto, MessageData, MessageType},
+    proto::{message_data::Body, CastId, Message as MessageProto, MessageData, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
 };
-use prost::Message as _;
+use prost::encoding::{
+    decode_key, decode_varint, encode_key, encode_varint, skip_field, DecodeContext, WireType,
+};
+use prost::{DecodeError, Message as _};
 
 pub const FID_BYTES: usize = 4;
 
@@ -333,11 +337,144 @@ pub fn message_encode(message: &MessageProto) -> Vec<u8> {
 #[inline]
 pub fn message_bytes_decode(msg: &mut MessageProto) {
     if msg.data_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
-        if let Ok(msg_data) = MessageData::decode(msg.data_bytes.as_ref().unwrap().as_slice()) {
+        if let Ok(msg_data) = decode_message_data(msg.data_bytes.as_ref().unwrap(), None) {
             msg.data = Some(msg_data);
         } else {
             msg.data = None;
         }
+    }
+}
+
+/// The feature that defines `field` inside the `MessageData` body in field `body`, for fields added
+/// after v0.14.3. Older nodes skip such a field as unknown, so they accept and store any bytes in
+/// it. Add an arm for each field added to a message body, and clear the field in
+/// `drop_unknown_data_fields`.
+fn added_field_feature(body: u32, field: u32) -> Option<ProtocolFeature> {
+    match (body, field) {
+        // `cast_add_body.format_version` and `cast_add_body.chain`. TODO: store reads can stop
+        // dropping them once a scan after ChainedCasts activation finds no stored cast that needs
+        // it, and no node holds state from before that scan. Validation keeps dropping them, so
+        // that pre-activation blocks replay the same.
+        (5, 9) | (5, 10) => Some(ProtocolFeature::ChainedCasts),
+        _ => None,
+    }
+}
+
+/// An added field that `version` does not know; with `None` (store reads), every added field.
+fn is_unknown_field(body: u32, field: u32, version: Option<EngineVersion>) -> bool {
+    added_field_feature(body, field)
+        .is_some_and(|feature| version.is_none_or(|version| !version.is_enabled(feature)))
+}
+
+/// An unknown added field whose bytes do not decode. Decoded alone, at its depth in its body, since
+/// a field decodes in a message exactly when it decodes alone.
+fn is_bad_unknown_field(
+    body: u32,
+    field: u32,
+    bytes: &[u8],
+    version: Option<EngineVersion>,
+) -> bool {
+    is_unknown_field(body, field, version) && {
+        let mut data = Vec::new();
+        encode_key(body, WireType::LengthDelimited, &mut data);
+        encode_varint(bytes.len() as u64, &mut data);
+        data.extend_from_slice(bytes);
+        MessageData::decode(data.as_slice()).is_err()
+    }
+}
+
+/// Decodes `MessageData`. If that fails, it drops the added fields that `version` does not know and
+/// that do not decode, as an older node skips them, and decodes again. Validation passes the
+/// block's version; store reads pass `None`, as stored messages include ones accepted before the
+/// field's feature was active.
+pub fn decode_message_data(
+    bytes: &[u8],
+    version: Option<EngineVersion>,
+) -> Result<MessageData, DecodeError> {
+    MessageData::decode(bytes).or_else(|err| match drop_unknown_fields(bytes, version) {
+        Some(stripped) => MessageData::decode(stripped.as_slice()),
+        None => Err(err),
+    })
+}
+
+/// `MessageData` bytes without the added fields that `version` does not know and that do not
+/// decode, or `None` if there are none to drop.
+fn drop_unknown_fields(bytes: &[u8], version: Option<EngineVersion>) -> Option<Vec<u8>> {
+    // prost's recursion budget: 100 for top-level fields, 99 inside a nested message.
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut dropped = false;
+    for (tag, wire_type, field) in protobuf_fields(bytes, 100)? {
+        let mut payload = field;
+        let body = (wire_type == WireType::LengthDelimited)
+            .then(|| {
+                decode_key(&mut payload).ok()?;
+                decode_varint(&mut payload).ok()?;
+                protobuf_fields(payload, 99)
+            })
+            .flatten();
+        match body {
+            Some(body)
+                if body
+                    .iter()
+                    .any(|(f, _, field)| is_bad_unknown_field(tag, *f, field, version)) =>
+            {
+                let kept: Vec<u8> = body
+                    .into_iter()
+                    .filter(|(f, _, field)| !is_bad_unknown_field(tag, *f, field, version))
+                    .flat_map(|(_, _, field)| field.iter().copied())
+                    .collect();
+                encode_key(tag, WireType::LengthDelimited, &mut out);
+                encode_varint(kept.len() as u64, &mut out);
+                out.extend_from_slice(&kept);
+                dropped = true;
+            }
+            // A body that doesn't split into fields stays as it is, and the decode decides.
+            _ => out.extend_from_slice(field),
+        }
+    }
+    dropped.then_some(out)
+}
+
+/// The same drop for a decoded `MessageData`, using the same arms: for `data` sent without
+/// `data_bytes`, and for the `data` of a block's messages.
+pub fn drop_unknown_data_fields(data: &mut MessageData, version: EngineVersion) {
+    if let Some(Body::CastAddBody(body)) = &mut data.body {
+        if is_unknown_field(5, 9, Some(version)) {
+            body.format_version = 0;
+        }
+        if is_unknown_field(5, 10, Some(version)) {
+            body.chain = None;
+        }
+    }
+}
+
+/// Splits protobuf bytes into (tag, wire type, field bytes including the key).
+fn protobuf_fields(mut buf: &[u8], depth: u32) -> Option<Vec<(u32, WireType, &[u8])>> {
+    let mut fields = Vec::new();
+    while !buf.is_empty() {
+        let start = buf;
+        let (tag, wire_type) = decode_key(&mut buf).ok()?;
+        skip_protobuf_field(tag, wire_type, &mut buf, depth)?;
+        fields.push((tag, wire_type, &start[..start.len() - buf.len()]));
+    }
+    Some(fields)
+}
+
+/// prost's `skip_field`, with the recursion budget passed in so groups nest exactly as deep as
+/// prost allows at that level (its `DecodeContext` cannot be lowered from outside the crate).
+fn skip_protobuf_field(tag: u32, wire_type: WireType, buf: &mut &[u8], depth: u32) -> Option<()> {
+    if depth == 0 {
+        return None;
+    }
+    if wire_type != WireType::StartGroup {
+        return skip_field(wire_type, tag, buf, DecodeContext::default()).ok();
+    }
+    loop {
+        let (inner_tag, inner_wire_type) = decode_key(buf).ok()?;
+        if inner_wire_type == WireType::EndGroup {
+            return (inner_tag == tag).then_some(());
+        }
+        skip_protobuf_field(inner_tag, inner_wire_type, buf, depth - 1)?;
     }
 }
 
@@ -399,4 +536,138 @@ pub fn is_message_in_time_range(
         }
         Some(data) => return data.timestamp >= start_time && data.timestamp <= stop_time,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{message_data::Body, CastAddBody, CastType};
+
+    const BAD_FORMAT_VERSION: [u8; 4] = [0x4a, 0x02, 0xff, 0xff]; // field 9 as bytes
+    const BAD_CHAIN: [u8; 2] = [0x50, 0x01]; // field 10 as a varint
+    const UNKNOWN_FIELD: [u8; 2] = [0x78, 0x01]; // field 15, unknown to every schema
+
+    /// `MessageData` bytes with `field` between the cast's text and type, and the timestamp after
+    /// the cast body, so a fallback that loses fields on either side changes the result.
+    fn cast_data_bytes(field: &[u8]) -> Vec<u8> {
+        let mut body = CastAddBody {
+            text: "part".to_string(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        body.extend_from_slice(field);
+        body.extend_from_slice(
+            &CastAddBody {
+                r#type: CastType::LongCast as i32,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let mut bytes = MessageData {
+            fid: 1234,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        encode_key(5, WireType::LengthDelimited, &mut bytes);
+        encode_varint(body.len() as u64, &mut bytes);
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(
+            &MessageData {
+                timestamp: 5678,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        bytes
+    }
+
+    /// `depth` nested groups under `tag`, with a varint in the innermost one.
+    fn nested_groups(tag: u32, depth: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for _ in 0..depth {
+            encode_key(tag, WireType::StartGroup, &mut bytes);
+        }
+        bytes.extend_from_slice(&UNKNOWN_FIELD);
+        for _ in 0..depth {
+            encode_key(tag, WireType::EndGroup, &mut bytes);
+        }
+        bytes
+    }
+
+    #[test]
+    fn decode_drops_bad_added_fields_only_where_they_are_unknown() {
+        for bad in [
+            BAD_FORMAT_VERSION.to_vec(),
+            BAD_CHAIN.to_vec(),
+            [BAD_FORMAT_VERSION.as_slice(), &BAD_CHAIN].concat(),
+        ] {
+            let bytes = cast_data_bytes(&bad);
+            // From ChainedCasts on, fields 9 and 10 are known, so a bad one fails the decode.
+            assert!(decode_message_data(&bytes, Some(EngineVersion::V22)).is_err());
+            assert!(decode_message_data(&bytes, Some(EngineVersion::V21)).is_ok());
+
+            // Same result as v0.14.3, which skipped them as it skips any unknown field.
+            let data = decode_message_data(&bytes, None).unwrap();
+            assert_eq!(
+                data,
+                MessageData::decode(cast_data_bytes(&UNKNOWN_FIELD).as_slice()).unwrap()
+            );
+            let Some(Body::CastAddBody(body)) = &data.body else {
+                panic!("cast body lost");
+            };
+            assert_eq!(
+                (data.fid, data.timestamp, body.text.as_str(), body.r#type),
+                (1234, 5678, "part", CastType::LongCast as i32)
+            );
+
+            // Store reads always drop them, so a stored cast keeps its `data` and can be pruned.
+            let mut message = MessageProto {
+                data_bytes: Some(bytes),
+                ..Default::default()
+            };
+            message_bytes_decode(&mut message);
+            assert_eq!(message.data, Some(data));
+        }
+
+        // Only a field that does not decode is dropped: a good field 9 beside a bad field 10 stays.
+        let bytes = cast_data_bytes(&[[0x48, 0x01].as_slice(), &BAD_CHAIN].concat());
+        assert!(decode_message_data(&bytes, Some(EngineVersion::V22)).is_err());
+        for version in [Some(EngineVersion::V21), None] {
+            let data = decode_message_data(&bytes, version).unwrap();
+            let Some(Body::CastAddBody(body)) = data.body else {
+                panic!("cast body lost");
+            };
+            assert_eq!((body.format_version, body.chain), (1, None));
+        }
+    }
+
+    #[test]
+    fn decode_fallback_skips_groups_exactly_as_deep_as_prost() {
+        // prost's own skip of an unknown field is the oracle for what v0.14.3 accepted, for groups
+        // in a bad field 9 or 10 (cast body) and in an unknown field beside it (top level).
+        for depth in [1, 97, 98, 99, 100, 101] {
+            for field in [9, 10] {
+                assert_eq!(
+                    decode_message_data(&cast_data_bytes(&nested_groups(field, depth)), None)
+                        .is_ok(),
+                    MessageData::decode(cast_data_bytes(&nested_groups(15, depth)).as_slice())
+                        .is_ok(),
+                    "cast body, field {field}, depth {depth}"
+                );
+            }
+            let top_level = |chain_field: &[u8]| {
+                let mut bytes = cast_data_bytes(chain_field);
+                bytes.extend_from_slice(&nested_groups(999, depth));
+                bytes
+            };
+            assert_eq!(
+                decode_message_data(&top_level(&BAD_CHAIN), None).is_ok(),
+                MessageData::decode(top_level(&UNKNOWN_FIELD).as_slice()).is_ok(),
+                "top level, depth {depth}"
+            );
+        }
+        // The series straddles prost's limit, so the comparisons above are not vacuous.
+        assert!(MessageData::decode(cast_data_bytes(&nested_groups(15, 98)).as_slice()).is_ok());
+        assert!(MessageData::decode(cast_data_bytes(&nested_groups(15, 99)).as_slice()).is_err());
+    }
 }
