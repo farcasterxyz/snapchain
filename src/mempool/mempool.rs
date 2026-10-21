@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
+use crate::core::validations::{self, error::ValidationError};
 use crate::mempool::routing;
 use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
 use crate::storage::store::block_engine::BlockStores;
@@ -299,15 +300,11 @@ pub trait MessageMempoolExt {
 
 impl MessageMempoolExt for proto::Message {
     fn mempool_key(&self) -> MempoolKey {
-        if let Some(data) = &self.data {
-            // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
-            return MempoolKey::new(
-                MempoolMessageKind::UserMessage,
-                FarcasterTime::new(data.timestamp as u64).to_unix_seconds(),
-                self.hex_hash(),
-            );
-        }
-        todo!();
+        // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
+        let timestamp = self.data.as_ref().map_or(0, |data| {
+            FarcasterTime::new(data.timestamp as u64).to_unix_seconds()
+        });
+        MempoolKey::new(MempoolMessageKind::UserMessage, timestamp, self.hex_hash())
     }
 }
 
@@ -456,7 +453,10 @@ impl ReadNodeMempool {
                 MempoolMessage::UserMessage(message) => match &message.data {
                     None => false,
                     Some(message_data) => {
-                        let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
+                        let Ok(ts_hash) = make_ts_hash(message_data.timestamp, &message.hash)
+                        else {
+                            return false;
+                        };
                         match type_to_set_postfix(message_data.r#type()) {
                             Err(_) => {
                                 // We hit this for link compact messages and it's expected. Return [false] so the message isn't filtered out
@@ -600,6 +600,24 @@ impl ReadNodeMempool {
         }
         panic!("Mempool has exited");
     }
+}
+
+/// Stateless checks for a user message received over gossip: data present and decodable,
+/// hash, signature, network, size and body. Uses the wall clock and the current engine
+/// version, since there is no block yet.
+pub fn validate_gossiped_message(
+    message: &proto::Message,
+    network: FarcasterNetwork,
+) -> Result<(), ValidationError> {
+    // Consensus decides pro status. Claiming it here only relaxes limits, so admission never
+    // refuses what consensus would accept.
+    validations::message::validate_message(
+        message,
+        network,
+        true,
+        &FarcasterTime::current(),
+        EngineVersion::current(network),
+    )
 }
 
 /// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
@@ -924,6 +942,19 @@ impl Mempool {
         message: MempoolMessage,
         source: MempoolSource,
     ) -> Result<(), HubError> {
+        // RPC submissions are fully simulated before they get here; gossip from any peer is not.
+        if let (MempoolMessage::UserMessage(user_message), MempoolSource::Gossip) =
+            (&message, &source)
+        {
+            if let Err(err) =
+                validate_gossiped_message(user_message, self.read_node_mempool.network)
+            {
+                self.statsd_client
+                    .count("mempool.gossip_validation_failure", 1, vec![]);
+                return Err(HubError::validation_failure(&err.to_string()));
+            }
+        }
+
         let shard_ids = self.read_node_mempool.route_mempool_message(&message);
 
         let mut errors = vec![];
