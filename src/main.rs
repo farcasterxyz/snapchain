@@ -27,6 +27,7 @@ use snapchain::storage::store::stores::Stores;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
@@ -245,6 +246,25 @@ async fn schedule_background_jobs(
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
     let mut entries = fs::read_dir(path)?;
     Ok(entries.next().is_none())
+}
+
+/// Spawns a task the node cannot run without. If it ever returns or panics, the node exits
+/// with an error so its supervisor restarts it, rather than running on without it.
+fn spawn_critical<F>(name: &'static str, task: F, system_tx: mpsc::Sender<SystemMessage>)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        let reason = match handle.await {
+            Ok(()) => format!("{} task exited", name),
+            Err(err) => format!("{} task failed: {}", name, err),
+        };
+        if let Err(err) = system_tx.send(SystemMessage::ExitWithError(reason)).await {
+            error!("Could not request exit after {} task ended: {}", name, err);
+            process::exit(1);
+        }
+    });
 }
 
 fn create_replicator(
@@ -563,7 +583,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.fc_network,
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         // Setup replication if enabled
         let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
@@ -727,7 +751,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_rx,
             statsd_client.clone(),
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(

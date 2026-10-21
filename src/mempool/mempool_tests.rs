@@ -1475,4 +1475,79 @@ mod tests {
         .await;
         pull_message(&messages_request_tx, 1, None).await;
     }
+
+    async fn add_gossiped_message(
+        mempool_tx: &mpsc::Sender<MempoolRequest>,
+        message: proto::Message,
+    ) -> Result<(), crate::core::error::HubError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                MempoolSource::Gossip,
+                Some(reply_tx),
+            ))
+            .await
+            .unwrap();
+        reply_rx
+            .await
+            .expect("mempool dropped the reply; the mempool task has likely panicked")
+    }
+
+    #[tokio::test]
+    async fn test_malformed_gossiped_messages_are_rejected_without_stopping_the_mempool() {
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut no_data = create_cast_add(1234, "no data", None, None);
+        no_data.data = None;
+        no_data.data_bytes = None;
+
+        let mut short_hash = create_cast_add(1234, "short hash", None, None);
+        short_hash.hash.truncate(19);
+
+        let mut bad_signature = create_cast_add(1234, "bad signature", None, None);
+        bad_signature.signature[0] ^= 0xff;
+
+        for message in [no_data, short_hash, bad_signature] {
+            let error = add_gossiped_message(&mempool_tx, message)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "bad_request.validation_failure");
+        }
+        pull_message(&messages_request_tx, 1, None).await;
+
+        let valid = create_cast_add(1234, "valid", None, None);
+        add_gossiped_message(&mempool_tx, valid.clone())
+            .await
+            .unwrap();
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(valid)),
+        )
+        .await;
+    }
+
+    #[test]
+    fn test_mempool_key_does_not_panic_without_data() {
+        use crate::mempool::mempool::MessageMempoolExt;
+
+        let mut message = create_cast_add(1234, "no data", None, None);
+        message.data = None;
+        let key = message.mempool_key();
+        assert_eq!(key.identity(), message.hex_hash());
+    }
 }
