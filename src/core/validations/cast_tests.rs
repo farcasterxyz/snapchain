@@ -231,8 +231,14 @@ mod tests {
             for is_pro_user in [false, true] {
                 assert!(validate("a".repeat(10_000), is_pro_user, version).is_ok());
                 assert!(validate("a".repeat(1_025), is_pro_user, version).is_ok());
-                assert!(validate("a".repeat(10_001), is_pro_user, version).is_err());
-                assert!(validate("a".repeat(1_024), is_pro_user, version).is_err());
+                assert_eq!(
+                    validate("a".repeat(10_001), is_pro_user, version),
+                    Err(ValidationError::TextTooLongFor10kCast)
+                );
+                assert_eq!(
+                    validate("a".repeat(1_024), is_pro_user, version),
+                    Err(ValidationError::TextTooShortFor10kCast)
+                );
             }
         }
     }
