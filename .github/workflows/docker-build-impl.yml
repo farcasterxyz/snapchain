@@ -43,6 +43,7 @@ jobs:
           # branch for push events. On push-to-main this resolves to "main".
           BRANCH_RAW: ${{ github.head_ref || github.ref_name }}
           IS_MAIN: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           SHA: ${{ github.sha }}
         run: |
           repo="ghcr.io/farcasterxyz/snapchain/cache"
@@ -56,6 +57,12 @@ jobs:
             echo "type=registry,ref=${repo}:${ARCH}-main"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+          # Fork PRs get a read-only GITHUB_TOKEN, so pushing cache layers to GHCR
+          # fails the build. Leave `to` unset so they only read the cache.
+          if [[ "$IS_FORK_PR" == "true" ]]; then
+            exit 0
+          fi
 
           # Always write the branch tag (on main this is "${ARCH}-main"). On main,
           # additionally write a commit-SHA tag; the GC workflow keeps the last 5.
