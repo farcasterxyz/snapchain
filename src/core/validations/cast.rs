@@ -24,7 +24,9 @@ pub fn validate_cast_add_body(
         Ok(CastType::LongCast) if text_bytes.len() <= 320 => {
             return Err(ValidationError::TextTooShortForLongCast);
         }
-        Ok(CastType::TenKCast) if !is_pro_user => {
+        Ok(CastType::TenKCast)
+            if !is_pro_user && !version.is_enabled(ProtocolFeature::UngateProMessageVariants) =>
+        {
             return Err(ValidationError::ProUserFeature);
         }
         Ok(CastType::TenKCast) if text_bytes.len() > 10_000 => {

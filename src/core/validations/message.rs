@@ -129,7 +129,9 @@ pub fn validate_message(
         if version.is_enabled(crate::version::version::ProtocolFeature::MessageLengthCheckFix) {
             if message_data.r#type() == MessageType::LinkCompactState {
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
-            } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
+            } else if message_data.r#type() == MessageType::CastAdd
+                && (is_pro_user || version.is_enabled(ProtocolFeature::UngateProMessageVariants))
+            {
                 MAX_DATA_BYTES_FOR_10K_CAST
             } else if message_data.r#type() == MessageType::UsernameProof
                 && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
@@ -675,7 +677,7 @@ pub fn validate_user_data_add_body(
             }
         }
         UserDataType::Banner => {
-            if !is_pro_user {
+            if !is_pro_user && !version.is_enabled(ProtocolFeature::UngateProMessageVariants) {
                 return Err(ValidationError::ProUserFeature);
             }
             if value_bytes.len() > 256 {

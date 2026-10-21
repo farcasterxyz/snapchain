@@ -784,6 +784,93 @@ mod tests {
         assert!(validate_with_version(&msg, EngineVersion::V17).is_ok());
     }
 
+    fn validate_as(
+        msg: &proto::Message,
+        is_pro_user: bool,
+        version: EngineVersion,
+    ) -> Result<(), ValidationError> {
+        validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            is_pro_user,
+            &FarcasterTime::current(),
+            version,
+        )
+    }
+
+    /// Pins both sides of the `UngateProMessageVariants` boundary for banners. Below it, only Pro
+    /// can set one, so pre-V21 history replays identically; at and above it, anyone can.
+    #[test]
+    fn banners_are_open_to_everyone_from_v21() {
+        let banner = create_user_data_add(
+            1234,
+            proto::UserDataType::Banner,
+            &"https://example.com/banner.png".to_string(),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&banner, false, EngineVersion::V20),
+            Err(ValidationError::ProUserFeature)
+        );
+        assert!(validate_as(&banner, true, EngineVersion::V20).is_ok());
+        for version in [EngineVersion::V21, EngineVersion::latest()] {
+            assert!(validate_as(&banner, false, version).is_ok());
+            assert!(validate_as(&banner, true, version).is_ok());
+        }
+
+        let too_long = create_user_data_add(
+            1234,
+            proto::UserDataType::Banner,
+            &"a".repeat(257),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&too_long, false, EngineVersion::V21),
+            Err(ValidationError::BannerValueTooLong)
+        );
+    }
+
+    /// A 10k cast does not fit in the default 2 KiB data ceiling, so the 16 KiB ceiling has to open
+    /// at the same boundary as the cast type or the ungate is useless. Below V21 a non-Pro 10k cast
+    /// is rejected on size before the cast type is even checked.
+    #[test]
+    fn ten_k_cast_data_ceiling_is_open_to_everyone_from_v21() {
+        let ten_k_cast = messages_factory::casts::create_cast_add_rich(
+            1234,
+            &"a".repeat(9_999),
+            Some(proto::CastType::TenKCast),
+            vec![],
+            None,
+            vec![],
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&ten_k_cast, false, EngineVersion::V20),
+            Err(ValidationError::DataBytesTooLong(2048))
+        );
+        assert!(validate_as(&ten_k_cast, true, EngineVersion::V20).is_ok());
+        for version in [EngineVersion::V21, EngineVersion::latest()] {
+            assert!(validate_as(&ten_k_cast, false, version).is_ok());
+            assert!(validate_as(&ten_k_cast, true, version).is_ok());
+        }
+
+        // The ceiling only applies to casts: other message types keep the default.
+        let oversized_bio = create_user_data_add(
+            1234,
+            proto::UserDataType::Bio,
+            &"a".repeat(4_000),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&oversized_bio, false, EngineVersion::V21),
+            Err(ValidationError::DataBytesTooLong(2048))
+        );
+    }
+
     #[test]
     fn test_channel_bodies_validate_stateless_fields() {
         use proto::message_data::Body;
