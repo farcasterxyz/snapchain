@@ -94,35 +94,51 @@ impl ReadValidator {
         num_blocks_processed
     }
 
-    fn get_decided_value_height(value: &proto::DecidedValue) -> Height {
-        match value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => {
-                shard_chunk.header.as_ref().unwrap().height.unwrap()
-            }
-
-            proto::decided_value::Value::Block(block) => {
-                block.header.as_ref().unwrap().height.unwrap()
-            }
+    /// Returns the height in a decided value's header, or `None` if the value, header or height
+    /// is missing.
+    pub fn decided_value_height(value: &proto::DecidedValue) -> Option<Height> {
+        match value.value.as_ref()? {
+            proto::decided_value::Value::Shard(shard_chunk) => shard_chunk.header.as_ref()?.height,
+            proto::decided_value::Value::Block(block) => block.header.as_ref()?.height,
         }
     }
 
-    fn verify_signatures(&self, value: &proto::DecidedValue) -> bool {
-        let commits = match value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => {
-                shard_chunk.commits.as_ref().unwrap()
-            }
+    fn matches_engine(&self, value: &proto::DecidedValue) -> bool {
+        matches!(
+            (&self.engine, &value.value),
+            (
+                Engine::ShardEngine(_),
+                Some(proto::decided_value::Value::Shard(_))
+            ) | (
+                Engine::BlockEngine(_),
+                Some(proto::decided_value::Value::Block(_))
+            )
+        )
+    }
 
-            proto::decided_value::Value::Block(block) => block.commits.as_ref().unwrap(),
+    fn verify_signatures(&self, value: &proto::DecidedValue) -> bool {
+        let commits = match value.value.as_ref() {
+            Some(proto::decided_value::Value::Shard(shard_chunk)) => shard_chunk.commits.as_ref(),
+            Some(proto::decided_value::Value::Block(block)) => block.commits.as_ref(),
+            None => None,
         };
 
-        verify_signatures(&commits, &self.validator_sets)
+        match commits {
+            Some(commits) => verify_signatures(commits, &self.validator_sets),
+            None => false,
+        }
     }
 
     pub fn validate_protocol_version(&self, value: &DecidedValue) -> bool {
         match &value.value {
             Some(proto::decided_value::Value::Block(block)) => {
-                let header = block.header.as_ref().unwrap();
-                let network = FarcasterNetwork::try_from(header.chain_id).unwrap();
+                let Some(header) = block.header.as_ref() else {
+                    return false;
+                };
+                let Ok(network) = FarcasterNetwork::try_from(header.chain_id) else {
+                    error!(%self.last_height, chain_id = header.chain_id, "Invalid chain id in decided block");
+                    return false;
+                };
                 let timestamp = FarcasterTime::new(header.timestamp);
                 let expected_version =
                     EngineVersion::version_for(&timestamp, network).protocol_version();
@@ -130,7 +146,7 @@ impl ReadValidator {
                 if header.version != expected_version {
                     let error_message = format!(
                         "Invalid protocol version in decided block at height {}: expected {}, got {}. Does your node need an upgrade?",
-                        header.height.unwrap().block_number,
+                        header.height.unwrap_or_default().block_number,
                         expected_version, header.version
                     );
                     error!(%self.last_height, error_message);
@@ -150,7 +166,14 @@ impl ReadValidator {
     }
 
     pub async fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
-        let height = Self::get_decided_value_height(&value);
+        let Some(height) = Self::decided_value_height(&value) else {
+            warn!(last_height = %self.last_height, "Dropping decided value with missing header or height");
+            return 0;
+        };
+        if height.shard_index != self.shard_id || !self.matches_engine(&value) {
+            warn!(%height, last_height = %self.last_height, "Dropping decided value for a different shard");
+            return 0;
+        }
         let verified = self.verify_signatures(&value);
         if !verified {
             error!(%height, last_height = %self.last_height, "Dropping decided block because its signatures are invalid");
