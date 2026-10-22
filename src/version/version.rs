@@ -240,11 +240,11 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V20,
     },
     VersionSchedule {
-        active_at: 1792663200, // 2026-10-22 10AM UTC (5:00 AM CDT)
+        active_at: 1792670400, // 2026-10-22 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V21,
     },
     VersionSchedule {
-        active_at: 1792663200, // 2026-10-22 10AM UTC (5:00 AM CDT)
+        active_at: 1792670400, // 2026-10-22 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V22,
     },
 ]
@@ -909,9 +909,9 @@ mod version_test {
 
     #[test]
     fn test_ungate_pro_message_variants_activation_schedule() {
-        // Testnet: V21 at 2026-10-22 10:00 UTC (5:00 AM CDT), in the same instant as V22;
+        // Testnet: V21 at 2026-10-22 12:00 UTC (7:00 AM CDT), in the same instant as V22;
         // pre-activation returns V20.
-        let testnet_active = 1792663200;
+        let testnet_active = 1792670400;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(testnet_active - 1),
@@ -962,7 +962,7 @@ mod version_test {
 
         // V22 activates in the same instant as V21 on each network.
         for (network, active_at) in [
-            (FarcasterNetwork::Testnet, 1792663200),
+            (FarcasterNetwork::Testnet, 1792670400),
             (FarcasterNetwork::Mainnet, 1798761600),
         ] {
             assert!(!EngineVersion::version_for(
