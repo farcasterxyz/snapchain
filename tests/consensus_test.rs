@@ -8,6 +8,8 @@ use serial_test::serial;
 use snapchain::connectors::onchain_events::{Chain, ChainAPI, ChainClients, EnsError};
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
+use snapchain::core::types::SnapchainValidatorContext;
+use snapchain::core::util::FarcasterTime;
 use snapchain::core::validations::error::ValidationError;
 use snapchain::core::validations::verification::VerificationAddressClaim;
 use snapchain::mempool::block_receiver::{self, BlockReceiver};
@@ -17,7 +19,7 @@ use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource, ReadNodeMempool,
 };
 use snapchain::mempool::routing::{self, MessageRouter, ShardRouter};
-use snapchain::network::gossip::SnapchainGossip;
+use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
@@ -38,6 +40,7 @@ use snapchain::storage::store::stores::Stores;
 use snapchain::storage::trie::merkle_trie::{self, TrieKey};
 use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
+use snapchain::version::version::{EngineVersion, VersionSchedule};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
@@ -233,6 +236,17 @@ trait Node {
         None
     }
 
+    fn user_data(&self, fid: u64, user_data_type: proto::UserDataType) -> Option<proto::Message> {
+        self.shard_stores().values().find_map(|stores| {
+            UserDataStore::get_user_data_by_fid_and_type(
+                &stores.user_data_store,
+                fid,
+                user_data_type,
+            )
+            .ok()
+        })
+    }
+
     fn get_username_proof(&self, fname: String) -> Option<proto::UserNameProof> {
         for stores in self.shard_stores().values() {
             let proof = UserDataStore::get_username_proof(
@@ -308,6 +322,13 @@ struct ReadNodeForTest {
     db: Arc<RocksDB>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    gossip_address: String,
+    /// `ExitWithError` messages the node raised. Production exits on the first one.
+    exit_errors: Arc<Mutex<Vec<String>>>,
+    /// Hashes of every block and shard chunk that arrived as decided-value gossip, so a test
+    /// can confirm that values it published reached the node.
+    decided_value_hashes: Arc<Mutex<HashSet<Vec<u8>>>>,
 }
 
 impl Node for ReadNodeForTest {
@@ -345,13 +366,16 @@ impl ReadNodeForTest {
             true,
         );
 
-        let config = snapchain::network::gossip::Config::new(gossip_address, bootstrap_address);
+        let config =
+            snapchain::network::gossip::Config::new(gossip_address.clone(), bootstrap_address);
 
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
             consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+        let exit_errors = Arc::new(Mutex::new(Vec::new()));
+        let decided_value_hashes = Arc::new(Mutex::new(HashSet::new()));
 
         let fc_network = FarcasterNetwork::Devnet;
         // `read_node=true` so this gossip handle subscribes to the same topics
@@ -418,6 +442,8 @@ impl ReadNodeForTest {
 
         let node_for_dispatch = node.clone();
         let mempool_tx_for_router = mempool_tx.clone();
+        let exit_errors_for_dispatch = exit_errors.clone();
+        let decided_value_hashes_for_dispatch = decided_value_hashes.clone();
         let handle = tokio::spawn(async move {
             loop {
                 if let Some(system_event) = system_rx.recv().await {
@@ -430,6 +456,25 @@ impl ReadNodeForTest {
                             // to the local ReadNodeMempool. It will short-circuit
                             // re-broadcasting because the source is `Gossip`.
                             let _ = mempool_tx_for_router.send(req).await;
+                        }
+                        SystemMessage::DecidedValueForReadNode(decided_value) => {
+                            let hash = match &decided_value.value {
+                                Some(proto::decided_value::Value::Block(block)) => {
+                                    Some(block.hash.clone())
+                                }
+                                Some(proto::decided_value::Value::Shard(chunk)) => {
+                                    Some(chunk.hash.clone())
+                                }
+                                None => None,
+                            };
+                            if let Some(hash) = hash {
+                                decided_value_hashes_for_dispatch.lock().insert(hash);
+                            }
+                            // Mirror main.rs.
+                            node_for_dispatch.dispatch_decided_value(decided_value);
+                        }
+                        SystemMessage::ExitWithError(err) => {
+                            exit_errors_for_dispatch.lock().push(err);
                         }
                         _ => {
                             // noop
@@ -446,7 +491,28 @@ impl ReadNodeForTest {
             db: db.clone(),
             mempool_tx,
             _messages_request_rx: messages_request_rx,
+            gossip_tx,
+            gossip_address,
+            exit_errors,
+            decided_value_hashes,
         }
+    }
+
+    /// Joins the decided-values topic, which a production read node does once its initial sync
+    /// completes. Validators publish each value they propose there.
+    pub async fn subscribe_to_decided_values(&self) {
+        self.gossip_tx
+            .send(GossipEvent::SubscribeToDecidedValuesTopic())
+            .await
+            .expect("read node gossip channel closed");
+    }
+
+    pub fn exit_errors(&self) -> Vec<String> {
+        self.exit_errors.lock().clone()
+    }
+
+    pub fn received_decided_value(&self, hash: &[u8]) -> bool {
+        self.decided_value_hashes.lock().contains(hash)
     }
 
     /// Submits `message` to this read node's mempool with `MempoolSource::RPC`,
@@ -3491,4 +3557,628 @@ async fn test_forged_contract_verification_via_gossip_is_rejected() {
         );
     }
     assert_blocks_match_across_validators(&network);
+}
+
+/// A libp2p peer with no mempool, engine or consensus behind it. It publishes exactly what a
+/// test hands it, as a misbehaving peer could.
+struct RoguePeer {
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl RoguePeer {
+    /// Dials every validator and read node in `network`, joining the mesh the way any read node
+    /// can.
+    async fn connect(network: &TestNetwork) -> Self {
+        let port = get_available_port();
+        let address = format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1");
+        let bootstrap = network
+            .gossip_addresses
+            .iter()
+            .cloned()
+            .chain(network.read_nodes.iter().map(|n| n.gossip_address.clone()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+        let mut gossip = SnapchainGossip::create(
+            Keypair::generate(),
+            &snapchain::network::gossip::Config::new(address, bootstrap),
+            None,
+            true,
+            FarcasterNetwork::Devnet,
+            statsd_client,
+        )
+        .await
+        .unwrap();
+        let gossip_tx = gossip.tx.clone();
+        let handle = tokio::spawn(async move { gossip.start().await });
+        Self { gossip_tx, handle }
+    }
+
+    async fn publish_message(&self, message: proto::Message) {
+        self.gossip_tx
+            .send(GossipEvent::BroadcastMempoolMessage(
+                MempoolMessage::UserMessage(message),
+            ))
+            .await
+            .expect("rogue gossip channel closed");
+    }
+
+    async fn publish_decided_value(&self, value: proto::DecidedValue) {
+        self.gossip_tx
+            .send(GossipEvent::BroadcastDecidedValue(value))
+            .await
+            .expect("rogue gossip channel closed");
+    }
+}
+
+impl Drop for RoguePeer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Holds a devnet engine schedule for the life of the guard. Every test in this file is
+/// `#[serial]`, so no other test's network sees it.
+struct DevnetSchedule;
+
+impl DevnetSchedule {
+    /// V20 until `cutover` (Unix seconds), then V21 and V22 in the same instant, as on testnet.
+    fn v20_until(cutover: u64) -> Self {
+        Self::set_cutover(cutover);
+        DevnetSchedule
+    }
+
+    fn set_cutover(cutover: u64) {
+        EngineVersion::set_devnet_schedule(Some(vec![
+            VersionSchedule {
+                active_at: 0,
+                version: EngineVersion::V20,
+            },
+            VersionSchedule {
+                active_at: cutover,
+                version: EngineVersion::V21,
+            },
+            VersionSchedule {
+                active_at: cutover,
+                version: EngineVersion::V22,
+            },
+        ]));
+    }
+}
+
+impl Drop for DevnetSchedule {
+    fn drop(&mut self) {
+        EngineVersion::set_devnet_schedule(None);
+    }
+}
+
+/// Waits for every read node to reach the validators' current block and shard heights.
+async fn read_nodes_catch_up(network: &TestNetwork) -> bool {
+    if network
+        .read_wait_for_block(network.max_block_height())
+        .await
+        .is_none()
+    {
+        return false;
+    }
+    for shard_id in 1..=network.num_shards {
+        if network
+            .read_wait_for_shard_chunk(shard_id, network.max_shard_height(shard_id))
+            .await
+            .is_none()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Every block and shard chunk a read node holds must be byte-identical to validator 0's.
+fn assert_read_nodes_match_validators(network: &TestNetwork) {
+    let validator = network.first_live_node();
+    for (r, read_node) in network.read_nodes.iter().enumerate() {
+        let common_height = read_node.num_blocks().min(validator.num_blocks()) as u64;
+        for height in 1..=common_height {
+            let block = |node: &dyn Node| {
+                node.block_stores()
+                    .block_store
+                    .get_block_by_height(height)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("missing block {height}"))
+                    .hash
+            };
+            assert_eq!(
+                block(read_node),
+                block(validator),
+                "read node {r} block {height} differs from validator 0"
+            );
+        }
+        for shard_id in 1..=network.num_shards {
+            let common_height = read_node
+                .num_shard_chunks(shard_id)
+                .min(validator.num_shard_chunks(shard_id)) as u64;
+            for height in 1..=common_height {
+                let chunk = |node: &dyn Node| {
+                    node.shard_stores()[&shard_id]
+                        .shard_store
+                        .get_chunk_by_height(height)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("missing shard {shard_id} chunk {height}"))
+                        .hash
+                };
+                assert_eq!(
+                    chunk(read_node),
+                    chunk(validator),
+                    "read node {r} shard {shard_id} chunk {height} differs from validator 0"
+                );
+            }
+        }
+    }
+}
+
+/// Publishes `messages` from `rogue` followed by `control`, until `control` commits on every
+/// validator or 30s pass. A committed control shows the rogue's gossip was reaching the
+/// validators' mempools in that round.
+async fn rogue_gossip_until_committed(
+    network: &TestNetwork,
+    rogue: &RoguePeer,
+    messages: &[proto::Message],
+    control: &proto::Message,
+) -> bool {
+    let fid = control.data.as_ref().unwrap().fid;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        for message in messages {
+            rogue.publish_message(message.clone()).await;
+        }
+        rogue.publish_message(control.clone()).await;
+        if network
+            .live_nodes()
+            .all(|node| node.cast_added(fid, control.hash.clone()).is_some())
+        {
+            return true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+    false
+}
+
+/// The `chain` a stored cast was signed with, read from `data_bytes` when present since `data`
+/// may predate the field.
+fn cast_chain(message: &proto::Message) -> Option<proto::ChainCast> {
+    use prost::Message as _;
+    let data = match &message.data_bytes {
+        Some(bytes) => proto::MessageData::decode(bytes.as_slice()).ok()?,
+        None => message.data.clone()?,
+    };
+    match data.body? {
+        proto::message_data::Body::CastAddBody(body) => body.chain,
+        _ => None,
+    }
+}
+
+/// Takes the network across the V21/V22 cutover the way testnet will: V20 until an instant, then
+/// both together. Before it, non-Pro 10k casts and banners stay out of blocks however they
+/// arrive, and an out-of-range `chain` is ignored as v0.14.3 ignores it, so a network mixing this
+/// build with the deployed one agrees. After it, those casts and banners commit, a bad `chain` is
+/// refused on every path, and the read node follows every block across the boundary.
+#[tokio::test]
+#[serial]
+async fn test_pro_variants_and_chained_casts_activate_at_the_cutover() {
+    let _schedule = DevnetSchedule::v20_until(u64::MAX);
+    let num_shards = 2;
+    let mut network = TestNetwork::create(4, num_shards).await;
+    network.start_validators().await;
+
+    let fid = 21000;
+    network.register_and_wait_for_fid(fid).await.unwrap();
+    network.wait_for_next_block_on_all_shards().await;
+    network.start_read_node().await;
+    assert!(
+        read_nodes_catch_up(&network).await,
+        "read node did not catch up before the cutover"
+    );
+    let rogue = RoguePeer::connect(&network).await;
+    let (signer, _) = network.test_fids.get(&fid).unwrap().clone();
+
+    let ten_k_cast = |tag: &str| {
+        messages_factory::casts::create_cast_add_rich(
+            fid,
+            &format!("{tag} {}", "x".repeat(2000)),
+            Some(proto::CastType::TenKCast),
+            vec![],
+            None,
+            vec![],
+            None,
+            Some(&signer),
+        )
+    };
+    let banner = |tag: &str| {
+        messages_factory::user_data::create_user_data_add(
+            fid,
+            proto::UserDataType::Banner,
+            &format!("https://example.com/{tag}.png"),
+            None,
+            Some(&signer),
+        )
+    };
+    let chained = |index, count| {
+        messages_factory::casts::create_cast_add_with_body_suffix(
+            fid,
+            1,
+            Some(proto::ChainCast {
+                root: None,
+                index,
+                count,
+            }),
+            &[],
+            None,
+            &signer,
+        )
+    };
+    let control = |tag: &str| {
+        messages_factory::casts::create_cast_add(
+            fid,
+            &format!("control {tag}"),
+            None,
+            Some(&signer),
+        )
+    };
+
+    assert_eq!(
+        EngineVersion::current(FarcasterNetwork::Devnet),
+        EngineVersion::V20
+    );
+    for message in [ten_k_cast("rpc before"), banner("rpc-before")] {
+        let err = network
+            .first_live_node()
+            .submit_message_via_grpc(message)
+            .await
+            .expect_err("gRPC accepted a Pro-only variant from a non-Pro fid before the cutover");
+        assert!(
+            err.message().contains("Pro subscription required"),
+            "{err:?}"
+        );
+    }
+
+    // Gossip admission lets any message claim Pro, so only block validation keeps these out.
+    let gossiped_ten_k = ten_k_cast("gossip before");
+    let gossiped_banner = banner("gossip-before");
+    assert!(
+        rogue_gossip_until_committed(
+            &network,
+            &rogue,
+            &[gossiped_ten_k.clone(), gossiped_banner.clone()],
+            &control("before"),
+        )
+        .await,
+        "rogue gossip never reached the validators"
+    );
+    network.wait_for_next_block_on_all_shards().await;
+    network.wait_for_next_block_on_all_shards().await;
+    assert!(read_nodes_catch_up(&network).await);
+    on_all_nodes(&network, |node, is_read, i| {
+        assert!(
+            node.cast_added(fid, gossiped_ten_k.hash.clone()).is_none(),
+            "node (read={is_read}, idx={i}) committed a non-Pro 10k cast before the cutover"
+        );
+        assert!(
+            node.user_data(fid, proto::UserDataType::Banner).is_none(),
+            "node (read={is_read}, idx={i}) committed a non-Pro banner before the cutover"
+        );
+    });
+
+    let ignored_chain = chained(3, 3);
+    network
+        .first_live_node()
+        .submit_message_via_grpc(ignored_chain.clone())
+        .await
+        .expect("an out-of-range chain was refused before V22, unlike v0.14.3");
+    assert!(network
+        .wait_for_cast(fid, ignored_chain.hash.clone())
+        .await
+        .is_some());
+
+    let cutover = FarcasterTime::current().to_unix_seconds() + 2;
+    DevnetSchedule::set_cutover(cutover);
+    while FarcasterTime::current().to_unix_seconds() <= cutover {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    network.wait_for_next_block_on_all_shards().await;
+    assert_eq!(
+        EngineVersion::current(FarcasterNetwork::Devnet),
+        EngineVersion::V22
+    );
+
+    let ten_k_after = ten_k_cast("after");
+    network
+        .first_live_node()
+        .submit_message_via_grpc(ten_k_after.clone())
+        .await
+        .expect("gRPC refused a non-Pro 10k cast after the cutover");
+    assert!(network
+        .wait_for_cast(fid, ten_k_after.hash.clone())
+        .await
+        .is_some());
+    let banner_after = banner("after");
+    network
+        .first_live_node()
+        .submit_message_via_grpc(banner_after.clone())
+        .await
+        .expect("gRPC refused a non-Pro banner after the cutover");
+    assert!(network
+        .wait_for_user_data_via_grpc(fid, proto::UserDataType::Banner, banner_after.hash.clone())
+        .await
+        .is_some());
+
+    let rejected_chain = chained(5, 5);
+    let err = network
+        .first_live_node()
+        .submit_message_via_grpc(rejected_chain.clone())
+        .await
+        .expect_err("gRPC accepted an out-of-range chain after V22");
+    assert!(
+        err.message().contains("chain index out of range"),
+        "{err:?}"
+    );
+    assert!(
+        rogue_gossip_until_committed(
+            &network,
+            &rogue,
+            &[rejected_chain.clone()],
+            &control("after"),
+        )
+        .await,
+        "rogue gossip never reached the validators"
+    );
+
+    let chain_start = chained(0, 3);
+    network
+        .first_live_node()
+        .submit_message_via_grpc(chain_start.clone())
+        .await
+        .expect("gRPC refused a valid chained cast after V22");
+    assert!(network
+        .wait_for_cast(fid, chain_start.hash.clone())
+        .await
+        .is_some());
+
+    network.wait_for_next_block_on_all_shards().await;
+    network.wait_for_next_block_on_all_shards().await;
+    assert!(
+        read_nodes_catch_up(&network).await,
+        "read node fell behind across the cutover"
+    );
+    on_all_nodes(&network, |node, is_read, i| {
+        let at = format!("node (read={is_read}, idx={i})");
+        assert!(
+            node.cast_added(fid, ten_k_after.hash.clone()).is_some(),
+            "{at} is missing the 10k cast"
+        );
+        assert_eq!(
+            node.user_data(fid, proto::UserDataType::Banner)
+                .map(|m| m.hash),
+            Some(banner_after.hash.clone()),
+            "{at} has the wrong banner"
+        );
+        assert!(
+            node.cast_added(fid, ignored_chain.hash.clone()).is_some(),
+            "{at} lost the cast committed before V22"
+        );
+        assert!(
+            node.cast_added(fid, rejected_chain.hash.clone()).is_none(),
+            "{at} committed an out-of-range chain after V22"
+        );
+        assert_eq!(
+            node.cast_added(fid, chain_start.hash.clone())
+                .and_then(|m| cast_chain(&m)),
+            Some(proto::ChainCast {
+                root: None,
+                index: 0,
+                count: 3
+            }),
+            "{at} did not keep the chain"
+        );
+    });
+    assert_blocks_match_across_validators(&network);
+    assert_read_nodes_match_validators(&network);
+    assert_eq!(network.read_nodes[0].exit_errors(), Vec::<String>::new());
+}
+
+/// A peer publishes malformed messages straight onto the mempool topic. Every validator must drop
+/// them and keep its mempool task, consensus must keep committing, and the read node must keep
+/// following.
+#[tokio::test]
+#[serial]
+async fn test_malformed_mempool_gossip_does_not_stall_the_network() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    let fid = 21100;
+    network.register_and_wait_for_fid(fid).await.unwrap();
+    network.wait_for_next_block_on_all_shards().await;
+    network.start_read_node().await;
+    assert!(read_nodes_catch_up(&network).await);
+    let rogue = RoguePeer::connect(&network).await;
+    let (signer, _) = network.test_fids.get(&fid).unwrap().clone();
+    let cast =
+        |text: &str| messages_factory::casts::create_cast_add(fid, text, None, Some(&signer));
+
+    let mut no_data = cast("no data");
+    no_data.data = None;
+    no_data.data_bytes = None;
+    let mut short_hash = cast("short hash");
+    short_hash.hash.truncate(19);
+    let mut bad_signature = cast("bad signature");
+    bad_signature.signature[0] ^= 0xff;
+    let malformed = [no_data, short_hash.clone(), bad_signature.clone()];
+
+    // The second round only commits if the first round's malformed messages left the mempools
+    // working.
+    for round in 0..2 {
+        assert!(
+            rogue_gossip_until_committed(
+                &network,
+                &rogue,
+                &malformed,
+                &cast(&format!("control {round}")),
+            )
+            .await,
+            "control cast never committed in round {round}"
+        );
+    }
+
+    // gRPC submit fails on a validator whose mempool task has stopped.
+    let validators = network.live_nodes().count();
+    for i in 0..validators {
+        let after = cast(&format!("after malformed gossip {i}"));
+        network
+            .live_nodes()
+            .nth(i)
+            .unwrap()
+            .submit_message_via_grpc(after.clone())
+            .await
+            .unwrap_or_else(|e| panic!("validator {i} refused a valid cast: {e:?}"));
+        assert!(
+            network
+                .wait_for_cast(fid, after.hash.clone())
+                .await
+                .is_some(),
+            "cast submitted to validator {i} never committed"
+        );
+    }
+
+    network.wait_for_next_block_on_all_shards().await;
+    assert!(
+        read_nodes_catch_up(&network).await,
+        "read node stopped following"
+    );
+    on_all_nodes(&network, |node, is_read, i| {
+        for message in [&short_hash, &bad_signature] {
+            assert!(
+                node.cast_added(fid, message.hash.clone()).is_none(),
+                "node (read={is_read}, idx={i}) committed a malformed cast"
+            );
+        }
+    });
+    assert_blocks_match_across_validators(&network);
+    assert_read_nodes_match_validators(&network);
+    assert_eq!(network.read_nodes[0].exit_errors(), Vec::<String>::new());
+}
+
+/// Decided values a peer could publish to read nodes, each malformed in a way the read node
+/// once unwrapped. Each carries a distinct `hash` so a test can confirm it arrived.
+fn malformed_decided_values(next_height: u64) -> Vec<proto::DecidedValue> {
+    let height = |shard_index| {
+        Some(proto::Height {
+            shard_index,
+            block_number: next_height,
+        })
+    };
+    let commits = |height, value, signer: Vec<u8>| {
+        Some(proto::Commits {
+            height,
+            round: 0,
+            value,
+            signatures: vec![proto::CommitSignature {
+                signer,
+                signature: vec![0; 64],
+            }],
+        })
+    };
+    let value = Some(proto::ShardHash {
+        shard_index: 1,
+        hash: vec![1; 32],
+    });
+    let chunk = |marker: u8, header_height, commits| proto::DecidedValue {
+        value: Some(proto::decided_value::Value::Shard(proto::ShardChunk {
+            header: Some(proto::ShardHeader {
+                height: header_height,
+                ..Default::default()
+            }),
+            hash: vec![marker; 32],
+            transactions: vec![],
+            commits,
+        })),
+    };
+    let block = |marker: u8, header, commits| proto::DecidedValue {
+        value: Some(proto::decided_value::Value::Block(proto::Block {
+            header,
+            hash: vec![marker; 32],
+            commits,
+            ..Default::default()
+        })),
+    };
+    let block_header = Some(proto::BlockHeader {
+        height: height(0),
+        ..Default::default()
+    });
+    vec![
+        proto::DecidedValue { value: None },
+        block(0xa1, None, None),
+        chunk(0xa2, None, None),
+        chunk(0xa3, height(7), None),
+        // A shard chunk where the block shard expects a block.
+        chunk(0xa4, height(0), None),
+        chunk(0xa5, height(1), None),
+        chunk(0xa6, height(1), commits(None, value.clone(), vec![1; 32])),
+        chunk(0xa7, height(1), commits(height(1), None, vec![1; 32])),
+        chunk(
+            0xa8,
+            height(1),
+            commits(height(1), value.clone(), vec![1, 2, 3]),
+        ),
+        block(0xa9, block_header, commits(height(0), value, vec![1, 2, 3])),
+    ]
+}
+
+/// A peer publishes malformed decided values to a read node. The read node must drop them, raise
+/// no exit error, and keep syncing the real chain.
+#[tokio::test]
+#[serial]
+async fn test_malformed_decided_values_do_not_stall_the_read_node() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+    network.register_and_wait_for_fid(21200).await.unwrap();
+    network.wait_for_next_block_on_all_shards().await;
+    network.start_read_node().await;
+    assert!(read_nodes_catch_up(&network).await);
+    network.read_nodes[0].subscribe_to_decided_values().await;
+    let rogue = RoguePeer::connect(&network).await;
+
+    let malformed = malformed_decided_values(network.max_shard_height(1) as u64 + 1);
+    let markers: Vec<Vec<u8>> = malformed
+        .iter()
+        .filter_map(|v| match &v.value {
+            Some(proto::decided_value::Value::Block(block)) => Some(block.hash.clone()),
+            Some(proto::decided_value::Value::Shard(chunk)) => Some(chunk.hash.clone()),
+            None => None,
+        })
+        .collect();
+    let read_node = &network.read_nodes[0];
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    while !markers.iter().all(|m| read_node.received_decided_value(m)) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "read node never received every malformed decided value"
+        );
+        for value in &malformed {
+            rogue.publish_decided_value(value.clone()).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+
+    network.wait_for_next_block_on_all_shards().await;
+    assert!(
+        read_nodes_catch_up(&network).await,
+        "read node stopped syncing after malformed decided values"
+    );
+    assert_eq!(read_node.exit_errors(), Vec::<String>::new());
+    assert_read_nodes_match_validators(&network);
 }
