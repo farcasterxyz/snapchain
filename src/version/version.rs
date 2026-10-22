@@ -157,9 +157,15 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1786640400, // 2026-08-13 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V20,
     },
+    // Placeholder far enough out that no mainnet build activates V21/V22 before a real date is
+    // chosen; replace it in the mainnet activation PR.
     VersionSchedule {
-        active_at: 1792663200, // 2026-10-22 10AM UTC (5:00 AM CDT)
+        active_at: 1798761600, // 2027-01-01 12AM UTC (Dec 31 6:00 PM CST)
         version: EngineVersion::V21,
+    },
+    VersionSchedule {
+        active_at: 1798761600, // 2027-01-01 12AM UTC (Dec 31 6:00 PM CST)
+        version: EngineVersion::V22,
     },
 ]
 .as_slice();
@@ -234,8 +240,12 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V20,
     },
     VersionSchedule {
-        active_at: 1792645200, // 2026-10-22 5AM UTC (12:00 AM CDT)
+        active_at: 1792663200, // 2026-10-22 10AM UTC (5:00 AM CDT)
         version: EngineVersion::V21,
+    },
+    VersionSchedule {
+        active_at: 1792663200, // 2026-10-22 10AM UTC (5:00 AM CDT)
+        version: EngineVersion::V22,
     },
 ]
 .as_slice();
@@ -899,8 +909,9 @@ mod version_test {
 
     #[test]
     fn test_ungate_pro_message_variants_activation_schedule() {
-        // Testnet: V21 at 2026-10-22 05:00 UTC (12:00 AM CDT); pre-activation returns V20.
-        let testnet_active = 1792645200;
+        // Testnet: V21 at 2026-10-22 10:00 UTC (5:00 AM CDT), in the same instant as V22;
+        // pre-activation returns V20.
+        let testnet_active = 1792663200;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(testnet_active - 1),
@@ -913,11 +924,11 @@ mod version_test {
                 &FarcasterTime::from_unix_seconds(testnet_active),
                 FarcasterNetwork::Testnet,
             ),
-            EngineVersion::V21
+            EngineVersion::V22
         );
 
-        // Mainnet: V21 at 2026-10-22 10:00 UTC (5:00 AM CDT); pre-activation returns V20.
-        let mainnet_active = 1792663200;
+        // Mainnet: V21 and V22 at the 2027-01-01 00:00 UTC placeholder; pre-activation returns V20.
+        let mainnet_active = 1798761600;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(mainnet_active - 1),
@@ -930,7 +941,7 @@ mod version_test {
                 &FarcasterTime::from_unix_seconds(mainnet_active),
                 FarcasterNetwork::Mainnet,
             ),
-            EngineVersion::V21
+            EngineVersion::V22
         );
 
         assert!(testnet_active < mainnet_active);
@@ -949,11 +960,21 @@ mod version_test {
         assert!(EngineVersion::V22.is_enabled(ProtocolFeature::ChainedCasts));
         assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChainedCasts));
 
-        // V22 is unscheduled on mainnet/testnet; this breaks when the activation PR schedules it.
-        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
-        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
-            assert!(!EngineVersion::version_for(&far_future, network)
-                .is_enabled(ProtocolFeature::ChainedCasts));
+        // V22 activates in the same instant as V21 on each network.
+        for (network, active_at) in [
+            (FarcasterNetwork::Testnet, 1792663200),
+            (FarcasterNetwork::Mainnet, 1798761600),
+        ] {
+            assert!(!EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(active_at - 1),
+                network
+            )
+            .is_enabled(ProtocolFeature::ChainedCasts));
+            assert!(EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(active_at),
+                network
+            )
+            .is_enabled(ProtocolFeature::ChainedCasts));
         }
         assert!(
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
@@ -965,7 +986,7 @@ mod version_test {
     fn test_embed_limit_activates_without_the_channel_rollout() {
         // The whole point of putting embeds at V20, the Pro ungate at V21, and channels at V23:
         // scheduling either must NOT drag the channel features live. Both networks now schedule
-        // V21, so every channel gate has to stay shut at their latest scheduled version.
+        // V22, so every channel gate has to stay shut at their latest scheduled version.
         let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
         for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
             let version = EngineVersion::version_for(&far_future, network);
@@ -1307,12 +1328,11 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1786640400);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            Some(1792663200)
+            Some(1798761600)
         );
 
-        // V21 is the last scheduled mainnet version; V22 (chained casts) and V23 (channels) have no
-        // entry yet.
-        let time = FarcasterTime::from_unix_seconds(1792663200);
+        // V21 and V22 share the last scheduled mainnet timestamp; V23 (channels) has no entry yet.
+        let time = FarcasterTime::from_unix_seconds(1798761600);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
