@@ -4,6 +4,10 @@
 
 Get a list of account keys (signers) provided by an FID
 
+:::warning
+Deprecated: returns onchain keys only, not gasless keys added with `KEY_ADD`. Use [signersByFid](/reference/httpapi/signers#signersbyfid), which returns both.
+:::
+
 **Query Parameters**
 | Parameter | Description                        | Example                                                                     |
 | --------- | ---------------------------------- | --------------------------------------------------------------------------- |
