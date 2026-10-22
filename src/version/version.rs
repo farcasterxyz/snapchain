@@ -246,14 +246,32 @@ const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
 }]
 .as_slice();
 
+// Mainnet and testnet never read this, so it cannot move a production boundary.
+static DEVNET_SCHEDULE_OVERRIDE: parking_lot::RwLock<Option<&'static [VersionSchedule]>> =
+    parking_lot::const_rwlock(None);
+
+fn schedule_for(network: FarcasterNetwork) -> &'static [VersionSchedule] {
+    match network {
+        FarcasterNetwork::Mainnet => ENGINE_VERSION_SCHEDULE_MAINNET,
+        FarcasterNetwork::Testnet => ENGINE_VERSION_SCHEDULE_TESTNET,
+        _ => DEVNET_SCHEDULE_OVERRIDE
+            .read()
+            .unwrap_or(ENGINE_VERSION_SCHEDULE_DEVNET),
+    }
+}
+
 impl EngineVersion {
+    /// Replaces the devnet schedule for the whole process, or restores the default with `None`.
+    /// Lets integration tests run a devnet across a version boundary. Entries must be sorted by
+    /// `active_at`, and every node in the process sees the same schedule. Each call leaks its
+    /// schedule, so this is not for use outside tests.
+    pub fn set_devnet_schedule(schedule: Option<Vec<VersionSchedule>>) {
+        *DEVNET_SCHEDULE_OVERRIDE.write() =
+            schedule.map(|schedule| &*Box::leak(schedule.into_boxed_slice()));
+    }
+
     pub fn version_for(time: &FarcasterTime, network: FarcasterNetwork) -> EngineVersion {
-        let schedule = match network {
-            FarcasterNetwork::Mainnet => &ENGINE_VERSION_SCHEDULE_MAINNET,
-            FarcasterNetwork::Testnet => &ENGINE_VERSION_SCHEDULE_TESTNET,
-            _ => &ENGINE_VERSION_SCHEDULE_DEVNET,
-        };
-        let version = schedule
+        let version = schedule_for(network)
             .iter()
             .filter(|schedule| schedule.active_at <= time.to_unix_seconds())
             .last();
@@ -472,13 +490,7 @@ impl EngineVersion {
         time: &FarcasterTime,
         network: FarcasterNetwork,
     ) -> Option<u64> {
-        let schedule = match network {
-            FarcasterNetwork::Mainnet => &ENGINE_VERSION_SCHEDULE_MAINNET,
-            FarcasterNetwork::Testnet => &ENGINE_VERSION_SCHEDULE_TESTNET,
-            _ => &ENGINE_VERSION_SCHEDULE_DEVNET,
-        };
-
-        schedule
+        schedule_for(network)
             .iter()
             .find(|schedule_entry| schedule_entry.active_at > time.to_unix_seconds())
             .map(|schedule_entry| schedule_entry.active_at)
