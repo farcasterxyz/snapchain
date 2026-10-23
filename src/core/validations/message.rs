@@ -215,8 +215,9 @@ pub fn validate_message(
                 is_pro_user,
                 version,
             )?;
-            if let Some(chain) = &cast_add_body.chain {
-                if version.is_enabled(ProtocolFeature::ChainedCasts) {
+            if version.is_enabled(ProtocolFeature::ChainedCasts) {
+                cast::validate_format_version(cast_add_body.format_version)?;
+                if let Some(chain) = &cast_add_body.chain {
                     cast::validate_chain(chain, message_data.fid)?;
                 }
             }

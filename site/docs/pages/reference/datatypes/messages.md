@@ -137,7 +137,7 @@ Adds a new Cast message.
 | mentions_positions | uint32                | repeated | Positions of the mentions in the text       |
 | embeds             | [Embed](#Embed)       | repeated | URLs or cast ids to be embedded in the cast |
 | type               | [CastType](#CastType) |          | Type of cast (regular, long, etc.)          |
-| format_version     | uint32                |          | How to read the text: 0 is plain text, 1 is article Markdown |
+| format_version     | uint32                |          | How to read the text: 0 is plain text, 1 is article Markdown. Any other value is rejected once V22 is active |
 | chain              | [ChainCast](#ChainCast) | optional | Set on every cast of a chain              |
 
 #### Embed
@@ -166,7 +166,7 @@ Identifier used to look up a Cast
 
 ### 3.4 ChainCast
 
-Places a cast in an ordered chain of casts by one author, such as an article. Validated once the `ChainedCasts` feature (V22) is active; before it, nodes ignore `chain` and `format_version`. `format_version` has no rule.
+Places a cast in an ordered chain of casts by one author, such as an article. Validated once the `ChainedCasts` feature (V22) is active; before it, nodes ignore `chain` and `format_version`. From V22, `format_version` must be 0 or 1.
 
 | Field   | Type              | Label | Description                                                          |
 | ------- | ----------------- | ----- | -------------------------------------------------------------------- |

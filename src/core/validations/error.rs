@@ -56,6 +56,8 @@ pub enum ValidationError {
     ChainIndexOutOfRange,
     #[error("chain root must be absent at index 0 and the author's own cast otherwise")]
     ChainRootInvalid,
+    #[error("unknown format version")]
+    UnknownFormatVersion,
     #[error("string embeds > 2")]
     StringEmbedsExceedsLimit,
     #[error("url < 1 byte")]

@@ -887,8 +887,8 @@ mod tests {
     }
 
     /// Pins the `ChainedCasts` boundary. Below it a node accepts exactly what v0.14.3 accepted,
-    /// which skipped fields 9 and 10 as unknown; at and above it, `chain` is validated and any
-    /// `format_version` is valid.
+    /// which skipped fields 9 and 10 as unknown; at and above it, `chain` and `format_version`
+    /// are validated.
     #[test]
     fn chain_and_format_version_activate_at_v22() {
         let root = |fid, hash_len| {
@@ -903,7 +903,7 @@ mod tests {
         // The first cast, a part, a part of a growing chain, and the last index the cap allows.
         for (format_version, valid) in [
             (1, chain(None, 0, 3)),
-            (u32::MAX, part.clone()),
+            (0, part.clone()),
             (1, chain(root(1234, 20), 7, 0)),
             (1, chain(root(1234, 20), 99, 100)),
         ] {
@@ -945,6 +945,16 @@ mod tests {
             let msg = cast_with_body_suffix(1, bad, &[]);
             assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
             assert_eq!(validate_with_version(&msg, EngineVersion::V22), Err(error));
+        }
+
+        // Only plain text and article Markdown are defined, in or out of a chain.
+        for (format_version, added) in [(2, None), (u32::MAX, None), (2, part.clone())] {
+            let msg = cast_with_body_suffix(format_version, added, &[]);
+            assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
+            assert_eq!(
+                validate_with_version(&msg, EngineVersion::V22),
+                Err(ValidationError::UnknownFormatVersion)
+            );
         }
 
         // Field 9 as bytes, and field 10 as a varint.

@@ -364,8 +364,8 @@ impl EngineVersion {
             // proposer would include a non-Pro 10k cast or banner that an un-upgraded validator
             // rejects. Like V20, it sits below the channel block so it can ship without it.
             ProtocolFeature::UngateProMessageVariants => self >= &EngineVersion::V21,
-            // Activates `CastAddBody.format_version`, which has no rule, and validates
-            // `CastAddBody.chain` (FIP: Cast Format and Chained Casts). Below this boundary a node
+            // Activates and validates `CastAddBody.format_version` and `CastAddBody.chain` (FIP:
+            // Cast Format and Chained Casts). Below this boundary a node
             // treats both as older nodes treat unknown fields (see `added_field_feature`), and that
             // rule stays so pre-activation blocks replay the same. Like V20 and V21, it sits below
             // the channel block so it can ship without it.

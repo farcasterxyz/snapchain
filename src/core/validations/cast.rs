@@ -112,6 +112,19 @@ pub fn validate_cast_add_body(
     Ok(())
 }
 
+/// Highest defined `CastAddBody.format_version`: 0 is plain text and 1 is article Markdown.
+/// Raising it later is a versioned loosening; lowering it is never safe.
+pub const MAX_FORMAT_VERSION: u32 = 1;
+
+/// Rejects a `format_version` with no defined meaning, so clients never have to guess how to
+/// render one.
+pub fn validate_format_version(format_version: u32) -> Result<(), ValidationError> {
+    if format_version > MAX_FORMAT_VERSION {
+        return Err(ValidationError::UnknownFormatVersion);
+    }
+    Ok(())
+}
+
 /// Most casts in one chain. Raising it later is a versioned loosening; lowering it is never safe.
 pub const MAX_CHAIN_PARTS: u32 = 100;
 
