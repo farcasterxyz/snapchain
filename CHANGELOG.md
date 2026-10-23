@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2026-10-23
+
+### 🚀 Features
+
+- *(cast)* Allow 10k casts and banners for all users, not just Pro (#1054)
+- *(cast)* Add format_version and an optional chain field to casts (FIP: Cast Format and Chained Casts) (#1074)
+- *(cli)* Add chain and format_version flags to fc cast-add (#1082)
+
+### 🐛 Bug Fixes
+
+- *(read-node)* Drop malformed decided values instead of panicking (#1070)
+- *(mempool)* Validate gossiped messages and supervise the mempool task (#1071)
+
+### 🧪 Testing
+
+- *(consensus)* Cover the V21/V22 cutover and gossip trust boundaries end to end (#1078)
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip coverage comment and cache push on fork PRs (#1075)
+- *(version)* Schedule V21 and V22 on testnet for 2026-10-22 12:00 UTC (#1079)
+- *(version)* Schedule V21 and V22 on mainnet for 2026-10-23 12:00 UTC (#1083)
+
 ## [0.14.3] - 2026-10-15
 
 ### 🐛 Bug Fixes
