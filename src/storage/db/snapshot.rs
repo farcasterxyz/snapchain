@@ -396,36 +396,99 @@ pub async fn download_snapshots(
             local_chunks.push(filename);
         }
 
-        let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
-        let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
-
-        for filename in local_chunks {
-            info!(
-                "Unzipping snapshot chunk {} for shard {}",
-                filename, shard_id
-            );
-            let file = std::fs::File::open(filename)?;
-            let reader = BufReader::new(file);
-            let mut gz_decoder = GzDecoder::new(reader);
-            let mut buffer = Vec::new();
-            // These files are small, 100MB max each
-            gz_decoder.read_to_end(&mut buffer)?;
-            tar_file.write_all(&buffer).await?;
-        }
-        tar_file.flush().await?;
-
-        let file = std::fs::File::open(tar_filename.clone())?;
-        info!(
-            "Unpacking snapshot file {} for shard {}",
-            tar_filename, shard_id
-        );
-        let mut archive = Archive::new(file);
-        std::fs::create_dir_all(&db_dir)?;
-        archive.unpack(&db_dir)?;
+        assemble_and_unpack_shard(&snapshot_dir, shard_id, local_chunks, &db_dir).await?;
     }
 
     main_pb.finish_with_message("All snapshots downloaded successfully!");
+    // Per-shard staging has already been reclaimed; this clears metadata.json
+    // and the directory itself.
     std::fs::remove_dir_all(snapshot_dir)?;
+    Ok(())
+}
+
+/// Remove snapshot staging that is no longer needed, best effort.
+///
+/// Reclaiming disk must never abort a restore that is otherwise succeeding, so
+/// failures are logged and swallowed. The corollary is that the reduced peak
+/// usage this enables is contingent on these removals succeeding: if they fail,
+/// staging accumulates for the rest of the restore exactly as it did before.
+fn reclaim_staging(path: &str, description: &str, shard_id: u32) {
+    let result = if std::path::Path::new(path).is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(err) = result {
+        warn!(
+            "Could not remove {} {} for shard {}: {}. \
+             Snapshot staging will not be reclaimed until the restore completes.",
+            description, path, shard_id, err
+        );
+    }
+}
+
+/// Assemble one shard's downloaded chunks into a tar, unpack it into the
+/// database directory, and reclaim the staging both steps leave behind.
+///
+/// Staging is released at the two points where it provably stops being needed:
+/// each chunk once it has been folded into the tar, since chunks are read
+/// exactly once; and the tar plus the shard's chunk directory once the archive
+/// has been unpacked. Previously all of it was retained until every shard had
+/// finished, making peak disk usage a multiple of the database being restored
+/// rather than proportional to it.
+///
+/// Split out of `download_snapshots` so it can be exercised without an S3
+/// client — everything S3-dependent happens before this point.
+async fn assemble_and_unpack_shard(
+    snapshot_dir: &str,
+    shard_id: u32,
+    local_chunks: Vec<String>,
+    db_dir: &str,
+) -> Result<(), SnapshotError> {
+    let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
+    let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
+
+    for filename in local_chunks {
+        info!(
+            "Unzipping snapshot chunk {} for shard {}",
+            filename, shard_id
+        );
+        let file = std::fs::File::open(&filename)?;
+        let reader = BufReader::new(file);
+        let mut gz_decoder = GzDecoder::new(reader);
+        let mut buffer = Vec::new();
+        // These files are small, 100MB max each
+        gz_decoder.read_to_end(&mut buffer)?;
+        tar_file.write_all(&buffer).await?;
+
+        // The decoder owns the reader, which owns the chunk's file handle.
+        // Close it before unlinking: Unix tolerates removing an open file,
+        // Windows does not.
+        drop(gz_decoder);
+        reclaim_staging(&filename, "snapshot chunk", shard_id);
+    }
+    tar_file.flush().await?;
+    // Close the writer before reopening the same path for reading, rather than
+    // relying on a flushed-but-still-open handle.
+    drop(tar_file);
+
+    let file = std::fs::File::open(&tar_filename)?;
+    info!(
+        "Unpacking snapshot file {} for shard {}",
+        tar_filename, shard_id
+    );
+    let mut archive = Archive::new(file);
+    std::fs::create_dir_all(db_dir)?;
+    archive.unpack(db_dir)?;
+
+    // The archive still owns the tar's file handle; same reasoning as above.
+    drop(archive);
+    reclaim_staging(&tar_filename, "snapshot archive", shard_id);
+    reclaim_staging(
+        &format!("{}/shard-{}", snapshot_dir, shard_id),
+        "snapshot chunk directory",
+        shard_id,
+    );
     Ok(())
 }
 
@@ -641,4 +704,169 @@ pub async fn upload_to_s3(
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_staging_tests {
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write as _;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// A tar archive holding a single named entry.
+    fn make_tar(entry: &str, contents: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, entry, contents).unwrap();
+            builder.finish().unwrap();
+        }
+        bytes
+    }
+
+    /// Write a tar stream split across several gzipped chunks, which is the
+    /// shape the restore actually finds on disk: each chunk is a fragment of
+    /// one archive, not an archive of its own.
+    fn write_chunks(shard_dir: &Path, tar_bytes: &[u8], parts: usize) -> Vec<String> {
+        std::fs::create_dir_all(shard_dir).unwrap();
+        let part_len = tar_bytes.len().div_ceil(parts);
+        tar_bytes
+            .chunks(part_len)
+            .enumerate()
+            .map(|(i, part)| {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+                encoder.write_all(part).unwrap();
+                let path = shard_dir.join(format!("chunk_{:04}.bin", i));
+                std::fs::write(&path, encoder.finish().unwrap()).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn extracts_multiple_shards_and_reclaims_staging() {
+        let snapshot_dir = TempDir::new().unwrap();
+        let db_dir = TempDir::new().unwrap();
+        let snapshot_path = snapshot_dir.path().to_string_lossy().into_owned();
+        let db_path = db_dir.path().to_string_lossy().into_owned();
+
+        for shard_id in [1u32, 2u32] {
+            let entry = format!("shard-{}.sst", shard_id);
+            let contents = format!("contents of shard {}", shard_id);
+            let tar_bytes = make_tar(&entry, contents.as_bytes());
+            let shard_dir = snapshot_dir.path().join(format!("shard-{}", shard_id));
+            let chunks = write_chunks(&shard_dir, &tar_bytes, 3);
+            assert_eq!(chunks.len(), 3, "chunk fixture should span several files");
+
+            assemble_and_unpack_shard(&snapshot_path, shard_id, chunks, &db_path)
+                .await
+                .unwrap();
+
+            // Unpacked where the database expects it.
+            let restored = std::fs::read_to_string(db_dir.path().join(&entry)).unwrap();
+            assert_eq!(restored, contents);
+
+            // Staging for this shard is gone before the next one begins, which
+            // is the whole point: previously it survived until every shard
+            // finished.
+            assert!(
+                !shard_dir.exists(),
+                "shard {} chunk directory should be reclaimed",
+                shard_id
+            );
+            assert!(
+                !snapshot_dir
+                    .path()
+                    .join(format!("shard_{}_snapshot.tar", shard_id))
+                    .exists(),
+                "shard {} tar should be reclaimed",
+                shard_id
+            );
+        }
+
+        // Both shards' data coexists in the database.
+        assert!(db_dir.path().join("shard-1.sst").exists());
+        assert!(db_dir.path().join("shard-2.sst").exists());
+    }
+
+    #[tokio::test]
+    async fn assembly_failure_propagates() {
+        let snapshot_dir = TempDir::new().unwrap();
+        let db_dir = TempDir::new().unwrap();
+        let shard_dir = snapshot_dir.path().join("shard-1");
+        std::fs::create_dir_all(&shard_dir).unwrap();
+
+        // Not gzip. Decompression must fail rather than silently producing an
+        // empty or truncated database.
+        let bad = shard_dir.join("chunk_0000.bin");
+        std::fs::write(&bad, b"this is not gzip data").unwrap();
+
+        let result = assemble_and_unpack_shard(
+            &snapshot_dir.path().to_string_lossy(),
+            1,
+            vec![bad.to_string_lossy().into_owned()],
+            &db_dir.path().to_string_lossy(),
+        )
+        .await;
+
+        assert!(result.is_err(), "a corrupt chunk must abort the restore");
+    }
+
+    #[tokio::test]
+    async fn unpack_failure_propagates() {
+        let snapshot_dir = TempDir::new().unwrap();
+        let db_dir = TempDir::new().unwrap();
+        let shard_dir = snapshot_dir.path().join("shard-1");
+
+        // Valid gzip whose contents are not a tar archive.
+        let chunks = write_chunks(&shard_dir, b"valid gzip, invalid tar", 1);
+
+        let result = assemble_and_unpack_shard(
+            &snapshot_dir.path().to_string_lossy(),
+            1,
+            chunks,
+            &db_dir.path().to_string_lossy(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an unreadable archive must abort the restore"
+        );
+    }
+
+    #[test]
+    fn reclaim_staging_removes_files_and_directories() {
+        let dir = TempDir::new().unwrap();
+
+        let file = dir.path().join("archive.tar");
+        std::fs::write(&file, b"x").unwrap();
+        reclaim_staging(&file.to_string_lossy(), "snapshot archive", 1);
+        assert!(!file.exists());
+
+        let nested = dir.path().join("shard-1");
+        std::fs::create_dir_all(nested.join("deeper")).unwrap();
+        std::fs::write(nested.join("deeper").join("chunk_0000.bin"), b"x").unwrap();
+        reclaim_staging(&nested.to_string_lossy(), "snapshot chunk directory", 1);
+        assert!(!nested.exists());
+    }
+
+    #[test]
+    fn reclaim_staging_tolerates_failure() {
+        // Reclaiming disk is best effort. A path that cannot be removed must be
+        // logged and ignored, never propagated — a restore that has otherwise
+        // succeeded should not fail because cleanup did.
+        let dir = TempDir::new().unwrap();
+        reclaim_staging(
+            &dir.path().join("does-not-exist").to_string_lossy(),
+            "snapshot archive",
+            1,
+        );
+    }
 }
