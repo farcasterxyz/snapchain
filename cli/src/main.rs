@@ -230,6 +230,26 @@ struct CastAddArgs {
     #[arg(long)]
     text: String,
 
+    /// How clients should read --text. 0 = plain text.
+    #[arg(long, default_value_t = 0)]
+    format_version: u32,
+
+    /// Position of this cast in a chain, from 0. Omit for a cast outside any chain.
+    #[arg(long)]
+    chain_index: Option<u32>,
+
+    /// Number of casts in the chain. 0 = the chain is still growing.
+    #[arg(long, default_value_t = 0, requires = "chain_index")]
+    chain_count: u32,
+
+    /// Hash of the chain's first cast (hex, optional 0x prefix). Required past index 0.
+    #[arg(long, requires = "chain_index")]
+    chain_root: Option<String>,
+
+    /// Author of the chain root. Defaults to --fid; nodes reject any other FID.
+    #[arg(long, requires = "chain_root")]
+    chain_root_fid: Option<u64>,
+
     /// Hex Ed25519 secret of the signing key.
     #[arg(long, env = "SIGNER_SECRET")]
     signer_secret: String,
@@ -803,7 +823,28 @@ async fn run_cast_add(
     network: FarcasterNetwork,
 ) -> Result<(), BoxedError> {
     let signer = parse_secret(&args.signer_secret)?;
-    let mut msg = factory::casts::create_cast_add(args.fid, &args.text, None, &signer);
+    let chain = match args.chain_index {
+        Some(index) => Some(proto::ChainCast {
+            root: match &args.chain_root {
+                Some(hash) => Some(proto::CastId {
+                    fid: args.chain_root_fid.unwrap_or(args.fid),
+                    hash: parse_hex(hash)?,
+                }),
+                None => None,
+            },
+            index,
+            count: args.chain_count,
+        }),
+        None => None,
+    };
+    let mut msg = factory::casts::create_cast_add(
+        args.fid,
+        &args.text,
+        args.format_version,
+        chain,
+        None,
+        &signer,
+    );
     retarget_network(&mut msg, network, &signer);
     submit(node, &msg, "CAST_ADD").await
 }

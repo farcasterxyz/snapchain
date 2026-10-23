@@ -50,11 +50,13 @@ fn create_message_with_data(
 
 pub mod casts {
     use super::*;
-    use snapchain_proto::{CastAddBody, CastRemoveBody, CastType};
+    use snapchain_proto::{CastAddBody, CastRemoveBody, CastType, ChainCast};
 
     pub fn create_cast_add(
         fid: u64,
         text: &str,
+        format_version: u32,
+        chain: Option<ChainCast>,
         timestamp: Option<u32>,
         private_key: &SigningKey,
     ) -> proto::Message {
@@ -66,8 +68,8 @@ pub mod casts {
             mentions_positions: vec![],
             parent: None,
             r#type: CastType::Cast as i32,
-            format_version: 0,
-            chain: None,
+            format_version,
+            chain,
         };
         create_message_with_data(
             fid,
