@@ -157,14 +157,12 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1786640400, // 2026-08-13 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V20,
     },
-    // Placeholder far enough out that no mainnet build activates V21/V22 before a real date is
-    // chosen; replace it in the mainnet activation PR.
     VersionSchedule {
-        active_at: 1798761600, // 2027-01-01 12AM UTC (Dec 31 6:00 PM CST)
+        active_at: 1792756800, // 2026-10-23 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V21,
     },
     VersionSchedule {
-        active_at: 1798761600, // 2027-01-01 12AM UTC (Dec 31 6:00 PM CST)
+        active_at: 1792756800, // 2026-10-23 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V22,
     },
 ]
@@ -939,8 +937,8 @@ mod version_test {
             EngineVersion::V22
         );
 
-        // Mainnet: V21 and V22 at the 2027-01-01 00:00 UTC placeholder; pre-activation returns V20.
-        let mainnet_active = 1798761600;
+        // Mainnet: V21 and V22 at 2026-10-23 12:00 UTC; pre-activation returns V20.
+        let mainnet_active = 1792756800;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(mainnet_active - 1),
@@ -975,7 +973,7 @@ mod version_test {
         // V22 activates in the same instant as V21 on each network.
         for (network, active_at) in [
             (FarcasterNetwork::Testnet, 1792670400),
-            (FarcasterNetwork::Mainnet, 1798761600),
+            (FarcasterNetwork::Mainnet, 1792756800),
         ] {
             assert!(!EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(active_at - 1),
@@ -1340,11 +1338,11 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1786640400);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            Some(1798761600)
+            Some(1792756800)
         );
 
         // V21 and V22 share the last scheduled mainnet timestamp; V23 (channels) has no entry yet.
-        let time = FarcasterTime::from_unix_seconds(1798761600);
+        let time = FarcasterTime::from_unix_seconds(1792756800);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
