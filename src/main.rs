@@ -305,6 +305,10 @@ fn create_replicator(
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Initialize rustls before any HTTPS or gRPC.
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .expect("Failed to install rustls crypto provider");
+
     let args: Vec<String> = std::env::args().collect();
 
     let app_config = match snapchain::cfg::load_and_merge_config(args) {
@@ -390,15 +394,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                use rustls::crypto::{self, ring};
                 use snapchain::bootstrap::replication::service::{
                     ReplicatorBootstrap, WorkUnitResponse,
                 };
                 use tokio::time::{sleep, Duration};
-
-                // Initialize SSL for rustls
-                crypto::CryptoProvider::install_default(ring::default_provider())
-                    .expect("Failed to install rustls crypto provider");
 
                 info!("Starting node with replication bootstrap");
                 let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);

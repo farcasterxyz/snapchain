@@ -2,6 +2,10 @@
 build:
 	docker compose build
 
+.PHONY: distroless
+distroless:
+	docker build -f Dockerfile.distroless -t snapchain:distroless .
+
 .PHONY: dev
 dev: build
 	docker compose up --watch

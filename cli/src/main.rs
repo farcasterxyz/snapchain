@@ -1228,6 +1228,14 @@ async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
+    // Err means a provider is already installed. Panic only if none is set.
+    if rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .is_err()
+        && rustls::crypto::CryptoProvider::get_default().is_none()
+    {
+        panic!("Failed to install rustls crypto provider");
+    }
+
     let cli = Cli::parse();
     let network = cli.network.unwrap_or(NetworkArg::Testnet).as_proto();
     match cli.cmd {

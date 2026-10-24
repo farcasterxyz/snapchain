@@ -1918,6 +1918,10 @@ mod tests {
             dir.path().join("test.db").to_str().unwrap(),
         ));
         db.open().unwrap();
+        // reqwest panics without a process-wide rustls provider.
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
         Subscriber {
             provider: RootProvider::new_http("http://127.0.0.1:1".parse().unwrap()),
             mempool_tx,
