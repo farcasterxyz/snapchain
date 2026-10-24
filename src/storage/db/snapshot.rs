@@ -314,7 +314,16 @@ pub async fn download_snapshots(
 
     // Process each shard sequentially
     for &shard_id in &shard_ids {
-        let metadata_json = &all_metadata[&shard_id.to_string()];
+        // Snapshots are replaced daily and a shard can take hours to download,
+        // so by the time we get to this shard the metadata fetched above may
+        // point at a snapshot that has already been deleted. Fetch it again.
+        let metadata_json = download_metadata(network, shard_id, snapshot_config).await?;
+        let planned_chunks = all_metadata[&shard_id.to_string()].chunks.len();
+        if metadata_json.chunks.len() != planned_chunks {
+            let total = main_pb.length().unwrap_or(0) as i64 + metadata_json.chunks.len() as i64
+                - planned_chunks as i64;
+            main_pb.set_length(total.max(0) as u64);
+        }
         let base_path = &metadata_json.key_base;
         let shard_start = SystemTime::now();
 
