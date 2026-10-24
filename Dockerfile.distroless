@@ -1,0 +1,44 @@
+# Distroless snapchain binary. `make distroless` or:
+#   docker build -f Dockerfile.distroless -t snapchain:distroless .
+
+FROM rust:1.95 AS chef
+
+WORKDIR /usr/src/app
+
+ARG MALACHITE_GIT_REPO_URL=https://github.com/informalsystems/malachite.git
+ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
+ARG MALACHITE_GIT_REF=13bca14cd209d985c3adf101a02924acde8723a5
+ENV RUST_BACKTRACE=1
+RUN <<EOF
+set -eu
+apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler openssh-client cmake
+cargo install cargo-chef --locked
+cd ..
+git clone $MALACHITE_GIT_REPO_URL
+cd malachite
+git checkout $MALACHITE_GIT_REF
+EOF
+
+FROM chef AS planner
+COPY Cargo.lock Cargo.toml ./
+COPY proto ./proto
+COPY cli ./cli
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /usr/src/app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --bin snapchain
+
+COPY Cargo.lock Cargo.toml ./
+COPY proto ./proto
+COPY cli ./cli
+COPY src ./src
+
+ENV RUST_BACKTRACE=full
+RUN cargo build --release --bin snapchain
+
+FROM gcr.io/distroless/cc-debian13
+WORKDIR /app
+COPY --from=builder /usr/src/app/target/release/snapchain /app/snapchain
+CMD ["/app/snapchain", "--config-path", "/app/config.toml"]

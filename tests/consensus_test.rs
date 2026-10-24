@@ -2803,6 +2803,9 @@ async fn test_http_server_smoke() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let base = format!("http://{HOST_FOR_TEST}:{http_port}");
+    // reqwest panics without a process-wide rustls provider.
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
     let client = reqwest::Client::new();
 
     // /v1/info — sanity-check that we get a 200 with the expected shard count.
