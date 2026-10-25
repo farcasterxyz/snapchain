@@ -117,12 +117,13 @@ services:
 | `GRAFANA_CREDS` | `user:password` the script uses to configure Grafana. Defaults to `admin:admin`. |
 | `SKIP_SELF_UPGRADE` | If present, the script does not replace itself. Useful when testing local changes to the script. |
 | `STATSD_PUBLISH`, `STATSD_ADMIN_PUBLISH` | Host ports for `statsd` (default `8125` and `8126`). |
+| `MONITORING_BIND` | Host address Grafana and `statsd` bind to. Defaults to `127.0.0.1`. Set to `0.0.0.0` to expose them on all interfaces, and firewall the ports yourself. |
 | `FC_NETWORK_ID`, `STATSD_METRICS_SERVER` | Written for compatibility with Hubble's script. The node does not read them; its network and statsd settings come from `docker-compose.yml`. |
 
 ## Monitoring
 
 - **Sync status:** `curl -s localhost:3381/v1/info | jq`. Each shard's `blockDelay` is the number of seconds its newest block is behind the wall clock; a synced node stays in single digits. See the [Info API](/reference/httpapi/info) for every field.
-- **Dashboard:** Grafana runs at [http://localhost:3000](http://localhost:3000) with the default login `admin` / `admin`. Port 3000 is published on all interfaces, so change the password and keep the port closed in your firewall.
+- **Dashboard:** Grafana runs at [http://localhost:3000](http://localhost:3000) with the default login `admin` / `admin`. It is published on loopback only, so it is not reachable from outside the host unless you set `MONITORING_BIND`. Change the password regardless — anyone with shell access to the node can reach it.
 - **Logs:** `./snapchain.sh logs`.
 
 ## Ports
