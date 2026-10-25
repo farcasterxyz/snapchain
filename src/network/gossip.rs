@@ -2,7 +2,7 @@ use crate::cfg::{DEFAULT_GOSSIP_PORT, DEFAULT_RPC_PORT};
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
+use crate::core::types::{proto, FullProposalExt, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::mesh::diagnostics;
 use crate::network::mesh::metrics::GossipMetrics;
@@ -1105,7 +1105,13 @@ impl SnapchainGossip {
             "Received contact info from peer"
         );
 
-        let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
+        let Ok(contact_peer_id) = PeerId::from_bytes(&contact_info_body.peer_id) else {
+            warn!(
+                peer_id = peer_id.to_string(),
+                "Received contact info with an invalid peer id"
+            );
+            return;
+        };
 
         self.peers
             .insert(contact_peer_id, contact_info_body.clone());
@@ -1174,6 +1180,13 @@ impl SnapchainGossip {
                 }
 
                 Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
+                    if let Err(err) = full_proposal.check_well_formed() {
+                        warn!(
+                            peer_id = peer_id.to_string(),
+                            "Dropping malformed full proposal: {}", err
+                        );
+                        return None;
+                    }
                     let height = full_proposal.height();
                     debug!(
                         "Received block with height {} from peer: {}",

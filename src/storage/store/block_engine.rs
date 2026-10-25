@@ -2,7 +2,10 @@ use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
 use crate::core::validations;
-use crate::core::{types::Height, util::FarcasterTime};
+use crate::core::{
+    types::Height,
+    util::{block_events_hash, FarcasterTime},
+};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
@@ -1855,15 +1858,7 @@ impl BlockEngine {
                 .unwrap();
         }
 
-        let events_hash = if events.is_empty() {
-            vec![]
-        } else {
-            let mut events_hasher = blake3::Hasher::new();
-            for event in events.iter() {
-                events_hasher.update(&event.hash);
-            }
-            events_hasher.finalize().as_bytes().to_vec()
-        };
+        let events_hash = block_events_hash(&events);
 
         (events, events_hash)
     }
@@ -2163,6 +2158,25 @@ impl BlockEngine {
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
 
         Ok(())
+    }
+
+    /// Replays `block`'s transactions against the current state and checks they produce the
+    /// header's `state_root` and `events_hash`, without committing.
+    pub fn validate_block(&mut self, block: &Block) -> bool {
+        let Some(header) = block.header.as_ref() else {
+            return false;
+        };
+        let Some(height) = header.height else {
+            return false;
+        };
+        let state_change = BlockStateChange {
+            timestamp: FarcasterTime::new(header.timestamp),
+            new_state_root: header.state_root.clone(),
+            transactions: block.transactions.clone(),
+            events_hash: header.events_hash.clone(),
+            events: block.events.clone(),
+        };
+        self.validate_state_change(&state_change, height)
     }
 
     pub fn validate_state_change(

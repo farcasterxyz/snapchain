@@ -77,6 +77,14 @@ impl Address {
         Self(bytes)
     }
 
+    /// Fallible counterpart of [`Address::from_vec`] for bytes received from peers.
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| format!("Invalid address length: {}", bytes.len()))?;
+        Ok(Self(bytes))
+    }
+
     pub fn prefix(&self) -> String {
         format!("0x{}", &self.to_hex()[0..4])
     }
@@ -278,14 +286,48 @@ impl Display for Hash {
 // Malachite Height and Value trait impls are now in snapchain-proto crate
 // Most FullProposal methods are now in snapchain-proto crate
 
+/// Converts a wire round into a [`Round`]. `Round::from(i64)` panics on values above
+/// `u32::MAX`, so rounds received from peers must go through this instead.
+pub fn round_from_i64(round: i64) -> Result<Round, String> {
+    if round > i64::from(u32::MAX) {
+        return Err(format!("Round out of range: {}", round));
+    }
+    Ok(Round::from(round))
+}
+
 // Extension trait for FullProposal that depends on main crate types (Address)
 pub trait FullProposalExt {
     fn proposer_address(&self) -> Address;
+
+    /// Checks the invariants that `height()`, `round()`, `shard_hash()`, `proposer_address()`
+    /// and the proposers rely on. Proposals received from peers must pass this before use.
+    fn check_well_formed(&self) -> Result<(), String>;
 }
 
 impl FullProposalExt for FullProposal {
     fn proposer_address(&self) -> Address {
         Address::from_vec(self.proposer.clone())
+    }
+
+    fn check_well_formed(&self) -> Result<(), String> {
+        let height = self.height.ok_or("Missing height")?;
+        u32::try_from(self.round).map_err(|_| format!("Invalid round: {}", self.round))?;
+        Address::try_from_slice(&self.proposer)?;
+        let header_height = match &self.proposed_value {
+            Some(proto::full_proposal::ProposedValue::Shard(chunk)) if height.shard_index != 0 => {
+                chunk.header.as_ref().and_then(|header| header.height)
+            }
+            Some(proto::full_proposal::ProposedValue::Block(block)) if height.shard_index == 0 => {
+                block.header.as_ref().and_then(|header| header.height)
+            }
+            Some(_) => return Err("Proposed value type does not match shard".to_string()),
+            None => return Err("Missing proposed value".to_string()),
+        };
+        match header_height {
+            Some(header_height) if header_height == height => Ok(()),
+            Some(_) => Err("Header height does not match proposal height".to_string()),
+            None => Err("Missing header or header height".to_string()),
+        }
     }
 }
 
@@ -416,23 +458,23 @@ impl Vote {
         }
     }
 
-    pub fn from_proto(proto: proto::Vote) -> Self {
+    pub fn try_from_proto(proto: proto::Vote) -> Result<Self, String> {
         let vote_type = match proto.r#type {
             0 => VoteType::Prevote,
             1 => VoteType::Precommit,
-            _ => panic!("Invalid vote type"),
+            other => return Err(format!("Invalid vote type: {}", other)),
         };
         let shard_hash = match proto.value {
             None => NilOrVal::Nil,
             Some(value) => NilOrVal::Val(value),
         };
-        Self {
+        Ok(Self {
             vote_type,
-            height: proto.height.unwrap(),
-            round: Round::from(proto.round),
-            voter: Address::from_vec(proto.voter),
+            height: proto.height.ok_or("Missing vote height")?,
+            round: round_from_i64(proto.round)?,
+            voter: Address::try_from_slice(&proto.voter)?,
             shard_hash,
-        }
+        })
     }
 
     pub fn to_sign_bytes(&self) -> Vec<u8> {
@@ -460,14 +502,14 @@ impl Proposal {
         }
     }
 
-    pub fn from_proto(proto: proto::Proposal) -> Self {
-        Self {
-            height: proto.height.unwrap(),
-            round: Round::from(proto.round),
-            shard_hash: proto.value.unwrap(),
-            pol_round: Round::from(proto.pol_round),
-            proposer: Address::from_vec(proto.proposer),
-        }
+    pub fn try_from_proto(proto: proto::Proposal) -> Result<Self, String> {
+        Ok(Self {
+            height: proto.height.ok_or("Missing proposal height")?,
+            round: round_from_i64(proto.round)?,
+            shard_hash: proto.value.ok_or("Missing proposal value")?,
+            pol_round: round_from_i64(proto.pol_round)?,
+            proposer: Address::try_from_slice(&proto.proposer)?,
+        })
     }
     pub fn to_sign_bytes(&self) -> Vec<u8> {
         // TODO: Should we be signing the hash?
@@ -698,6 +740,13 @@ pub trait CommitsExt {
     fn to_commit_certificate(
         &self,
     ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext>;
+    /// Fallible counterpart of `to_commit_certificate` for commits received from peers.
+    fn try_to_commit_certificate(
+        &self,
+    ) -> Result<
+        informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext>,
+        String,
+    >;
     fn from_commit_certificate(
         certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
             SnapchainValidatorContext,
@@ -728,6 +777,34 @@ impl CommitsExt for Commits {
             value_id,
             aggregated_signature: AggregatedSignature::new(signatures),
         }
+    }
+
+    fn try_to_commit_certificate(
+        &self,
+    ) -> Result<
+        informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext>,
+        String,
+    > {
+        let height = self.height.ok_or("Missing commits height")?;
+        let round = round_from_i64(self.round)?;
+        let value_id = self.value.clone().ok_or("Missing commits value")?;
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|commit| {
+                Ok(CommitSignature {
+                    address: Address::try_from_slice(&commit.signer)?,
+                    signature: Signature(commit.signature.clone()),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(informalsystems_malachitebft_core_types::CommitCertificate {
+            height,
+            round,
+            value_id,
+            aggregated_signature: AggregatedSignature::new(signatures),
+        })
     }
 
     fn from_commit_certificate(

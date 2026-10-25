@@ -2347,6 +2347,30 @@ impl ShardEngine {
         Ok(())
     }
 
+    /// Replays `shard_chunk`'s transactions against the current state and checks they produce
+    /// the header's `shard_root`, without committing. On success the replay is cached, so a
+    /// following `commit_shard_chunk` of the same chunk applies it without replaying again.
+    pub fn validate_shard_chunk(&mut self, shard_chunk: &ShardChunk) -> bool {
+        let Some(header) = shard_chunk.header.as_ref() else {
+            return false;
+        };
+        let Some(height) = header.height else {
+            return false;
+        };
+        let timestamp = FarcasterTime::new(header.timestamp);
+        // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
+        let state = ShardStateChange {
+            shard_id: height.shard_index,
+            version: self.version_for(&timestamp),
+            timestamp,
+            new_state_root: header.shard_root.clone(),
+            transactions: shard_chunk.transactions.clone(),
+            events: vec![],
+            max_block_event_seqnum: 0,
+        };
+        self.validate_state_change(&state, height)
+    }
+
     pub fn validate_state_change(
         &mut self,
         shard_state_change: &ShardStateChange,
