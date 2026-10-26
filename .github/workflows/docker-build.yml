@@ -34,6 +34,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain*'
               - 'Dockerfile'
+              - 'Dockerfile.distroless'
               - '.dockerignore'
               - '.github/workflows/docker-build.yml'
               - '.github/workflows/docker-build-impl.yml'
