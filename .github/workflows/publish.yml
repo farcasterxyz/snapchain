@@ -67,7 +67,7 @@ jobs:
         id: build
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.distroless
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=farcasterxyz/snapchain,push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ steps.cache.outputs.from }}

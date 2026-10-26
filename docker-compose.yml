@@ -1,7 +1,7 @@
 x-common: &common
   build:
     context: .
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.distroless
   # small shortcut to speed builds up by reusing the same image for all nodes
   image: snapchain-local:dev
   init: true # Auto-reap zombie processes and forward process signals

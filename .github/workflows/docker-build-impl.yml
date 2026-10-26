@@ -78,7 +78,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.distroless
           platforms: linux/${{ matrix.arch }}
           push: false
           cache-from: ${{ steps.cache.outputs.from }}
