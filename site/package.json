@@ -17,5 +17,8 @@
   "devDependencies": {
     "@types/react": "latest",
     "typescript": "latest"
+  },
+  "resolutions": {
+    "toml": "^5.0.1"
   }
 }

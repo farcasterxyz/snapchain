@@ -7,7 +7,7 @@ distroless:
 	docker build -f Dockerfile.distroless -t snapchain:distroless .
 
 .PHONY: dev
-dev: distroless
+dev: build
 	docker compose up --watch
 
 .PHONY: clean

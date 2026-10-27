@@ -47,20 +47,24 @@ RUN target/release/setup_local_testnet --docker --admin-rpc-auth dev:dev
 
 #################################################################################
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # Easier debugging within container
-ARG GRPCURL_VERSION=1.9.1
+ARG GRPCURL_VERSION=1.9.4
 ARG TARGETOS
 ARG TARGETARCH
+# ca-certificates is installed explicitly (not just as a curl recommendation) because
+# tonic's `tls-native-roots` reads the system trust store at runtime.
 RUN <<EOF
   set -eu
-  apt-get update && apt-get install -y curl
-  curl -L https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_${TARGETOS}_${TARGETARCH}.deb > grpcurl.deb
+  apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+  curl -fL https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_${TARGETOS}_${TARGETARCH}.deb > grpcurl.deb
   dpkg -i grpcurl.deb
   rm grpcurl.deb
   apt-get remove -y curl
-  apt clean -y
+  apt-get autoremove -y
+  apt-get clean
+  rm -rf /var/lib/apt/lists/*
 EOF
 
 WORKDIR /app
