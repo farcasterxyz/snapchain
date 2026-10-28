@@ -1568,13 +1568,11 @@ impl ShardEngine {
             let priority_a = get_message_priority(a);
             let priority_b = get_message_priority(b);
 
-            // Message priority first, then timestamp
+            // Message priority first, then timestamp. Messages without `data` sort first and are
+            // rejected by validation below.
             priority_a.cmp(&priority_b).then_with(|| {
-                a.data
-                    .as_ref()
-                    .unwrap()
-                    .timestamp
-                    .cmp(&b.data.as_ref().unwrap().timestamp)
+                let timestamp = |msg: &proto::Message| msg.data.as_ref().map(|data| data.timestamp);
+                timestamp(a).cmp(&timestamp(b))
             })
         });
 
