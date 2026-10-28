@@ -171,6 +171,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1792756800, // 2026-10-23 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V22,
     },
+    VersionSchedule {
+        active_at: 1793257200, // 2026-10-29 7AM UTC (12:00 PM UTC+5)
+        version: EngineVersion::V23,
+    },
 ]
 .as_slice();
 
@@ -250,6 +254,10 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
     VersionSchedule {
         active_at: 1792670400, // 2026-10-22 12PM UTC (7:00 AM CDT)
         version: EngineVersion::V22,
+    },
+    VersionSchedule {
+        active_at: 1793210400, // 2026-10-28 6PM UTC (11:00 PM UTC+5)
+        version: EngineVersion::V23,
     },
 ]
 .as_slice();
@@ -987,6 +995,24 @@ mod version_test {
     }
 
     #[test]
+    fn test_v23_schedule() {
+        for (network, active_at) in [
+            (FarcasterNetwork::Testnet, 1793210400),
+            (FarcasterNetwork::Mainnet, 1793257200),
+        ] {
+            let at = |unix_seconds: u64| FarcasterTime::from_unix_seconds(unix_seconds);
+            assert_eq!(
+                EngineVersion::version_for(&at(active_at - 1), network),
+                EngineVersion::V22
+            );
+            assert_eq!(
+                EngineVersion::version_for(&at(active_at), network),
+                EngineVersion::V23
+            );
+        }
+    }
+
+    #[test]
     fn test_chained_casts_feature_gate() {
         // Gate closed below V22, open at V22+. This decides whether a replayed cast's `chain` is
         // validated, so moving it silently would fork every node's view of history.
@@ -1365,8 +1391,14 @@ mod version_test {
             Some(1792756800)
         );
 
-        // V21 and V22 share the last scheduled mainnet timestamp; V24 (channels) has no entry yet.
+        // V21 and V22 share a timestamp; V23 is the last scheduled mainnet version and V24
+        // (channels) has no entry yet.
         let time = FarcasterTime::from_unix_seconds(1792756800);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1793257200)
+        );
+        let time = FarcasterTime::from_unix_seconds(1793257200);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
