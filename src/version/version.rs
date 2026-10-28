@@ -66,6 +66,9 @@ pub enum ProtocolFeature {
     IncreaseEmbedLimitForAllUsers,
     UngateProMessageVariants,
     ChainedCasts,
+    // An onchain event merge is skipped when the event's trie key is already present, so the
+    // onchain event store only changes when the trie does.
+    UniqueOnchainEventTrieKeys,
 }
 
 pub struct VersionSchedule {
@@ -459,6 +462,7 @@ impl EngineVersion {
             // they are not gated on the registrar. Do not read a scheduled V20, V21 or V22 as a
             // violation of this rule.
             ProtocolFeature::ChannelFollows => self >= &EngineVersion::V24,
+            ProtocolFeature::UniqueOnchainEventTrieKeys => self >= &EngineVersion::V23,
         }
     }
 
@@ -962,6 +966,18 @@ mod version_test {
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
                 .is_enabled(ProtocolFeature::UngateProMessageVariants)
         );
+    }
+
+    #[test]
+    fn test_v23_feature_gates() {
+        let devnet = EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet);
+        for version_enables in [|version: EngineVersion| {
+            version.is_enabled(ProtocolFeature::UniqueOnchainEventTrieKeys)
+        }] {
+            assert!(!version_enables(EngineVersion::V22));
+            assert!(version_enables(EngineVersion::V23));
+            assert!(version_enables(devnet));
+        }
     }
 
     #[test]

@@ -1293,6 +1293,24 @@ impl ShardEngine {
                     continue;
                 }
 
+                if version.is_enabled(ProtocolFeature::UniqueOnchainEventTrieKeys)
+                    && self.stores.trie.exists(
+                        trie_ctx,
+                        &self.db,
+                        &TrieKey::for_onchain_event(onchain_event),
+                    )?
+                {
+                    if source != ProposalSource::Simulate {
+                        warn!(
+                            fid = onchain_event.fid,
+                            block_number = onchain_event.block_number,
+                            log_index = onchain_event.log_index,
+                            "Skipping onchain event whose trie key is already present"
+                        );
+                    }
+                    continue;
+                }
+
                 let event = self
                     .stores
                     .onchain_event_store

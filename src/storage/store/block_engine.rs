@@ -33,6 +33,7 @@ use itertools::Itertools;
 use prost::Message;
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::u32;
 use thiserror::Error;
@@ -1436,6 +1437,9 @@ impl BlockEngine {
         let mut validation_errors = vec![];
         let system_messages =
             block_engine_system_messages_for_replay(&snapchain_txn.system_messages, version);
+        // The trie is updated only after the whole transaction replays, so keys merged earlier in
+        // this transaction are tracked here.
+        let mut merged_trie_keys = HashSet::new();
         for message in system_messages.as_ref() {
             if let Some(ref onchain_event) = message.on_chain_event {
                 if onchain_event.r#type() == proto::OnChainEventType::EventTypeChannelRegister
@@ -1448,6 +1452,21 @@ impl BlockEngine {
                         "Saw channel register event while feature isn't active"
                     );
                     continue;
+                }
+                if version.is_enabled(ProtocolFeature::UniqueOnchainEventTrieKeys) {
+                    let trie_key = TrieKey::for_onchain_event(onchain_event);
+                    if merged_trie_keys.contains(&trie_key)
+                        || self.stores.trie.exists(trie_ctx, &self.db, &trie_key)?
+                    {
+                        warn!(
+                            fid = onchain_event.fid,
+                            block_number = onchain_event.block_number,
+                            log_index = onchain_event.log_index,
+                            "Skipping onchain event whose trie key is already present"
+                        );
+                        continue;
+                    }
+                    merged_trie_keys.insert(trie_key);
                 }
                 match self
                     .stores
