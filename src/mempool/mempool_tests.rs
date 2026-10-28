@@ -166,10 +166,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s4_mempool_wall_clock_rejects_channels_before_v23_and_admits_them_at_v23() {
-        let (_, _, _, mut pre_v23_mempool, _, _, _, _, _) =
+    async fn s4_mempool_wall_clock_rejects_channels_before_v24_and_admits_them_at_v24() {
+        let (_, _, _, mut pre_v24_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
-        let (_, _, _, mut v23_mempool, _, _, _, _, _) =
+        let (_, _, _, mut v24_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
@@ -177,11 +177,11 @@ mod tests {
             // timestamps are inert, so wall-clock admission changes only with the node version.
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, Some(0), None);
-            let error = pre_v23_mempool
+            let error = pre_v24_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message.clone()), true)
                 .unwrap_err();
             assert_eq!(error.message, "channel messages not yet active");
-            assert!(v23_mempool
+            assert!(v24_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
                 .is_ok());
         }
@@ -897,6 +897,7 @@ mod tests {
                 timestamp: 0,
                 parent_hash: vec![],
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             transactions: vec![Transaction {
@@ -958,6 +959,7 @@ mod tests {
                 timestamp: 0,
                 parent_hash: vec![],
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             transactions: vec![Transaction {
@@ -1110,6 +1112,7 @@ mod tests {
             timestamp: 0,
             parent_hash: vec![],
             shard_root: vec![],
+            transactions_root: vec![],
         };
 
         // Create fake chunk with cast1

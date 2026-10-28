@@ -16,7 +16,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
-use crate::core::util::{shard_chunk_hash, FarcasterTime};
+use crate::core::util::{expected_transactions_root, shard_chunk_hash, FarcasterTime};
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
@@ -44,7 +44,7 @@ pub const FID_FOR_TEST: u64 = 1234;
 /// Two things ARE version-sensitive and build their own context instead: link compaction
 /// (`is_compaction_conflict`), and the reaction store's channel-follow index, which is gated on
 /// `ProtocolFeature::ChannelFollows` read from this context. A test that asserts a follow row is
-/// absent must pass a pre-V23 context explicitly rather than relying on this helper.
+/// absent must pass a pre-V24 context explicitly rather than relying on this helper.
 pub fn default_merge_ctx() -> crate::storage::store::account::MergeContext {
     crate::storage::store::account::MergeContext {
         version: crate::version::version::EngineVersion::latest(),
@@ -368,6 +368,7 @@ pub fn default_shard_chunk() -> ShardChunk {
             timestamp: 0,
             shard_root: vec![],
             parent_hash: vec![],
+            transactions_root: vec![],
         }),
         // TODO: eventually we won't hardcode one transaction here
         transactions: vec![Transaction {
@@ -394,6 +395,8 @@ pub fn state_change_to_shard_chunk(
         block_number,
     });
     chunk.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
+    chunk.header.as_mut().unwrap().transactions_root =
+        expected_transactions_root(&change.transactions, change.version);
     chunk.hash = shard_chunk_hash(chunk.header.as_ref().unwrap());
     chunk.transactions = change.transactions.clone();
     chunk

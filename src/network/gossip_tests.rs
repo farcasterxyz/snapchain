@@ -813,6 +813,7 @@ fn full_proposal_from(proposer: &Keypair) -> FullProposal {
         timestamp: 0,
         parent_hash: vec![],
         shard_root: vec![],
+        transactions_root: vec![],
     };
     FullProposal {
         height: header.height,

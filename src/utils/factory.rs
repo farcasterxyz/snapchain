@@ -103,10 +103,10 @@ pub mod events_factory {
     }
 
     // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
-    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V23) is
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V24) is
     // active; tests construct it directly to exercise the receiver-side admission arm. The
     // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
-    // network (devnet -> V23 active; mainnet -> pre-V23 inactive), mirroring the KEY_ADD tests.
+    // network (devnet -> V24 active; mainnet -> pre-V24 inactive), mirroring the KEY_ADD tests.
     pub fn create_merge_on_chain_event_event(
         on_chain_event: OnChainEvent,
         seqnum: u64,
@@ -1177,6 +1177,7 @@ pub mod shard_chunk_factory {
                 timestamp,
                 height: Some(Height::new(shard_id, height)),
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             commits: None,

@@ -5,6 +5,7 @@ use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
 use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
 use tracing::error;
@@ -113,6 +114,20 @@ pub fn shard_transactions_hash(transactions: &[proto::Transaction]) -> Vec<u8> {
         hasher.update(&transaction.encode_length_delimited_to_vec());
     }
     hasher.finalize().as_bytes().to_vec()
+}
+
+/// The `transactions_root` a shard or block header must carry for `transactions` under `version`:
+/// their [`shard_transactions_hash`] once `HeaderTransactionsRoot` is enabled, empty before, so
+/// headers from earlier versions hash exactly as they did.
+pub fn expected_transactions_root(
+    transactions: &[proto::Transaction],
+    version: EngineVersion,
+) -> Vec<u8> {
+    if version.is_enabled(ProtocolFeature::HeaderTransactionsRoot) {
+        shard_transactions_hash(transactions)
+    } else {
+        vec![]
+    }
 }
 
 /// Hash that commit certificates sign for a block: blake3 of the encoded header.
@@ -235,5 +250,18 @@ mod tests {
 
         let time = from_farcaster_time(1);
         assert_eq!(time, FARCASTER_EPOCH + 1000);
+    }
+
+    #[test]
+    fn test_expected_transactions_root_is_empty_before_v23() {
+        let transactions = vec![proto::Transaction {
+            fid: 1,
+            ..Default::default()
+        }];
+        assert!(expected_transactions_root(&transactions, EngineVersion::V22).is_empty());
+        assert_eq!(
+            expected_transactions_root(&transactions, EngineVersion::V23),
+            shard_transactions_hash(&transactions)
+        );
     }
 }

@@ -8,7 +8,7 @@ use crate::core::{
     error::HubError,
     message::HubEventExt,
     types::Height,
-    util::{shard_transactions_hash, FarcasterTime},
+    util::{expected_transactions_root, shard_transactions_hash, FarcasterTime},
     validations,
     validations::verification,
 };
@@ -705,7 +705,7 @@ impl ShardEngine {
     }
 
     /// The verification message types successfully merged by a block-event replay, which must
-    /// feed the same post-loop prune pass as live merges so a fid's combined pre-V23 + replayed
+    /// feed the same post-loop prune pass as live merges so a fid's combined pre-V24 + replayed
     /// rows converge to its storage cap.
     ///
     /// Read from the replayed `BlockEvent` rather than from the emitted events, mirroring the
@@ -828,7 +828,7 @@ impl ShardEngine {
                     self.update_trie(trie_ctx, event, txn_batch)?;
                 }
                 if merge_strategy == ReplayMerge::Forced {
-                    // Verification-caused hints belong to the forced replay leg: after V23,
+                    // Verification-caused hints belong to the forced replay leg: after V24,
                     // shard-0-routed verifications reach a data shard only here. Append them only
                     // after merge + trie success and never route them through `update_trie`.
                     // `data_shard_block_version` is the block clock already threaded through
@@ -839,7 +839,7 @@ impl ShardEngine {
                     // interchangeable. The feature gate above derives its version from the SHARD-0
                     // block timestamp (VerificationsOnShardZero); this call passes the DATA-SHARD
                     // block version (gating ChannelOwnershipEvents). `version::version_test::
-                    // test_channel_features_activate_together` pins both features to V23, which is
+                    // test_channel_features_activate_together` pins both features to V24, which is
                     // what makes the pair safe today -- no behavioral test would catch them
                     // drifting apart. If the two features ever activate at different versions,
                     // revisit this: a shard-0 event minted just after one activation can replay
@@ -1040,10 +1040,10 @@ impl ShardEngine {
     /// addresses, and Solana verifications never own channels, so they take no hint.
     ///
     /// `pub(crate)` only so tests can pin the two edges unreachable through any
-    /// running network: the pre-V23 gate and the Solana-protocol skip. The V23 fork
+    /// running network: the pre-V24 gate and the Solana-protocol skip. The V24 fork
     /// both opens the gate AND enables the replica fold, so no live network ever has
     /// a populated replica with the feature off — that state exists only when the
-    /// hook is called directly with an explicit pre-V23 `version`. Its single production caller
+    /// hook is called directly with an explicit pre-V24 `version`. Its single production caller
     /// is the successful forced-verification replay leg.
     pub(crate) fn emit_channel_owner_hints_for_verification(
         &self,
@@ -1290,6 +1290,24 @@ impl ShardEngine {
                         chain_id = onchain_event.chain_id,
                         "Saw channel register event while feature isn't active"
                     );
+                    continue;
+                }
+
+                if version.is_enabled(ProtocolFeature::UniqueOnchainEventTrieKeys)
+                    && self.stores.trie.exists(
+                        trie_ctx,
+                        &self.db,
+                        &TrieKey::for_onchain_event(onchain_event),
+                    )?
+                {
+                    if source != ProposalSource::Simulate {
+                        warn!(
+                            fid = onchain_event.fid,
+                            block_number = onchain_event.block_number,
+                            log_index = onchain_event.log_index,
+                            "Skipping onchain event whose trie key is already present"
+                        );
+                    }
                     continue;
                 }
 
@@ -2155,9 +2173,9 @@ impl ShardEngine {
             ));
         }
 
-        // Verifications ordered at V23 and later must enter through shard 0 so quota,
+        // Verifications ordered at V24 and later must enter through shard 0 so quota,
         // consensus ordering, and fan-out all observe the same write. Historical blocks keep
-        // their block-derived pre-V23 version, and BlockEvent/replicator replay bypasses this
+        // their block-derived pre-V24 version, and BlockEvent/replicator replay bypasses this
         // admission function entirely.
         if version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
             && matches!(
@@ -2355,6 +2373,15 @@ impl ShardEngine {
     /// Replays `shard_chunk`'s transactions against the current state and checks they produce
     /// the header's `shard_root`, without committing. On success the replay is cached, so a
     /// following `commit_shard_chunk` of the same chunk applies it without replaying again.
+    /// Whether the chunk's header carries the `transactions_root` its transactions require.
+    pub fn transactions_root_matches(&self, shard_chunk: &ShardChunk) -> bool {
+        let Some(header) = shard_chunk.header.as_ref() else {
+            return false;
+        };
+        let version = self.version_for(&FarcasterTime::new(header.timestamp));
+        header.transactions_root == expected_transactions_root(&shard_chunk.transactions, version)
+    }
+
     pub fn validate_shard_chunk(&mut self, shard_chunk: &ShardChunk) -> bool {
         let Some(header) = shard_chunk.header.as_ref() else {
             return false;
@@ -2362,6 +2389,14 @@ impl ShardEngine {
         let Some(height) = header.height else {
             return false;
         };
+        if !self.transactions_root_matches(shard_chunk) {
+            error!(
+                shard = height.shard_index,
+                height = height.block_number,
+                "Shard chunk transactions do not match its header"
+            );
+            return false;
+        }
         let timestamp = FarcasterTime::new(header.timestamp);
         // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
         let state = ShardStateChange {
@@ -3179,7 +3214,7 @@ mod verification_replay_gate_tests {
             .validate_user_message(
                 &message,
                 &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -3196,7 +3231,7 @@ mod verification_replay_gate_tests {
             trie_ctx(),
             &block_event,
             &mut replay_txn,
-            EngineVersion::V23,
+            EngineVersion::V24,
         );
         assert_eq!(result.unwrap().len(), 1);
         let channel_id = match message.data.unwrap().body.unwrap() {
@@ -3213,7 +3248,7 @@ mod verification_replay_gate_tests {
     }
 
     #[tokio::test]
-    async fn s4_pre_v23_channel_block_event_cannot_reach_replica_store() {
+    async fn s4_pre_v24_channel_block_event_cannot_reach_replica_store() {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
             ..Default::default()
@@ -3239,7 +3274,7 @@ mod verification_replay_gate_tests {
             let block_event = events_factory::create_merge_message_event(message, 1);
             let mut txn = RocksDbTransactionBatch::new();
             let result =
-                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V23);
+                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V24);
             assert!(matches!(
                 result,
                 Err(EngineError::EngineMessageValidationError(
@@ -3356,12 +3391,12 @@ mod channel_message_shard_engine_boundary_tests {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
-            let mut v23_txn = RocksDbTransactionBatch::new();
+            let mut v24_txn = RocksDbTransactionBatch::new();
             let result = engine.validate_user_message(
                 &message,
                 &timestamp,
-                EngineVersion::V23,
-                &mut v23_txn,
+                EngineVersion::V24,
+                &mut v24_txn,
             );
             assert!(
                 matches!(
@@ -3373,7 +3408,7 @@ mod channel_message_shard_engine_boundary_tests {
                 message_type,
                 result
             );
-            assert!(v23_txn.batch.is_empty());
+            assert!(v24_txn.batch.is_empty());
 
             let mut pre_feature_txn = RocksDbTransactionBatch::new();
             let pre_feature = engine.validate_user_message(
@@ -3433,7 +3468,7 @@ mod channel_message_shard_engine_boundary_tests {
         // Straddle the gate: one version with ChannelMessages closed, one with it open. Asserted
         // rather than assumed because a version renumber can silently collapse this pair into a
         // single case, leaving the test green while covering only one side.
-        let versions = [EngineVersion::V22, EngineVersion::V23];
+        let versions = [EngineVersion::V22, EngineVersion::V24];
         assert!(!versions[0].is_enabled(ProtocolFeature::ChannelMessages));
         assert!(versions[1].is_enabled(ProtocolFeature::ChannelMessages));
 

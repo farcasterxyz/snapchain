@@ -177,7 +177,7 @@ mod tests {
             message,
             &StorageSlot::new(0, 0, 1, u32::MAX),
             &timestamp,
-            EngineVersion::V23,
+            EngineVersion::V24,
             txn,
         )
     }
@@ -552,7 +552,7 @@ mod tests {
                 &mismatch,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::InvalidMessageType)
@@ -573,7 +573,7 @@ mod tests {
                 &wrong_channel_width,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -599,7 +599,7 @@ mod tests {
                 &wrong_cast_width,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -624,7 +624,7 @@ mod tests {
                 &unknown_channel,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -1400,7 +1400,7 @@ mod tests {
         );
         let mut txn = RocksDbTransactionBatch::new();
         let ctx = MergeContext {
-            version: EngineVersion::V23,
+            version: EngineVersion::V24,
         };
         stores
             .verification_store
@@ -1547,7 +1547,7 @@ mod tests {
                 &valid,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .is_ok());
@@ -1576,7 +1576,7 @@ mod tests {
                 &remove,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .is_ok());
@@ -1607,7 +1607,7 @@ mod tests {
                 &invalid_signature,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::MessageValidationError(
@@ -1622,7 +1622,7 @@ mod tests {
                 &invalid_signer,
                 &storage_slot,
                 &block_timestamp,
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::MissingSigner)
@@ -1647,7 +1647,7 @@ mod tests {
                 &verification_add(timestamp, None),
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &FarcasterTime::new(timestamp as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::InsufficientStorage)
@@ -2340,7 +2340,7 @@ mod tests {
                 &superseding_add,
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &FarcasterTime::new((timestamp + 1) as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::InsufficientStorage)
@@ -2353,7 +2353,7 @@ mod tests {
                 &superseding_remove,
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &FarcasterTime::new((timestamp + 2) as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .is_ok());
@@ -2366,7 +2366,7 @@ mod tests {
                 &net_new_remove,
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &FarcasterTime::new((timestamp + 2) as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             ),
             Err(MessageValidationError::InsufficientStorage)
@@ -2422,15 +2422,15 @@ mod tests {
             &mut block_engine,
         );
         // Be precise about what this pins, because it is weaker than the name suggests. No
-        // network can currently straddle the activation boundary: V23 is unscheduled on mainnet
-        // and testnet (so *every* timestamp there resolves pre-V23), and devnet activates V23 at
+        // network can currently straddle the activation boundary: V24 is unscheduled on mainnet
+        // and testnet (so *every* timestamp there resolves pre-V24), and devnet activates V24 at
         // timestamp 0 (so no pre-activation timestamp exists at all). This test therefore proves
         // the floor is present and rejects -- deleting the floor turns it red -- but it cannot
         // yet prove the floor *discriminates* pre- from post-activation timestamps. Add that
-        // boundary test when V23 is scheduled; until then the discrimination is untestable.
+        // boundary test when V24 is scheduled; until then the discrimination is untestable.
         //
         // Pinned to the Farcaster epoch rather than `now` so the test keeps meaning the same
-        // thing afterwards: once V23 is scheduled, `now` would resolve to V23, the floor would
+        // thing afterwards: once V24 is scheduled, `now` would resolve to V24, the floor would
         // rightly stop rejecting, and a `now`-based test would go red during the very rollout it
         // exists to protect. Only the future bound in `validate_timestamp` constrains this value,
         // so an epoch timestamp reaches the floor instead of dying earlier on an unrelated error.
@@ -2442,7 +2442,7 @@ mod tests {
                 &message,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &FarcasterTime::new(pre_activation_timestamp as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -2503,7 +2503,7 @@ mod tests {
                         &spoofed,
                         &StorageSlot::new(0, 0, 1, u32::MAX),
                         &FarcasterTime::new(timestamp as u64),
-                        EngineVersion::V23,
+                        EngineVersion::V24,
                         &mut RocksDbTransactionBatch::new(),
                     ),
                     Err(MessageValidationError::InvalidMessageType)
@@ -2822,12 +2822,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_block_engine_pre_v23_drops_channel_events_before_ordering_matters() {
+    async fn test_block_engine_pre_v24_drops_channel_events_before_ordering_matters() {
         let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
             network: FarcasterNetwork::Mainnet,
             ..BlockEngineOptions::default()
         });
-        let channel_key = "pre-v23";
+        let channel_key = "pre-v24";
         let (transfer, register) = inverted_same_block_channel_events(channel_key);
         let height = block_engine.get_confirmed_height().increment();
         let timestamp = FarcasterTime::from_unix_seconds(4102444800);
@@ -2851,17 +2851,17 @@ mod tests {
     }
 
     #[test]
-    fn s4_block_boundary_freezes_pre_v23_state_and_applies_embedded_timestamp_rules() {
-        // There is no network with a scheduled boundary into V23 yet: mainnet/testnet stop at
-        // V21 (V20 to V22 carry no channel behavior) and devnet starts at V23. Use real pre-V23
-        // and V23 pipelines on those networks, then drive the one cross-boundary verification
-        // floor with an explicit V23 validation.
+    fn s4_block_boundary_freezes_pre_v24_state_and_applies_embedded_timestamp_rules() {
+        // There is no network with a scheduled boundary into V24 yet: mainnet/testnet stop at
+        // V21 (V20 to V22 carry no channel behavior) and devnet starts at V24. Use real pre-V24
+        // and V24 pipelines on those networks, then drive the one cross-boundary verification
+        // floor with an explicit V24 validation.
         let mainnet_options = || BlockEngineOptions {
             network: FarcasterNetwork::Mainnet,
             ..BlockEngineOptions::default()
         };
         let (mut with_rejected_channels, _with_tmp) = setup_with_options(mainnet_options());
-        let (mut never_v23, _never_tmp) = setup_with_options(mainnet_options());
+        let (mut never_v24, _never_tmp) = setup_with_options(mainnet_options());
 
         // Commit an identical prefix to both engines. Reusing the exact event bytes is required:
         // the factories randomize transaction hashes, which are part of the trie keys.
@@ -2889,14 +2889,14 @@ mod tests {
         ];
         for event in &prefix {
             commit_event(&mut with_rejected_channels, event);
-            commit_event(&mut never_v23, event);
+            commit_event(&mut never_v24, event);
         }
         assert_eq!(
             with_rejected_channels.trie_root_hash(),
-            never_v23.trie_root_hash()
+            never_v24.trie_root_hash()
         );
 
-        let pre_v23_channels = messages_factory::channels::all_message_bodies()
+        let pre_v24_channels = messages_factory::channels::all_message_bodies()
             .into_iter()
             .map(|(message_type, body)| {
                 messages_factory::create_message_with_data(
@@ -2908,7 +2908,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let pre_v23_channel_id = match pre_v23_channels[0]
+        let pre_v24_channel_id = match pre_v24_channels[0]
             .data
             .as_ref()
             .and_then(|data| data.body.as_ref())
@@ -2922,12 +2922,12 @@ mod tests {
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events;
-        for pre_v23_channel in &pre_v23_channels {
+        for pre_v24_channel in &pre_v24_channels {
             let mut validation_txn = RocksDbTransactionBatch::new();
             let validation_result = with_rejected_channels.validate_user_message(
-                pre_v23_channel,
+                pre_v24_channel,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
-                &FarcasterTime::new(pre_v23_channel.data.as_ref().unwrap().timestamp as u64),
+                &FarcasterTime::new(pre_v24_channel.data.as_ref().unwrap().timestamp as u64),
                 EngineVersion::V19,
                 &mut validation_txn,
             );
@@ -2938,19 +2938,19 @@ mod tests {
                         ValidationError::InvalidMessageType
                     ))
                 ),
-                "unexpected pre-V23 {:?} result: {validation_result:?}",
-                pre_v23_channel.msg_type()
+                "unexpected pre-V24 {:?} result: {validation_result:?}",
+                pre_v24_channel.msg_type()
             );
             assert!(validation_txn.batch.is_empty());
             let rejected_block = commit_message(
                 &mut with_rejected_channels,
-                pre_v23_channel,
+                pre_v24_channel,
                 Validity::Invalid,
             );
             assert!(
                 rejected_block.events.is_empty(),
-                "pre-V23 {:?} unexpectedly produced a BlockEvent",
-                pre_v23_channel.msg_type()
+                "pre-V24 {:?} unexpectedly produced a BlockEvent",
+                pre_v24_channel.msg_type()
             );
         }
         assert_eq!(with_rejected_channels.trie_root_hash(), root_before);
@@ -2962,38 +2962,38 @@ mod tests {
         );
         assert!(ChannelUpdateStore::get_channel_update(
             &with_rejected_channels.stores().channel_update_store,
-            &pre_v23_channel_id,
+            &pre_v24_channel_id,
             None,
         )
         .unwrap()
         .is_none());
         assert_eq!(
             with_rejected_channels.trie_root_hash(),
-            never_v23.trie_root_hash(),
-            "a rejected pre-V23 channel attempt must match the same never-V23 prefix"
+            never_v24.trie_root_hash(),
+            "a rejected pre-V24 channel attempt must match the same never-V24 prefix"
         );
         assert_eq!(
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None,)
                 .unwrap()
                 .events,
-            HubEvent::get_events(never_v23.stores().db.clone(), 0, None, None)
+            HubEvent::get_events(never_v24.stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events
         );
 
-        let pre_v23_verification = verification_add(messages_factory::farcaster_time(), None);
-        let mut pre_v23_verification_txn = RocksDbTransactionBatch::new();
+        let pre_v24_verification = verification_add(messages_factory::farcaster_time(), None);
+        let mut pre_v24_verification_txn = RocksDbTransactionBatch::new();
         assert!(matches!(
             with_rejected_channels.validate_user_message(
-                &pre_v23_verification,
+                &pre_v24_verification,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
-                &FarcasterTime::new(pre_v23_verification.data.as_ref().unwrap().timestamp as u64),
+                &FarcasterTime::new(pre_v24_verification.data.as_ref().unwrap().timestamp as u64),
                 EngineVersion::V19,
-                &mut pre_v23_verification_txn,
+                &mut pre_v24_verification_txn,
             ),
             Err(MessageValidationError::InvalidMessageType)
         ));
-        assert!(pre_v23_verification_txn.batch.is_empty());
+        assert!(pre_v24_verification_txn.batch.is_empty());
         let verification_root_before = with_rejected_channels.trie_root_hash();
         let verification_events_before =
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
@@ -3001,7 +3001,7 @@ mod tests {
                 .events;
         let rejected_verification_block = commit_message(
             &mut with_rejected_channels,
-            &pre_v23_verification,
+            &pre_v24_verification,
             Validity::Invalid,
         );
         assert_no_verification_block_events(&rejected_verification_block);
@@ -3016,21 +3016,21 @@ mod tests {
             verification_events_before
         );
 
-        let (mut v23_engine, _v23_tmp) = setup();
+        let (mut v24_engine, _v24_tmp) = setup();
         register_user(
             VERIFICATION_FID,
             default_signer(),
             default_custody_address(),
             1,
-            &mut v23_engine,
+            &mut v24_engine,
         );
         let owner_address = vec![0xD4; 20];
-        let v23_channel_id = channel_label("v23-boundary-channel");
+        let v24_channel_id = channel_label("v24-boundary-channel");
         commit_event(
-            &mut v23_engine,
+            &mut v24_engine,
             &events_factory::create_channel_register_event(
-                "v23-boundary-channel",
-                v23_channel_id.clone(),
+                "v24-boundary-channel",
+                v24_channel_id.clone(),
                 owner_address.clone(),
                 1_000,
                 ChannelRegisterEventType::Register,
@@ -3040,24 +3040,24 @@ mod tests {
         );
         let now = messages_factory::farcaster_time();
         commit_message(
-            &mut v23_engine,
+            &mut v24_engine,
             &verification_contract_add(owner_address, now),
             Validity::Valid,
         );
 
         // The message was signed in the pre-cutover timestamp regime. Unlike verifications, D9
-        // gives channel messages no embedded-timestamp floor, so the V23 block admits it.
+        // gives channel messages no embedded-timestamp floor, so the V24 block admits it.
         let old_signed_channel = channel_update_message(
             VERIFICATION_FID,
-            v23_channel_id.clone(),
+            v24_channel_id.clone(),
             "embedded timestamp is inert",
             Some(MembershipMode::Open),
             0,
         );
-        let admitted_block = commit_message(&mut v23_engine, &old_signed_channel, Validity::Valid);
+        let admitted_block = commit_message(&mut v24_engine, &old_signed_channel, Validity::Valid);
         assert_eq!(
             admitted_block.header.as_ref().unwrap().state_root,
-            v23_engine.trie_root_hash()
+            v24_engine.trie_root_hash()
         );
         assert!(admitted_block.events.iter().any(|event| {
             matches!(
@@ -3079,7 +3079,7 @@ mod tests {
                 &pre_cutover_verification,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &FarcasterTime::new(now as u64),
-                EngineVersion::V23,
+                EngineVersion::V24,
                 &mut rejected_verification_txn,
             )
             .unwrap_err();
@@ -3097,10 +3097,10 @@ mod tests {
         assert!(rejected_verification_txn.batch.is_empty());
 
         let resigned_verification = verification_add(now + 1, None);
-        commit_message(&mut v23_engine, &resigned_verification, Validity::Valid);
+        commit_message(&mut v24_engine, &resigned_verification, Validity::Valid);
         assert_eq!(
             VerificationStore::get_verification_add(
-                &v23_engine.stores().verification_store,
+                &v24_engine.stores().verification_store,
                 VERIFICATION_FID,
                 &verification_address(),
                 None,
@@ -3145,7 +3145,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_register_fans_out_one_merge_on_chain_event() {
-        // V23 devnet: a merged channel-register event fans out exactly one
+        // V24 devnet: a merged channel-register event fans out exactly one
         // MergeOnChainEvent BlockEvent carrying the whole original event, seqnum-chained
         // and persisted, with events_hash covering it.
         let (mut block_engine, _temp_dir) = setup();
@@ -3237,7 +3237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pre_feature_channel_register_does_not_fan_out() {
-        // Mainnet pre-V23: ChannelRegistrations (and, co-activated, ChannelOwnershipEvents) are
+        // Mainnet pre-V24: ChannelRegistrations (and, co-activated, ChannelOwnershipEvents) are
         // off, so the channel event is dropped before it can merge — no fan-out, and events_hash
         // stays empty, byte-identical to the pre-increment behavior.
         let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
@@ -3297,7 +3297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_engine_onchain_input_order_does_not_change_committed_state() {
-        // Two properties from one setup: two fresh V23 engines see the same same-eth-block
+        // Two properties from one setup: two fresh V24 engines see the same same-eth-block
         // REGISTER + TRANSFER pair in opposite mempool arrival orders.
         //
         // 1. state_root convergence (consensus agreement): both orders must commit the SAME
@@ -4785,5 +4785,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// From V24 a block's transactions must match the header's `transactions_root`.
+    #[tokio::test]
+    async fn test_block_transactions_must_match_header() {
+        let (mut block_engine, _temp_dir) = setup();
+        let height = block_engine.get_confirmed_height().increment();
+        let state_change = block_engine.propose_state_change(
+            vec![MempoolMessage::OnchainEvent(
+                events_factory::create_rent_event_with_timestamp(
+                    FID_FOR_TEST,
+                    1,
+                    crate::utils::factory::time::current_timestamp(),
+                ),
+            )],
+            height,
+            None,
+        );
+        let block = state_change_to_block(height.block_number, &state_change);
+        let mut mismatched = block.clone();
+        mismatched.header.as_mut().unwrap().transactions_root = vec![0; 32];
+
+        assert!(!block_engine.validate_block(&mismatched));
+        assert!(block_engine.validate_block(&block));
     }
 }
