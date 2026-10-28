@@ -13,7 +13,7 @@ use informalsystems_malachitebft_network::{Channel, Event};
 use informalsystems_malachitebft_sync::{self as sync, RawMessage};
 use libp2p::request_response;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, trace};
 
@@ -31,12 +31,16 @@ pub struct NetworkConnectorState {
     outbound_requests: HashMap<sync::OutboundRequestId, request_response::OutboundRequestId>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd: StatsdClientWrapper,
+    sync_peers: Option<HashSet<MalachitePeerId>>,
 }
 
 pub struct NetworkConnectorArgs {
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     pub peer_id: MalachitePeerId,
     pub statsd: StatsdClientWrapper,
+    /// Peers whose statuses are passed to sync, which only requests values from peers it has a
+    /// status for. `None` passes every peer's status.
+    pub sync_peers: Option<HashSet<MalachitePeerId>>,
 }
 
 impl<Codec> MalachiteNetworkConnector<Codec>
@@ -77,6 +81,7 @@ where
             outbound_requests: HashMap::new(),
             peer_id: args.peer_id,
             statsd: args.statsd,
+            sync_peers: args.sync_peers,
         })
     }
 
@@ -101,6 +106,7 @@ where
             outbound_requests,
             statsd,
             peer_id: _,
+            sync_peers,
         } = state;
 
         match msg {
@@ -246,6 +252,16 @@ where
                 // }
 
                 trace!(%from, height = %status.height, "Received status");
+
+                // `status.peer_id` can claim any peer, but sync requests go over a direct
+                // connection to that peer, so a forged status cannot redirect them.
+                if sync_peers
+                    .as_ref()
+                    .is_some_and(|peers| !peers.contains(&status.peer_id))
+                {
+                    debug!(peer_id = %status.peer_id, "Ignoring status from a peer outside the sync peer set");
+                    return Ok(());
+                }
 
                 output_port.send(NetworkEvent::Status(
                     status.peer_id,

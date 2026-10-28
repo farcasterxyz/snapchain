@@ -42,6 +42,16 @@ impl StoredValidatorSets {
         }
         result.validators.clone()
     }
+
+    /// Every validator in any set this shard can use, across all `effective_at` heights.
+    pub fn all_validators(&self) -> impl Iterator<Item = &SnapchainValidator> {
+        self.sets
+            .iter()
+            .enumerate()
+            // `get_validator_set` falls back to the first set when none applies to the shard.
+            .filter(|(i, config)| *i == 0 || config.shard_ids.contains(&self.shard_id))
+            .flat_map(|(_, config)| config.validators.validators.iter())
+    }
 }
 
 pub struct StoredValidatorSet {
@@ -139,6 +149,11 @@ impl ShardValidator {
         self.get_validator_set(height.as_u64())
             .proposer(height, Round::new(round))
             .is_some_and(|validator| validator.address == full_proposal.proposer_address())
+    }
+
+    /// Every validator this shard has had or will have, across all configured validator sets.
+    pub fn all_validators(&self) -> impl Iterator<Item = &SnapchainValidator> {
+        self.validator_sets.all_validators()
     }
 
     pub fn validator_count(&self, height: u64) -> usize {

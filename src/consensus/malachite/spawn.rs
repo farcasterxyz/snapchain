@@ -5,6 +5,7 @@ use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 use tracing::Span;
@@ -19,6 +20,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::network::mesh::view::peer_id_from_validator_key;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
@@ -31,12 +33,14 @@ pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     local_peer_id: PeerId,
     statsd: StatsdClientWrapper,
+    sync_peers: Option<HashSet<MalachitePeerId>>,
 ) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let codec = SnapchainCodec;
     let args = NetworkConnectorArgs {
         gossip_tx,
         peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
         statsd,
+        sync_peers,
     };
     MalachiteNetworkConnector::spawn(codec, args)
         .await
@@ -185,8 +189,19 @@ impl MalachiteConsensusActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
-        let network_actor =
-            spawn_network_actor(gossip_tx.clone(), local_peer_id, statsd.clone()).await?;
+        // Validators sync only from other validators.
+        let sync_peers = shard_validator
+            .all_validators()
+            .filter_map(|validator| peer_id_from_validator_key(&validator.address.0))
+            .map(|peer_id| MalachitePeerId::from_libp2p(&peer_id))
+            .collect();
+        let network_actor = spawn_network_actor(
+            gossip_tx.clone(),
+            local_peer_id,
+            statsd.clone(),
+            Some(sync_peers),
+        )
+        .await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),
