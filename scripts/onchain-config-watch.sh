@@ -247,7 +247,8 @@ evaluate() {
     # never be recorded as a watermark.
     if ! "$FC_BIN" --network "$NETWORK" config pull --config "$tmp" \
         --report-version "$tmp.version" \
-        ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"}; then
+        ${REGISTRY_ARGS[@]+"${REGISTRY_ARGS[@]}"} \
+        ${PULL_ARGS[@]+"${PULL_ARGS[@]}"}; then
         log ERROR "config pull for version $v failed; NOT restarting; will retry"
         rm -f "$tmp" "$tmp.version"
         return 0
@@ -412,9 +413,12 @@ fi
 if [[ -n "${ONCHAIN_CONFIG_RPC_URL:-}" ]]; then
     REGISTRY_ARGS+=(--rpc-url "$ONCHAIN_CONFIG_RPC_URL")
 fi
+# Only `config pull` defines this flag; `config version` rejects it, which
+# would fail every poll and leave the watcher blind to registry changes.
+PULL_ARGS=()
 case "${ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS:-}" in
     "" | false | 0) ;;
-    *) REGISTRY_ARGS+=(--accept-local-bootstrap-peers-config) ;;
+    *) PULL_ARGS+=(--accept-local-bootstrap-peers-config) ;;
 esac
 
 if [[ -n "${ONCHAIN_CONFIG_WATCH_ONCE:-}" ]]; then

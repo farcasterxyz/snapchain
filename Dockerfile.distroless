@@ -28,7 +28,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /usr/src/app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json --bin snapchain
+RUN cargo chef cook --release --recipe-path recipe.json --workspace --bin snapchain --bin fc
 
 COPY Cargo.lock Cargo.toml ./
 COPY proto ./proto
@@ -36,9 +36,13 @@ COPY cli ./cli
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
-RUN cargo build --release --bin snapchain
+RUN cargo build --release --workspace --bin snapchain --bin fc
 
 FROM gcr.io/distroless/cc-debian13
 WORKDIR /app
 COPY --from=builder /usr/src/app/target/release/snapchain /app/snapchain
+# fc and the onchain-config scripts can't run here (no shell); a config sidecar
+# copies them out of this image so it runs the same versions as the node.
+COPY --from=builder /usr/src/app/target/release/fc /app/fc
+COPY scripts/apply-onchain-config.sh scripts/onchain-config-watch.sh /app/
 CMD ["/app/snapchain", "--config-path", "/app/config.toml"]
