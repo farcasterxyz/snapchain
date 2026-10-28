@@ -10,3 +10,5 @@ mod proposed_values_tests;
 mod proposer_tests;
 #[cfg(test)]
 mod read_validator_tests;
+#[cfg(test)]
+mod validator_tests;

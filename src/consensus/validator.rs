@@ -130,6 +130,17 @@ impl ShardValidator {
         self.validator_sets.get_validator_set(height)
     }
 
+    /// Whether `full_proposal` names the validator selected to propose at its height and round.
+    pub fn is_expected_proposer(&self, full_proposal: &FullProposal) -> bool {
+        let height = full_proposal.height();
+        let Ok(round) = u32::try_from(full_proposal.round) else {
+            return false;
+        };
+        self.get_validator_set(height.as_u64())
+            .proposer(height, Round::new(round))
+            .is_some_and(|validator| validator.address == full_proposal.proposer_address())
+    }
+
     pub fn validator_count(&self, height: u64) -> usize {
         self.get_validator_set(height).count()
     }
