@@ -6,6 +6,8 @@ use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
+use informalsystems_malachitebft_core_consensus::ProposedValue;
+use informalsystems_malachitebft_core_types::{Round, Validity};
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
@@ -352,26 +354,46 @@ impl Host {
                 state
                     .statsd
                     .count_with_shard(height.shard_index, "sync.process_value", 1, vec![]);
-                let proposal = if height.shard_index == 0 {
-                    let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
-                    FullProposal {
-                        height: Some(height),
-                        round: round.as_i64(),
-                        proposer: validator_address.to_vec(),
-                        proposed_value: Some(full_proposal::ProposedValue::Block(decoded_block)),
-                    }
+                // The bytes and certificate come from a sync peer, so they may be malformed.
+                let decoded_value = if height.shard_index == 0 {
+                    Block::decode(value_bytes.as_ref()).map(full_proposal::ProposedValue::Block)
                 } else {
-                    let chunk = ShardChunk::decode(value_bytes.as_ref()).unwrap();
-                    FullProposal {
+                    ShardChunk::decode(value_bytes.as_ref())
+                        .map(full_proposal::ProposedValue::Shard)
+                };
+                let proposal = decoded_value
+                    .map_err(|err| err.to_string())
+                    .map(|proposed_value| FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
                         proposer: validator_address.to_vec(),
-                        proposed_value: Some(full_proposal::ProposedValue::Shard(chunk)),
+                        proposed_value: Some(proposed_value),
+                    })
+                    .and_then(|proposal| proposal.check_well_formed().map(|()| proposal));
+                let proposed_value = match proposal {
+                    Ok(proposal) => state
+                        .shard_validator
+                        .add_proposed_value(&proposal, ProposalSource::Sync),
+                    Err(err) => {
+                        warn!(
+                            height = height.to_string(),
+                            shard = height.shard_index,
+                            "Rejecting malformed synced value: {}",
+                            err
+                        );
+                        ProposedValue {
+                            height,
+                            round,
+                            valid_round: Round::Nil,
+                            proposer: validator_address,
+                            value: proto::ShardHash {
+                                shard_index: height.shard_index,
+                                hash: vec![],
+                            },
+                            validity: Validity::Invalid,
+                        }
                     }
                 };
-                let proposed_value = state
-                    .shard_validator
-                    .add_proposed_value(&proposal, ProposalSource::Sync);
                 info!(
                     height = height.to_string(),
                     shard = height.shard_index,

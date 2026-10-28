@@ -510,11 +510,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Driving it in parallel with shard DB init lets QUIC keep-alives and
     // gossipsub control messages flow during the heavy boot window, instead
     // of being deferred until after all RocksDB stores are open.
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
-    });
+    spawn_critical(
+        "Gossip",
+        async move {
+            info!("Starting gossip");
+            gossip.start().await;
+        },
+        system_tx.clone(),
+    );
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 

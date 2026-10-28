@@ -1,18 +1,17 @@
 use crate::core::types::{proto, Address, Height, ShardHash, ShardId, SnapchainShard};
-use crate::core::util::FarcasterTime;
+use crate::core::util::{block_hash, shard_chunk_hash, shard_witness_hash, FarcasterTime};
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
 };
-use crate::storage::store::block_engine::{self, BlockEngine};
-use crate::storage::store::engine::{ShardEngine, ShardStateChange};
+use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::shard::ShardStorageError;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use informalsystems_malachitebft_core_types::{Round, Validity};
-use prost::Message;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
@@ -182,9 +181,7 @@ impl Proposer for ShardProposer {
             height: Some(height.clone()),
             shard_root: state_change.new_state_root.clone(),
         };
-        let hash = blake3::hash(&shard_header.encode_to_vec())
-            .as_bytes()
-            .to_vec();
+        let hash = shard_chunk_hash(&shard_header);
 
         let chunk = ShardChunk {
             header: Some(shard_header),
@@ -207,15 +204,31 @@ impl Proposer for ShardProposer {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
             full_proposal.proposed_value.clone()
         {
-            let header = chunk.header.as_ref().unwrap();
-            let height = header.height.unwrap();
+            let Some(header) = chunk.header.as_ref() else {
+                error!("Received shard chunk with missing header");
+                return Validity::Invalid;
+            };
+            let Some(height) = header.height else {
+                error!("Received shard chunk with missing height");
+                return Validity::Invalid;
+            };
+            // Votes and commit certificates sign `chunk.hash`, so it must commit to the header
+            // (and through `shard_root`, the transactions) or a peer could pair a signed hash
+            // with a different body.
+            if chunk.hash != shard_chunk_hash(header) {
+                error!(
+                    shard = height.shard_index,
+                    height = height.block_number,
+                    "Received shard chunk whose hash does not match its header"
+                );
+                return Validity::Invalid;
+            }
             self.proposed_chunks
                 .add_proposed_value(full_proposal.clone());
             let timestamp = FarcasterTime::new(header.timestamp);
             let receive_delay = FarcasterTime::current()
                 .to_u64()
                 .saturating_sub(timestamp.to_u64());
-            let version = self.engine.version_for(&timestamp);
             self.statsd_client.gauge_with_shard(
                 self.shard_id.shard_id(),
                 "proposer.receive_delay",
@@ -233,21 +246,11 @@ impl Proposer for ShardProposer {
                 return Validity::Invalid;
             }
 
-            // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
-            let state = ShardStateChange {
-                shard_id: height.shard_index,
-                timestamp,
-                version,
-                new_state_root: header.shard_root.clone(),
-                transactions: chunk.transactions.clone(),
-                events: vec![],
-                max_block_event_seqnum: 0,
-            };
-            return if self.engine.validate_state_change(&state, height) {
+            return if self.engine.validate_shard_chunk(&chunk) {
                 Validity::Valid
             } else {
                 error!(
-                    shard = state.shard_id,
+                    shard = height.shard_index,
                     height = height.block_number,
                     "Invalid state change"
                 );
@@ -536,9 +539,7 @@ impl Proposer for BlockProposer {
                 }
             }
         };
-        let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
-            .as_bytes()
-            .to_vec();
+        let witness_hash = shard_witness_hash(&shard_witness);
 
         let block_header = BlockHeader {
             parent_hash,
@@ -551,9 +552,7 @@ impl Proposer for BlockProposer {
             events_hash: proposal.events_hash.clone(),
         };
 
-        let hash = blake3::hash(&block_header.encode_to_vec())
-            .as_bytes()
-            .to_vec();
+        let hash = block_hash(&block_header);
 
         let block = Block {
             header: Some(block_header),
@@ -579,8 +578,22 @@ impl Proposer for BlockProposer {
         if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
-            let header = block.header.as_ref().unwrap();
-            let height = header.height.unwrap();
+            let Some(header) = block.header.as_ref() else {
+                error!("Received block with missing header");
+                return Validity::Invalid;
+            };
+            let Some(height) = header.height else {
+                error!("Received block with missing height");
+                return Validity::Invalid;
+            };
+            // See the shard proposer: the signed hash must commit to the header.
+            if block.hash != block_hash(header) {
+                error!(
+                    height = height.block_number,
+                    "Received block whose hash does not match its header"
+                );
+                return Validity::Invalid;
+            }
 
             if height != self.get_confirmed_height().increment() {
                 warn!(
@@ -607,10 +620,6 @@ impl Proposer for BlockProposer {
                 );
                 return Validity::Invalid;
             }
-            if header.height.is_none() {
-                error!("Received block with missing height");
-                return Validity::Invalid;
-            }
             if header.shard_witnesses_hash.is_empty() {
                 error!("Received block with missing shard witnesses hash");
                 return Validity::Invalid;
@@ -627,20 +636,13 @@ impl Proposer for BlockProposer {
                 );
                 return Validity::Invalid;
             }
-            let witness_hash = blake3::hash(&witness.encode_to_vec()).as_bytes().to_vec();
+            let witness_hash = shard_witness_hash(witness);
             if witness_hash != header.shard_witnesses_hash {
                 error!("Received block with invalid shard witnesses hash");
                 return Validity::Invalid;
             }
 
-            let state_change = block_engine::BlockStateChange {
-                timestamp,
-                new_state_root: header.state_root.clone(),
-                transactions: block.transactions.clone(),
-                events_hash: header.events_hash.clone(),
-                events: block.events.clone(),
-            };
-            if !self.engine.validate_state_change(&state_change, height) {
+            if !self.engine.validate_block(block) {
                 return Validity::Invalid;
             };
 

@@ -3,9 +3,10 @@ use libp2p::identity::ed25519::PublicKey;
 
 use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
-use crate::core::types::{Address, CommitsExt, Vote, FARCASTER_EPOCH};
+use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
 use itertools::Itertools;
+use prost::Message;
 use tracing::error;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
@@ -99,20 +100,53 @@ pub fn calculate_message_hash(data_bytes: &[u8]) -> Vec<u8> {
     blake3::hash(data_bytes).as_bytes()[0..20].to_vec()
 }
 
-pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValidatorSets) -> bool {
-    // Commits can come from untrusted peers, and to_commit_certificate panics on these
-    if commits.height.is_none()
-        || commits.value.is_none()
-        || commits
-            .signatures
-            .iter()
-            .any(|signature| signature.signer.len() != size_of::<Address>())
-    {
-        error!("Commits are missing a height or value, or have a malformed signer");
-        return false;
-    }
+/// Hash that commit certificates sign for a shard chunk: blake3 of the encoded header.
+pub fn shard_chunk_hash(header: &proto::ShardHeader) -> Vec<u8> {
+    blake3::hash(&header.encode_to_vec()).as_bytes().to_vec()
+}
 
-    let certificate = commits.to_commit_certificate();
+/// Hash that commit certificates sign for a block: blake3 of the encoded header.
+pub fn block_hash(header: &proto::BlockHeader) -> Vec<u8> {
+    blake3::hash(&header.encode_to_vec()).as_bytes().to_vec()
+}
+
+/// The `shard_witnesses_hash` committed to in a block header.
+pub fn shard_witness_hash(witness: &proto::ShardWitness) -> Vec<u8> {
+    blake3::hash(&witness.encode_to_vec()).as_bytes().to_vec()
+}
+
+/// The `events_hash` committed to in a block header. Empty when there are no events.
+pub fn block_events_hash(events: &[proto::BlockEvent]) -> Vec<u8> {
+    if events.is_empty() {
+        return vec![];
+    }
+    let mut events_hasher = blake3::Hasher::new();
+    for event in events {
+        events_hasher.update(&event.hash);
+    }
+    events_hasher.finalize().as_bytes().to_vec()
+}
+
+/// True if each event's hash covers its data and the events together hash to `events_hash`.
+pub fn block_events_match_hash(events: &[proto::BlockEvent], events_hash: &[u8]) -> bool {
+    let events_self_consistent = events.iter().all(|event| match &event.data {
+        Some(data) => event.hash == blake3::hash(&data.encode_to_vec()).as_bytes().to_vec(),
+        None => false,
+    });
+    events_self_consistent && block_events_hash(events) == events_hash
+}
+
+/// Verifies that `commits` is a quorum of valid precommits from the validator set. This only
+/// authenticates the certificate itself; callers must separately check that the certificate's
+/// height and value match the value it is attached to.
+pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValidatorSets) -> bool {
+    let certificate = match commits.try_to_commit_certificate() {
+        Ok(certificate) => certificate,
+        Err(err) => {
+            error!("Malformed commits: {}", err);
+            return false;
+        }
+    };
 
     let validator_set = validator_sets.get_validator_set(certificate.height.as_u64());
 

@@ -16,7 +16,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
-use crate::core::util::FarcasterTime;
+use crate::core::util::{shard_chunk_hash, FarcasterTime};
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
@@ -394,6 +394,7 @@ pub fn state_change_to_shard_chunk(
         block_number,
     });
     chunk.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
+    chunk.hash = shard_chunk_hash(chunk.header.as_ref().unwrap());
     chunk.transactions = change.transactions.clone();
     chunk
 }
