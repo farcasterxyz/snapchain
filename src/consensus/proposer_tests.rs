@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::consensus::proposer::{Proposer, ShardProposer};
-    use crate::core::types::{Address, Height, ShardId, SnapchainShard};
+    use crate::core::types::{Address, Height, ShardId, SnapchainShard, WellFormedProposal};
     use crate::core::util::shard_chunk_hash;
     use crate::proto::{
         full_proposal, Commits, FullProposal, ShardChunk, ShardHeader, Transaction,
@@ -11,7 +11,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     /// Returns a shard proposer and a valid proposal for its next height.
-    async fn new_shard_proposer() -> (ShardProposer, FullProposal, tempfile::TempDir) {
+    async fn new_shard_proposer() -> (ShardProposer, WellFormedProposal, tempfile::TempDir) {
         let (mut engine, dir) = test_helper::new_engine().await;
         let state_change = engine.propose_state_change(1, vec![], None);
         let header = ShardHeader {
@@ -31,6 +31,7 @@ mod tests {
                 commits: None,
             })),
         };
+        let proposal = WellFormedProposal::try_from(proposal).unwrap();
 
         let (tx_decision, _) = broadcast::channel(10);
         let proposer = ShardProposer::new(
@@ -46,7 +47,7 @@ mod tests {
     #[tokio::test]
     async fn test_second_body_for_same_hash_does_not_replace_first() {
         let (mut proposer, first, _dir) = new_shard_proposer().await;
-        let mut second = first.clone();
+        let mut second = first.proposal().clone();
         let Some(full_proposal::ProposedValue::Shard(chunk)) = &mut second.proposed_value else {
             panic!("expected shard chunk");
         };
@@ -54,11 +55,12 @@ mod tests {
             fid: 1234,
             ..Default::default()
         });
+        let second = WellFormedProposal::try_from(second).unwrap();
 
         assert_eq!(proposer.add_proposed_value(&first), Validity::Valid);
         assert_eq!(proposer.add_proposed_value(&second), Validity::Invalid);
         assert_eq!(
-            proposer.get_proposed_value(&first.shard_hash()),
+            proposer.get_proposed_value(first.shard_hash()),
             Some(first.clone())
         );
 
@@ -69,12 +71,13 @@ mod tests {
     #[tokio::test]
     async fn test_synced_copy_with_commits_matches_cached_body() {
         let (mut proposer, consensus_copy, _dir) = new_shard_proposer().await;
-        let mut synced_copy = consensus_copy.clone();
+        let mut synced_copy = consensus_copy.proposal().clone();
         let Some(full_proposal::ProposedValue::Shard(chunk)) = &mut synced_copy.proposed_value
         else {
             panic!("expected shard chunk");
         };
         chunk.commits = Some(Commits::default());
+        let synced_copy = WellFormedProposal::try_from(synced_copy).unwrap();
 
         assert_eq!(
             proposer.add_proposed_value(&consensus_copy),

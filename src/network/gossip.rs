@@ -2,7 +2,7 @@ use crate::cfg::{DEFAULT_GOSSIP_PORT, DEFAULT_RPC_PORT};
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::core::types::{proto, FullProposalExt, SnapchainContext, SnapchainValidatorContext};
+use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext, WellFormedProposal};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::mesh::diagnostics;
 use crate::network::mesh::metrics::GossipMetrics;
@@ -1183,13 +1183,16 @@ impl SnapchainGossip {
                 }
 
                 Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
-                    if let Err(err) = full_proposal.check_well_formed() {
-                        warn!(
-                            peer_id = peer_id.to_string(),
-                            "Dropping malformed full proposal: {}", err
-                        );
-                        return None;
-                    }
+                    let full_proposal = match WellFormedProposal::try_from(full_proposal) {
+                        Ok(full_proposal) => full_proposal,
+                        Err(err) => {
+                            warn!(
+                                peer_id = peer_id.to_string(),
+                                "Dropping malformed full proposal: {}", err
+                            );
+                            return None;
+                        }
+                    };
                     let height = full_proposal.height();
                     debug!(
                         "Received block with height {} from peer: {}",
@@ -1198,7 +1201,7 @@ impl SnapchainGossip {
                     // Gossipsub runs in strict mode, so `source` is the signature-checked author.
                     // A validator's gossip identity is its consensus key, so this checks that the
                     // named proposer published this proposal.
-                    let proposer = peer_id_from_validator_key(&full_proposal.proposer);
+                    let proposer = peer_id_from_validator_key(&full_proposal.proposer_address().0);
                     let Some(author) = source.filter(|author| proposer == Some(*author)) else {
                         warn!(
                             peer_id = peer_id.to_string(),
@@ -1208,18 +1211,13 @@ impl SnapchainGossip {
                         return None;
                     };
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&author);
-                    let bytes = Bytes::from(full_proposal.encode_to_vec());
+                    let bytes = Bytes::from(full_proposal.proposal().encode_to_vec());
                     let event = MalachiteNetworkEvent::Message(
                         Channel::ProposalParts,
                         malachite_peer_id,
                         bytes,
                     );
-                    let shard_result = full_proposal.shard_id();
-                    if shard_result.is_err() {
-                        warn!("Failed to get shard id from consensus message");
-                        return None;
-                    }
-                    let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                    let shard = MalachiteEventShard::Shard(height.shard_index);
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {

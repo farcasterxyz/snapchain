@@ -1,6 +1,6 @@
 use crate::core::types::{
-    round_from_i64, CommitsExt, FullProposalExt, Proposal, Signature, SnapchainValidatorContext,
-    Vote,
+    round_from_i64, CommitsExt, Proposal, Signature, SnapchainValidatorContext, Vote,
+    WellFormedProposal,
 };
 use crate::proto::sync_request::SyncRequest;
 use crate::proto::{self};
@@ -93,13 +93,16 @@ impl Codec<SignedConsensusMsg<SnapchainValidatorContext>> for SnapchainCodec {
     }
 }
 
+fn decode_well_formed_proposal(bytes: Bytes) -> Result<WellFormedProposal, SnapchainCodecError> {
+    let proposal = FullProposal::decode(bytes)?;
+    Ok(WellFormedProposal::try_from(proposal)?)
+}
+
 impl Codec<FullProposal> for SnapchainCodec {
     type Error = SnapchainCodecError;
 
     fn decode(&self, bytes: Bytes) -> Result<FullProposal, Self::Error> {
-        let proposal = FullProposal::decode(bytes).map_err(SnapchainCodecError::Decode)?;
-        proposal.check_well_formed()?;
-        Ok(proposal)
+        Ok(decode_well_formed_proposal(bytes)?.into_proposal())
     }
 
     fn encode(&self, msg: &FullProposal) -> Result<Bytes, Self::Error> {
@@ -112,16 +115,16 @@ impl Codec<StreamMessage<FullProposal>> for SnapchainCodec {
     type Error = SnapchainCodecError;
 
     fn decode(&self, bytes: Bytes) -> Result<StreamMessage<FullProposal>, Self::Error> {
-        let proposal: FullProposal = Self.decode(bytes)?;
+        let proposal = decode_well_formed_proposal(bytes)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&proposal.height().as_u64().to_be_bytes());
-        bytes.extend_from_slice(&proposal.round.to_be_bytes());
+        bytes.extend_from_slice(&proposal.round().as_i64().to_be_bytes());
         let stream_id = StreamId::new(bytes.into());
 
         Ok(StreamMessage::new(
             stream_id,
             0,
-            StreamContent::Data(proposal),
+            StreamContent::Data(proposal.into_proposal()),
         ))
     }
 

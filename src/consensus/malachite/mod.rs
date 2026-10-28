@@ -8,3 +8,5 @@ pub mod spawn_read_node;
 
 #[cfg(test)]
 mod read_node_actors_tests;
+#[cfg(test)]
+mod snapchain_codec_tests;
