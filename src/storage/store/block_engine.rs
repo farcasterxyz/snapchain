@@ -4,7 +4,7 @@ use crate::core::message::HubEventExt;
 use crate::core::validations;
 use crate::core::{
     types::Height,
-    util::{block_events_hash, FarcasterTime},
+    util::{block_events_hash, expected_transactions_root, FarcasterTime},
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
@@ -2188,6 +2188,15 @@ impl BlockEngine {
         let Some(height) = header.height else {
             return false;
         };
+        let version =
+            EngineVersion::version_for(&FarcasterTime::new(header.timestamp), self.network);
+        if header.transactions_root != expected_transactions_root(&block.transactions, version) {
+            error!(
+                height = height.block_number,
+                "Block transactions do not match its header"
+            );
+            return false;
+        }
         let state_change = BlockStateChange {
             timestamp: FarcasterTime::new(header.timestamp),
             new_state_root: header.state_root.clone(),

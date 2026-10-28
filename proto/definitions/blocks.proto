@@ -154,6 +154,7 @@ message BlockHeader {
   bytes parent_hash = 6;
   bytes state_root = 7;
   bytes events_hash = 8;
+  bytes transactions_root = 9; // Hash of `Block.transactions`, set from EngineVersion V23
 }
 
 message ShardWitness {
@@ -180,6 +181,7 @@ message ShardHeader {
   uint64 timestamp = 2;
   bytes parent_hash = 3;
   bytes shard_root = 4; // State root for the shard after applying the transactions for the height
+  bytes transactions_root = 5; // Hash of `ShardChunk.transactions`, set from EngineVersion V23
 }
 
 message ShardChunk {

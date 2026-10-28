@@ -1,7 +1,9 @@
 use crate::core::types::{
     proto, Address, Height, ShardHash, ShardId, SnapchainShard, WellFormedProposal,
 };
-use crate::core::util::{block_hash, shard_chunk_hash, shard_witness_hash, FarcasterTime};
+use crate::core::util::{
+    block_hash, expected_transactions_root, shard_chunk_hash, shard_witness_hash, FarcasterTime,
+};
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
@@ -186,6 +188,10 @@ impl Proposer for ShardProposer {
             timestamp: state_change.timestamp.into(),
             height: Some(height.clone()),
             shard_root: state_change.new_state_root.clone(),
+            transactions_root: expected_transactions_root(
+                &state_change.transactions,
+                state_change.version,
+            ),
         };
         let hash = shard_chunk_hash(&shard_header);
 
@@ -227,6 +233,14 @@ impl Proposer for ShardProposer {
                     shard = height.shard_index,
                     height = height.block_number,
                     "Received shard chunk whose hash does not match its header"
+                );
+                return Validity::Invalid;
+            }
+            if !self.engine.transactions_root_matches(&chunk) {
+                error!(
+                    shard = height.shard_index,
+                    height = height.block_number,
+                    "Received shard chunk whose transactions do not match its header"
                 );
                 return Validity::Invalid;
             }
@@ -577,6 +591,7 @@ impl Proposer for BlockProposer {
             shard_witnesses_hash: witness_hash,
             state_root: proposal.new_state_root.clone(),
             events_hash: proposal.events_hash.clone(),
+            transactions_root: expected_transactions_root(&proposal.transactions, version),
         };
 
         let hash = block_hash(&block_header);

@@ -1177,6 +1177,7 @@ pub mod shard_chunk_factory {
                 timestamp,
                 height: Some(Height::new(shard_id, height)),
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             commits: None,

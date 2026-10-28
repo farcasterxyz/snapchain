@@ -16,7 +16,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
-use crate::core::util::{shard_chunk_hash, FarcasterTime};
+use crate::core::util::{expected_transactions_root, shard_chunk_hash, FarcasterTime};
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
@@ -368,6 +368,7 @@ pub fn default_shard_chunk() -> ShardChunk {
             timestamp: 0,
             shard_root: vec![],
             parent_hash: vec![],
+            transactions_root: vec![],
         }),
         // TODO: eventually we won't hardcode one transaction here
         transactions: vec![Transaction {
@@ -394,6 +395,8 @@ pub fn state_change_to_shard_chunk(
         block_number,
     });
     chunk.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
+    chunk.header.as_mut().unwrap().transactions_root =
+        expected_transactions_root(&change.transactions, change.version);
     chunk.hash = shard_chunk_hash(chunk.header.as_ref().unwrap());
     chunk.transactions = change.transactions.clone();
     chunk

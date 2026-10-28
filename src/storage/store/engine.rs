@@ -8,7 +8,7 @@ use crate::core::{
     error::HubError,
     message::HubEventExt,
     types::Height,
-    util::{shard_transactions_hash, FarcasterTime},
+    util::{expected_transactions_root, shard_transactions_hash, FarcasterTime},
     validations,
     validations::verification,
 };
@@ -2373,6 +2373,15 @@ impl ShardEngine {
     /// Replays `shard_chunk`'s transactions against the current state and checks they produce
     /// the header's `shard_root`, without committing. On success the replay is cached, so a
     /// following `commit_shard_chunk` of the same chunk applies it without replaying again.
+    /// Whether the chunk's header carries the `transactions_root` its transactions require.
+    pub fn transactions_root_matches(&self, shard_chunk: &ShardChunk) -> bool {
+        let Some(header) = shard_chunk.header.as_ref() else {
+            return false;
+        };
+        let version = self.version_for(&FarcasterTime::new(header.timestamp));
+        header.transactions_root == expected_transactions_root(&shard_chunk.transactions, version)
+    }
+
     pub fn validate_shard_chunk(&mut self, shard_chunk: &ShardChunk) -> bool {
         let Some(header) = shard_chunk.header.as_ref() else {
             return false;
@@ -2380,6 +2389,14 @@ impl ShardEngine {
         let Some(height) = header.height else {
             return false;
         };
+        if !self.transactions_root_matches(shard_chunk) {
+            error!(
+                shard = height.shard_index,
+                height = height.block_number,
+                "Shard chunk transactions do not match its header"
+            );
+            return false;
+        }
         let timestamp = FarcasterTime::new(header.timestamp);
         // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
         let state = ShardStateChange {

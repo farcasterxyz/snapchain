@@ -897,6 +897,7 @@ mod tests {
                 timestamp: 0,
                 parent_hash: vec![],
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             transactions: vec![Transaction {
@@ -958,6 +959,7 @@ mod tests {
                 timestamp: 0,
                 parent_hash: vec![],
                 shard_root: vec![],
+                transactions_root: vec![],
             }),
             hash: vec![],
             transactions: vec![Transaction {
@@ -1110,6 +1112,7 @@ mod tests {
             timestamp: 0,
             parent_hash: vec![],
             shard_root: vec![],
+            transactions_root: vec![],
         };
 
         // Create fake chunk with cast1

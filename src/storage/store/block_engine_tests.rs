@@ -4786,4 +4786,28 @@ mod tests {
             }
         }
     }
+
+    /// From V24 a block's transactions must match the header's `transactions_root`.
+    #[tokio::test]
+    async fn test_block_transactions_must_match_header() {
+        let (mut block_engine, _temp_dir) = setup();
+        let height = block_engine.get_confirmed_height().increment();
+        let state_change = block_engine.propose_state_change(
+            vec![MempoolMessage::OnchainEvent(
+                events_factory::create_rent_event_with_timestamp(
+                    FID_FOR_TEST,
+                    1,
+                    crate::utils::factory::time::current_timestamp(),
+                ),
+            )],
+            height,
+            None,
+        );
+        let block = state_change_to_block(height.block_number, &state_change);
+        let mut mismatched = block.clone();
+        mismatched.header.as_mut().unwrap().transactions_root = vec![0; 32];
+
+        assert!(!block_engine.validate_block(&mismatched));
+        assert!(block_engine.validate_block(&block));
+    }
 }

@@ -6808,4 +6808,21 @@ mod tests {
         assert!(engine.validate_state_change(&state_change, height));
         assert_eq!(engine.trie_root_hash(), root_before);
     }
+
+    /// From V24 a shard chunk's transactions must match the header's `transactions_root`.
+    #[tokio::test]
+    async fn test_shard_chunk_transactions_must_match_header() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let height = engine.get_confirmed_height().increment();
+        let state_change = engine.propose_state_change(1, vec![], None);
+        let chunk = test_helper::state_change_to_shard_chunk(1, height.block_number, &state_change);
+        let mut mismatched = chunk.clone();
+        mismatched.transactions.push(proto::Transaction {
+            fid: FID_FOR_TEST,
+            ..Default::default()
+        });
+
+        assert!(!engine.validate_shard_chunk(&mismatched));
+        assert!(engine.validate_shard_chunk(&chunk));
+    }
 }

@@ -2,7 +2,7 @@
 mod tests {
     use crate::consensus::proposer::{Proposer, ShardProposer};
     use crate::core::types::{Address, Height, ShardId, SnapchainShard, WellFormedProposal};
-    use crate::core::util::shard_chunk_hash;
+    use crate::core::util::{expected_transactions_root, shard_chunk_hash};
     use crate::proto::{
         full_proposal, Commits, FullProposal, ShardChunk, ShardHeader, Transaction,
     };
@@ -19,6 +19,10 @@ mod tests {
             timestamp: state_change.timestamp.into(),
             height: Some(Height::new(1, 1)),
             shard_root: state_change.new_state_root.clone(),
+            transactions_root: expected_transactions_root(
+                &state_change.transactions,
+                state_change.version,
+            ),
         };
         let proposal = FullProposal {
             height: header.height,
@@ -84,5 +88,24 @@ mod tests {
             Validity::Valid
         );
         assert_eq!(proposer.add_proposed_value(&synced_copy), Validity::Valid);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_whose_transactions_do_not_match_header_is_not_cached() {
+        let (mut proposer, proposal, _dir) = new_shard_proposer().await;
+        let mut mismatched = proposal.proposal().clone();
+        let Some(full_proposal::ProposedValue::Shard(chunk)) = &mut mismatched.proposed_value
+        else {
+            panic!("expected shard chunk");
+        };
+        chunk.transactions.push(Transaction {
+            fid: 1234,
+            ..Default::default()
+        });
+        let mismatched = WellFormedProposal::try_from(mismatched).unwrap();
+
+        assert_eq!(proposer.add_proposed_value(&mismatched), Validity::Invalid);
+        assert_eq!(proposer.get_proposed_value(proposal.shard_hash()), None);
+        assert_eq!(proposer.add_proposed_value(&proposal), Validity::Valid);
     }
 }
