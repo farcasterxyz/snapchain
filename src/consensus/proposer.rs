@@ -1,4 +1,6 @@
-use crate::core::types::{proto, Address, Height, ShardHash, ShardId, SnapchainShard};
+use crate::core::types::{
+    proto, Address, Height, ShardHash, ShardId, SnapchainShard, WellFormedProposal,
+};
 use crate::core::util::{block_hash, shard_chunk_hash, shard_witness_hash, FarcasterTime};
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
@@ -39,9 +41,9 @@ pub trait Proposer {
         height: Height,
         round: Round,
         timeout: Duration,
-    ) -> FullProposal;
+    ) -> WellFormedProposal;
     // Receive a block/shard chunk proposed by another validator and return whether it is valid
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
+    fn add_proposed_value(&mut self, full_proposal: &WellFormedProposal) -> Validity;
 
     // Consensus has confirmed the block/shard_chunk, apply it to the local state
     async fn decide(&mut self, commits: Commits);
@@ -55,12 +57,12 @@ pub trait Proposer {
 
     fn get_min_height(&self) -> Height;
 
-    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal>;
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<WellFormedProposal>;
 }
 
 pub struct ProposedValues {
     values_by_height: BTreeMap<Height, Vec<ShardHash>>,
-    values: BTreeMap<ShardHash, FullProposal>,
+    values: BTreeMap<ShardHash, WellFormedProposal>,
 }
 
 impl ProposedValues {
@@ -72,9 +74,9 @@ impl ProposedValues {
     }
 
     /// Caches `value` under its shard hash, keeping the first value cached for a hash.
-    pub fn add_proposed_value(&mut self, value: FullProposal) {
+    pub fn add_proposed_value(&mut self, value: WellFormedProposal) {
         let height = value.height();
-        let shard_hash = value.shard_hash();
+        let shard_hash = value.shard_hash().clone();
         if self.values.contains_key(&shard_hash) {
             return;
         }
@@ -89,7 +91,7 @@ impl ProposedValues {
         }
     }
 
-    pub fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&FullProposal> {
+    pub fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&WellFormedProposal> {
         self.values.get(&shard_hash)
     }
 
@@ -159,7 +161,7 @@ impl Proposer for ShardProposer {
         height: Height,
         round: Round,
         _timeout: Duration,
-    ) -> FullProposal {
+    ) -> WellFormedProposal {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
         let mempool_timeout = Duration::from_millis(200);
@@ -194,19 +196,20 @@ impl Proposer for ShardProposer {
             commits: None,
         };
 
-        let proposal = FullProposal {
+        let proposal = WellFormedProposal::try_from(FullProposal {
             height: Some(height.clone()),
             round: round.as_i64(),
             proposed_value: Some(proto::full_proposal::ProposedValue::Shard(chunk)),
             proposer: self.address.to_vec(),
-        };
+        })
+        .expect("locally built shard proposal is well formed");
         self.proposed_chunks.add_proposed_value(proposal.clone());
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(&mut self, full_proposal: &WellFormedProposal) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
-            full_proposal.proposed_value.clone()
+            full_proposal.proposal().proposed_value.clone()
         {
             let Some(header) = chunk.header.as_ref() else {
                 error!("Received shard chunk with missing header");
@@ -232,8 +235,8 @@ impl Proposer for ShardProposer {
             // consensus copies don't.
             if let Some(proto::full_proposal::ProposedValue::Shard(cached)) = self
                 .proposed_chunks
-                .get_by_shard_hash(&full_proposal.shard_hash())
-                .and_then(|cached| cached.proposed_value.as_ref())
+                .get_by_shard_hash(full_proposal.shard_hash())
+                .and_then(|cached| cached.proposal().proposed_value.as_ref())
             {
                 if cached.header != chunk.header || cached.transactions != chunk.transactions {
                     warn!(
@@ -278,11 +281,14 @@ impl Proposer for ShardProposer {
                 Validity::Invalid
             };
         }
-        error!("Invalid proposed value: {:?}", full_proposal.proposed_value);
+        error!(
+            "Invalid proposed value: {:?}",
+            full_proposal.proposal().proposed_value
+        );
         Validity::Invalid // TODO: Validate proposer signature?
     }
 
-    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<WellFormedProposal> {
         self.proposed_chunks.get_by_shard_hash(&shard_hash).cloned()
     }
 
@@ -290,7 +296,7 @@ impl Proposer for ShardProposer {
         let value = commits.value.clone().unwrap();
         let height = commits.height.unwrap();
         if let Some(proposal) = self.proposed_chunks.get_by_shard_hash(&value) {
-            let chunk = proposal.shard_chunk(commits).unwrap();
+            let chunk = proposal.proposal().shard_chunk(commits).unwrap();
             self.publish_new_shard_chunk(&chunk.clone()).await;
             self.engine.commit_shard_chunk(&chunk).await;
             self.proposed_chunks.decide(height);
@@ -514,7 +520,7 @@ impl Proposer for BlockProposer {
         height: Height,
         round: Round,
         timeout: Duration,
-    ) -> FullProposal {
+    ) -> WellFormedProposal {
         let mempool_timeout = Duration::from_millis(200);
         // TODO(aditi): We have to actually route onchain events to shard 0 in the mempool to pick them up
         let messages = self
@@ -584,20 +590,21 @@ impl Proposer for BlockProposer {
             events: proposal.events.clone(),
         };
 
-        let proposal = FullProposal {
+        let proposal = WellFormedProposal::try_from(FullProposal {
             height: Some(height.clone()),
             round: round.as_i64(),
             proposed_value: Some(proto::full_proposal::ProposedValue::Block(block)),
             proposer: self.address.to_vec(),
-        };
+        })
+        .expect("locally built block proposal is well formed");
 
         self.proposed_blocks.add_proposed_value(proposal.clone());
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(&mut self, full_proposal: &WellFormedProposal) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Block(block)) =
-            &full_proposal.proposed_value
+            &full_proposal.proposal().proposed_value
         {
             let Some(header) = block.header.as_ref() else {
                 error!("Received block with missing header");
@@ -673,7 +680,7 @@ impl Proposer for BlockProposer {
         Validity::Valid // TODO: Validate proposer signature?
     }
 
-    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<WellFormedProposal> {
         self.proposed_blocks.get_by_shard_hash(&shard_hash).cloned()
     }
 
@@ -681,7 +688,7 @@ impl Proposer for BlockProposer {
         let value = commits.value.clone().unwrap();
         let height = commits.height.unwrap();
         if let Some(proposal) = self.proposed_blocks.get_by_shard_hash(&value) {
-            let block = proposal.block(commits).unwrap();
+            let block = proposal.proposal().block(commits).unwrap();
             for witness in &block.shard_witness.as_ref().unwrap().shard_chunk_witnesses {
                 self.statsd_client.gauge_with_shard(
                     witness.height.unwrap().shard_index,

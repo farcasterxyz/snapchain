@@ -838,11 +838,11 @@ async fn test_full_proposal_must_be_published_by_its_proposer() {
 
     let publisher_addr = format!(
         "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
-        BASE_PORT_FOR_TEST + 40
+        BASE_PORT_FOR_TEST + 42
     );
     let receiver_addr = format!(
         "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
-        BASE_PORT_FOR_TEST + 41
+        BASE_PORT_FOR_TEST + 43
     );
 
     let (publisher_system_tx, _) = mpsc::channel::<SystemMessage>(100);
@@ -915,4 +915,105 @@ async fn test_full_proposal_must_be_published_by_its_proposer() {
         received_own,
         "proposer's own full proposal was not delivered"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_malformed_gossip_messages_are_dropped() {
+    use crate::proto::{
+        full_proposal::ProposedValue, gossip_message, ContactInfo, ContactInfoBody, FullProposal,
+        GossipMessage, Height,
+    };
+    use crate::utils::factory::shard_chunk_factory;
+    use libp2p::PeerId;
+
+    let addr = format!(
+        "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
+        BASE_PORT_FOR_TEST + 40
+    );
+    let config = Config::new(addr.clone(), addr);
+    let (system_tx, _system_rx) = mpsc::channel::<SystemMessage>(100);
+    let mut gossip = SnapchainGossip::create(
+        Keypair::generate(),
+        &config,
+        Some(system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let peer = PeerId::random();
+    let proposer = Keypair::generate();
+    let author = Some(libp2p::identity::PublicKey::from(proposer.public()).to_peer_id());
+
+    let encode = |message| {
+        GossipMessage {
+            gossip_message: Some(message),
+        }
+        .encode_to_vec()
+    };
+    let well_formed = FullProposal {
+        height: Some(Height::new(1, 1)),
+        round: 0,
+        proposer: proposer.public().to_bytes().to_vec(),
+        proposed_value: Some(ProposedValue::Shard(
+            shard_chunk_factory::create_shard_chunk(1, Some(1), Some(0)),
+        )),
+    };
+
+    let forwarded = gossip.map_gossip_bytes_to_system_message(
+        peer,
+        author,
+        encode(gossip_message::GossipMessage::FullProposal(
+            well_formed.clone(),
+        )),
+    );
+    assert!(matches!(
+        forwarded,
+        Some(SystemMessage::MalachiteNetwork(_, _))
+    ));
+
+    let malformed = [
+        FullProposal {
+            height: None,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            proposed_value: None,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            round: -1,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            round: u32::MAX as i64 + 1,
+            ..well_formed.clone()
+        },
+    ];
+    for proposal in malformed {
+        let forwarded = gossip.map_gossip_bytes_to_system_message(
+            peer,
+            author,
+            encode(gossip_message::GossipMessage::FullProposal(
+                proposal.clone(),
+            )),
+        );
+        assert!(forwarded.is_none(), "forwarded {proposal:?}");
+    }
+
+    let contact_info = gossip.map_gossip_bytes_to_system_message(
+        peer,
+        author,
+        encode(gossip_message::GossipMessage::ContactInfoMessage(
+            ContactInfo {
+                body: Some(ContactInfoBody {
+                    peer_id: vec![1, 2, 3],
+                    ..Default::default()
+                }),
+            },
+        )),
+    );
+    assert!(contact_info.is_none());
 }

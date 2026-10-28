@@ -7,4 +7,4 @@ pub mod validations;
 
 // Re-export extension traits for convenience
 pub use message::HubEventExt;
-pub use types::{CommitsExt, FullProposalExt};
+pub use types::CommitsExt;

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::core::error::HubError;
+use crate::core::types::WellFormedProposal;
 use crate::proto::FnameState;
 use crate::proto::FullProposal;
 use crate::proto::Height;
@@ -83,12 +84,15 @@ impl LocalStateStore {
         key
     }
 
-    pub fn put_proposal(&self, proposal: FullProposal) -> Result<(), LocalStateError> {
+    pub fn put_proposal(&self, proposal: &WellFormedProposal) -> Result<(), LocalStateError> {
         let height = proposal.height();
-        let round = proposal.round();
-        let shard_index = proposal.shard_id().unwrap();
-        let primary_key = Self::make_proposal_key(shard_index, height.as_u64(), round.as_i64());
-        self.db.put(&primary_key, &proposal.encode_to_vec())?;
+        let primary_key = Self::make_proposal_key(
+            height.shard_index,
+            height.as_u64(),
+            proposal.round().as_i64(),
+        );
+        self.db
+            .put(&primary_key, &proposal.proposal().encode_to_vec())?;
         Ok(())
     }
 

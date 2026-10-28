@@ -2,11 +2,12 @@
 mod tests {
     use crate::consensus::consensus::ValidatorSetConfig;
     use crate::consensus::validator::ShardValidator;
-    use crate::core::types::{Address, Height, ShardId, SnapchainShard};
-    use crate::proto::FullProposal;
+    use crate::core::types::{Address, Height, ShardId, SnapchainShard, WellFormedProposal};
+    use crate::proto::{full_proposal, FullProposal};
     use crate::storage::db::RocksDB;
     use crate::storage::store::node_local_state::LocalStateStore;
     use crate::storage::store::test_helper;
+    use crate::utils::factory::shard_chunk_factory;
     use libp2p::identity::ed25519::Keypair;
     use std::sync::Arc;
 
@@ -31,13 +32,16 @@ mod tests {
         )
     }
 
-    fn proposal(proposer: &Keypair, round: i64) -> FullProposal {
-        FullProposal {
+    fn proposal(proposer: &Keypair, round: i64) -> WellFormedProposal {
+        WellFormedProposal::try_from(FullProposal {
             height: Some(Height::new(1, 5)),
             round,
             proposer: proposer.public().to_bytes().to_vec(),
-            proposed_value: None,
-        }
+            proposed_value: Some(full_proposal::ProposedValue::Shard(
+                shard_chunk_factory::create_shard_chunk(1, Some(5), Some(0)),
+            )),
+        })
+        .unwrap()
     }
 
     #[test]

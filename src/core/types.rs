@@ -295,39 +295,81 @@ pub fn round_from_i64(round: i64) -> Result<Round, String> {
     Ok(Round::from(round))
 }
 
-// Extension trait for FullProposal that depends on main crate types (Address)
-pub trait FullProposalExt {
-    fn proposer_address(&self) -> Address;
-
-    /// Checks the invariants that `height()`, `round()`, `shard_hash()`, `proposer_address()`
-    /// and the proposers rely on. Proposals received from peers must pass this before use.
-    fn check_well_formed(&self) -> Result<(), String>;
+/// A [`FullProposal`] whose height, round, proposer and proposed value have been checked, so
+/// they can be read without panicking. The only way to build one is
+/// [`WellFormedProposal::try_from`], so code that takes this type cannot be handed an
+/// unchecked proposal from a peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WellFormedProposal {
+    proposal: FullProposal,
+    height: Height,
+    round: Round,
+    shard_hash: ShardHash,
+    proposer: Address,
 }
 
-impl FullProposalExt for FullProposal {
-    fn proposer_address(&self) -> Address {
-        Address::from_vec(self.proposer.clone())
-    }
+impl TryFrom<FullProposal> for WellFormedProposal {
+    type Error = String;
 
-    fn check_well_formed(&self) -> Result<(), String> {
-        let height = self.height.ok_or("Missing height")?;
-        u32::try_from(self.round).map_err(|_| format!("Invalid round: {}", self.round))?;
-        Address::try_from_slice(&self.proposer)?;
-        let header_height = match &self.proposed_value {
-            Some(proto::full_proposal::ProposedValue::Shard(chunk)) if height.shard_index != 0 => {
-                chunk.header.as_ref().and_then(|header| header.height)
-            }
-            Some(proto::full_proposal::ProposedValue::Block(block)) if height.shard_index == 0 => {
-                block.header.as_ref().and_then(|header| header.height)
-            }
+    fn try_from(proposal: FullProposal) -> Result<Self, Self::Error> {
+        let height = proposal.height.ok_or("Missing height")?;
+        let round = u32::try_from(proposal.round)
+            .map_err(|_| format!("Invalid round: {}", proposal.round))?;
+        let proposer = Address::try_from_slice(&proposal.proposer)?;
+        let (header_height, hash) = match &proposal.proposed_value {
+            Some(proto::full_proposal::ProposedValue::Shard(chunk)) if height.shard_index != 0 => (
+                chunk.header.as_ref().and_then(|header| header.height),
+                &chunk.hash,
+            ),
+            Some(proto::full_proposal::ProposedValue::Block(block)) if height.shard_index == 0 => (
+                block.header.as_ref().and_then(|header| header.height),
+                &block.hash,
+            ),
             Some(_) => return Err("Proposed value type does not match shard".to_string()),
             None => return Err("Missing proposed value".to_string()),
         };
         match header_height {
-            Some(header_height) if header_height == height => Ok(()),
-            Some(_) => Err("Header height does not match proposal height".to_string()),
-            None => Err("Missing header or header height".to_string()),
+            Some(header_height) if header_height == height => {}
+            Some(_) => return Err("Header height does not match proposal height".to_string()),
+            None => return Err("Missing header or header height".to_string()),
         }
+        let shard_hash = ShardHash {
+            shard_index: height.shard_index,
+            hash: hash.clone(),
+        };
+        Ok(Self {
+            proposal,
+            height,
+            round: Round::new(round),
+            shard_hash,
+            proposer,
+        })
+    }
+}
+
+impl WellFormedProposal {
+    pub fn height(&self) -> Height {
+        self.height
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn shard_hash(&self) -> &ShardHash {
+        &self.shard_hash
+    }
+
+    pub fn proposer_address(&self) -> &Address {
+        &self.proposer
+    }
+
+    pub fn proposal(&self) -> &FullProposal {
+        &self.proposal
+    }
+
+    pub fn into_proposal(self) -> FullProposal {
+        self.proposal
     }
 }
 
