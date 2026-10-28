@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         consensus::proposer::ProposedValues,
-        proto::{full_proposal::ProposedValue, Block, FullProposal, Height},
+        proto::{full_proposal::ProposedValue, Block, FullProposal, Height, Transaction},
     };
 
     fn make_proposal(shard_index: u32, block_number: u64, round: i64) -> FullProposal {
@@ -53,6 +53,29 @@ mod tests {
             .get_by_shard_hash(&proposal1.shard_hash())
             .is_none());
         assert_eq!(proposed_values.count(), 0);
+    }
+
+    #[test]
+    fn test_same_hash_keeps_first_value() {
+        let mut proposed_values = ProposedValues::new();
+        let first = make_proposal(1, 1, 0);
+        let mut second = first.clone();
+        let Some(ProposedValue::Block(block)) = &mut second.proposed_value else {
+            panic!("expected block");
+        };
+        block.transactions.push(Transaction::default());
+
+        add_proposed_value(&mut proposed_values, &first);
+        proposed_values.add_proposed_value(second);
+
+        assert_eq!(
+            proposed_values
+                .get_by_shard_hash(&first.shard_hash())
+                .unwrap()
+                .clone(),
+            first
+        );
+        assert_eq!(proposed_values.count(), 1);
     }
 
     #[test]

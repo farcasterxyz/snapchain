@@ -105,6 +105,16 @@ pub fn shard_chunk_hash(header: &proto::ShardHeader) -> Vec<u8> {
     blake3::hash(&header.encode_to_vec()).as_bytes().to_vec()
 }
 
+/// blake3 over a shard chunk's transactions in order, each length-delimited so that different
+/// transaction lists cannot encode to the same bytes.
+pub fn shard_transactions_hash(transactions: &[proto::Transaction]) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    for transaction in transactions {
+        hasher.update(&transaction.encode_length_delimited_to_vec());
+    }
+    hasher.finalize().as_bytes().to_vec()
+}
+
 /// Hash that commit certificates sign for a block: blake3 of the encoded header.
 pub fn block_hash(header: &proto::BlockHeader) -> Vec<u8> {
     blake3::hash(&header.encode_to_vec()).as_bytes().to_vec()

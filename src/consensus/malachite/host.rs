@@ -181,6 +181,17 @@ impl Host {
                 let now = tokio::time::Instant::now();
                 let data = part.content.as_data();
                 match data {
+                    Some(proposal) if !state.shard_validator.is_expected_proposer(proposal) => {
+                        // No reply, so consensus never sees this proposal: it keeps the first
+                        // validity recorded for a value id.
+                        warn!(
+                            %from,
+                            height = %proposal.height(),
+                            round = proposal.round,
+                            proposer = hex::encode(&proposal.proposer),
+                            "Dropping full proposal from a validator that is not the proposer for its round"
+                        );
+                    }
                     Some(proposal) => {
                         let proposed_value = state
                             .shard_validator

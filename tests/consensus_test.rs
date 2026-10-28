@@ -4185,3 +4185,79 @@ async fn test_malformed_decided_values_do_not_stall_the_read_node() {
     assert_eq!(read_node.exit_errors(), Vec::<String>::new());
     assert_read_nodes_match_validators(&network);
 }
+
+/// Validators sync only from peers in their validator set. While a late-starting validator
+/// catches up, a non-validator peer advertising a status ahead of the network must not be sent
+/// any sync requests.
+#[tokio::test]
+#[serial]
+async fn test_validators_do_not_sync_from_non_validators() {
+    use informalsystems_malachitebft_network::{
+        Event as NetworkEvent, PeerId as MalachitePeerId, PeerIdExt,
+    };
+    use informalsystems_malachitebft_sync::{RawMessage, Status};
+
+    let mut network = TestNetwork::create(4, 1).await;
+    for i in 0..3 {
+        network.start_validator_node(i).await;
+    }
+    network.wait_for_shard_chunk(1, 10).await.unwrap();
+
+    let keypair = Keypair::generate();
+    let peer_id = libp2p::identity::PublicKey::from(keypair.public()).to_peer_id();
+    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
+    let mut gossip = SnapchainGossip::create(
+        keypair,
+        &snapchain::network::gossip::Config::new(
+            format!("/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1", get_available_port()),
+            network.gossip_addresses.join(","),
+        ),
+        Some(system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+    let gossip_tx = gossip.tx.clone();
+    let gossip_handle = tokio::spawn(async move { gossip.start().await });
+
+    let status = Status::<SnapchainValidatorContext> {
+        peer_id: MalachitePeerId::from_libp2p(&peer_id),
+        height: Height::new(1, network.max_shard_height(1) as u64 + 1000),
+        history_min_height: Height::new(1, 1),
+    };
+    network.start_validator_node(3).await;
+    let deadline = tokio::time::Instant::now() + time::Duration::from_secs(10);
+    let mut sync_requests = 0;
+    let mut next_status = tokio::time::Instant::now();
+    while tokio::time::Instant::now() < deadline {
+        if tokio::time::Instant::now() >= next_status {
+            let _ = gossip_tx
+                .send(GossipEvent::BroadcastStatus(status.clone()))
+                .await;
+            next_status += time::Duration::from_millis(200);
+        }
+        if let Ok(Some(SystemMessage::MalachiteNetwork(
+            _,
+            NetworkEvent::Sync(RawMessage::Request { .. }),
+        ))) = tokio::time::timeout(time::Duration::from_millis(50), system_rx.recv()).await
+        {
+            sync_requests += 1;
+        }
+    }
+    gossip_handle.abort();
+
+    assert_eq!(
+        sync_requests, 0,
+        "validators sent sync requests to a non-validator peer"
+    );
+    // The late validator still catches up from the other validators.
+    network
+        .wait_for_shard_chunk(1, network.max_shard_height(1))
+        .await
+        .expect("late validator did not catch up");
+}

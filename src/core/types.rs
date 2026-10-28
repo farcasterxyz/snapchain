@@ -391,6 +391,17 @@ impl SnapchainValidatorSet {
         self.validators.iter().any(|v| v.address == *address)
     }
 
+    /// The validator that proposes at `height` and `round`, or `None` if the set is empty, the
+    /// height is zero or the round is nil.
+    pub fn proposer(&self, height: Height, round: Round) -> Option<&SnapchainValidator> {
+        if self.validators.is_empty() || height.as_u64() == 0 || round.as_i64() < 0 {
+            return None;
+        }
+        let index =
+            (height.as_u64() as usize - 1 + round.as_i64() as usize) % self.validators.len();
+        self.validators.get(index)
+    }
+
     pub fn shard_id(&self) -> u32 {
         if self.validators.is_empty() {
             0
@@ -566,16 +577,8 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
         assert!(!validator_set.validators.is_empty());
         assert!(round != Round::Nil && round.as_i64() >= 0);
 
-        let proposer_index = {
-            let height = height.as_u64() as usize;
-            let round = round.as_i64() as usize;
-
-            (height - 1 + round) % validator_set.validators.len()
-        };
-
         validator_set
-            .validators
-            .get(proposer_index)
+            .proposer(height, round)
             .expect("proposer_index is valid")
     }
 

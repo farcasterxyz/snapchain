@@ -6776,4 +6776,36 @@ mod tests {
             "live merge and replicator replay must produce identical follow rows"
         );
     }
+
+    /// User messages without `data` are rejected during replay instead of breaking the sort that
+    /// orders a transaction's messages.
+    #[tokio::test]
+    async fn test_replay_rejects_user_messages_without_data() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let root_before = engine.trie_root_hash();
+        let dataless = proto::Message {
+            data: None,
+            data_bytes: None,
+            ..Default::default()
+        };
+        let timestamp = FarcasterTime::current();
+        let state_change = ShardStateChange {
+            shard_id: 1,
+            version: engine.version_for(&timestamp),
+            timestamp,
+            new_state_root: root_before.clone(),
+            transactions: vec![proto::Transaction {
+                fid: FID_FOR_TEST,
+                user_messages: vec![dataless.clone(), dataless],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            events: vec![],
+            max_block_event_seqnum: 0,
+        };
+
+        let height = engine.get_confirmed_height().increment();
+        assert!(engine.validate_state_change(&state_change, height));
+        assert_eq!(engine.trie_root_hash(), root_before);
+    }
 }

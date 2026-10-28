@@ -71,9 +71,13 @@ impl ProposedValues {
         }
     }
 
+    /// Caches `value` under its shard hash, keeping the first value cached for a hash.
     pub fn add_proposed_value(&mut self, value: FullProposal) {
         let height = value.height();
         let shard_hash = value.shard_hash();
+        if self.values.contains_key(&shard_hash) {
+            return;
+        }
         self.values.insert(shard_hash.clone(), value);
         match self.values_by_height.get_mut(&height) {
             Some(hashes) => {
@@ -222,6 +226,23 @@ impl Proposer for ShardProposer {
                     "Received shard chunk whose hash does not match its header"
                 );
                 return Validity::Invalid;
+            }
+            // Only the cached chunk for a hash is validated, since validation also sets the
+            // engine's pending commit txn. `commits` is not compared: synced copies carry it,
+            // consensus copies don't.
+            if let Some(proto::full_proposal::ProposedValue::Shard(cached)) = self
+                .proposed_chunks
+                .get_by_shard_hash(&full_proposal.shard_hash())
+                .and_then(|cached| cached.proposed_value.as_ref())
+            {
+                if cached.header != chunk.header || cached.transactions != chunk.transactions {
+                    warn!(
+                        shard = height.shard_index,
+                        height = height.block_number,
+                        "Dropping shard chunk whose body differs from the cached chunk with the same hash"
+                    );
+                    return Validity::Invalid;
+                }
             }
             self.proposed_chunks
                 .add_proposed_value(full_proposal.clone());

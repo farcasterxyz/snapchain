@@ -5,7 +5,11 @@ use super::account::{
 use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
-    error::HubError, message::HubEventExt, types::Height, util::FarcasterTime, validations,
+    error::HubError,
+    message::HubEventExt,
+    types::Height,
+    util::{shard_transactions_hash, FarcasterTime},
+    validations,
     validations::verification,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
@@ -163,6 +167,7 @@ struct CachedTransaction {
     events: Vec<HubEvent>,
     max_block_event_seqnum: u64,
     block_events_hash: Vec<u8>,
+    transactions_hash: Vec<u8>,
     txn: RocksDbTransactionBatch,
 }
 
@@ -438,6 +443,7 @@ impl ShardEngine {
         self.stores.trie.reload(&self.db).unwrap();
 
         let block_events_hash = Self::compute_block_events_hash(&result.transactions);
+        let transactions_hash = shard_transactions_hash(&result.transactions);
 
         self.pending_txn = Some(CachedTransaction {
             shard_root: result.new_state_root.clone(),
@@ -445,6 +451,7 @@ impl ShardEngine {
             txn,
             max_block_event_seqnum: result.max_block_event_seqnum,
             block_events_hash,
+            transactions_hash,
         });
 
         let proposal_duration = now.elapsed();
@@ -1561,13 +1568,11 @@ impl ShardEngine {
             let priority_a = get_message_priority(a);
             let priority_b = get_message_priority(b);
 
-            // Message priority first, then timestamp
+            // Message priority first, then timestamp. Messages without `data` sort first and are
+            // rejected by validation below.
             priority_a.cmp(&priority_b).then_with(|| {
-                a.data
-                    .as_ref()
-                    .unwrap()
-                    .timestamp
-                    .cmp(&b.data.as_ref().unwrap().timestamp)
+                let timestamp = |msg: &proto::Message| msg.data.as_ref().map(|data| data.timestamp);
+                timestamp(a).cmp(&timestamp(b))
             })
         });
 
@@ -2415,6 +2420,7 @@ impl ShardEngine {
             Ok((events, max_block_event_seqnum)) => {
                 let block_events_hash =
                     Self::compute_block_events_hash(&shard_state_change.transactions);
+                let transactions_hash = shard_transactions_hash(&shard_state_change.transactions);
 
                 self.pending_txn = Some(CachedTransaction {
                     shard_root: shard_root.clone(),
@@ -2422,6 +2428,7 @@ impl ShardEngine {
                     events,
                     max_block_event_seqnum,
                     block_events_hash,
+                    transactions_hash,
                 });
             }
         }
@@ -2683,6 +2690,23 @@ impl ShardEngine {
                 "commit.cache_miss",
                 1,
                 vec![("reason", "block_events_hash_mismatch")],
+            );
+            return false;
+        }
+
+        // Reuse the cached txn only for the exact transactions it was built from.
+        let computed_hash = shard_transactions_hash(transactions);
+        if computed_hash != cached_txn.transactions_hash {
+            error!(
+                shard_id = self.shard_id,
+                cached_transactions_hash = hex::encode(&cached_txn.transactions_hash),
+                computed_transactions_hash = hex::encode(&computed_hash),
+                "Cached transactions hash mismatch"
+            );
+            self.metrics.count(
+                "commit.cache_miss",
+                1,
+                vec![("reason", "transactions_hash_mismatch")],
             );
             return false;
         }
