@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-10-28
+
+### 🐛 Bug Fixes
+
+- *(scripts)* Unblind the onchain-config watcher and ship fc in the distroless image (NS-367, NS-1893) (#1088)
+- *(consensus)* Tighten validation of decided values and peer messages (#1089)
+- *(consensus)* Tighten proposal caching, proposer checks and sync peers (NS-1973) (#1091)
+- *(consensus)* Require a checked proposal wherever its height, round or hash is read (NS-675) (#1090)
+
+### 💼 Other
+
+- Slimmer snapchain image without a shell (#1085)
+
 ## [0.15.0] - 2026-10-23
 
 ### 🚀 Features
