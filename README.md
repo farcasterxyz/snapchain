@@ -163,7 +163,7 @@ Clone the snapchain and dependent repos and build snapchain:
 ```
 git clone git@github.com:farcasterxyz/malachite.git
 cd malachite
-git checkout 41e2e2f90de696d14b1cd2c5a77c567b71b6104b
+git checkout 58730933edc170a395e6a905d791fac4666da192
 cd ..
 git clone git@github.com:farcasterxyz/snapchain.git
 cd snapchain

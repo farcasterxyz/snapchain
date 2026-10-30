@@ -8,7 +8,7 @@ permissions:
   pull-requests: write
 
 env:
-  MALACHITE_GIT_REF: "41e2e2f90de696d14b1cd2c5a77c567b71b6104b"
+  MALACHITE_GIT_REF: "58730933edc170a395e6a905d791fac4666da192"
   # The default `info` log level is very noisy in CI test output; quiet it to errors only.
   RUST_LOG: error
 

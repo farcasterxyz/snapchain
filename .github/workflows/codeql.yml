@@ -36,7 +36,7 @@ jobs:
       uses: actions/checkout@v7
       with:
         repository: farcasterxyz/malachite
-        ref: 41e2e2f90de696d14b1cd2c5a77c567b71b6104b
+        ref: 58730933edc170a395e6a905d791fac4666da192
         path: ./malachite
 
     - name: Install Rust 1.95.0
