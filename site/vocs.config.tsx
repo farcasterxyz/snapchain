@@ -73,6 +73,7 @@ export default defineConfig({
               { text: 'Message API', link: '/reference/httpapi/message' },
               { text: 'Fid API', link: '/reference/httpapi/fids' },
               { text: 'Storage API', link: '/reference/httpapi/storagelimits' },
+              { text: 'Signers API', link: '/reference/httpapi/signers' },
               { text: 'Onchain API', link: '/reference/httpapi/onchain' },
               { text: 'Events API', link: '/reference/httpapi/events' },
             ],
