@@ -151,6 +151,15 @@ message CastAddBody {
   repeated uint32 mentions_positions = 5; // Positions of the mentions in the text
   repeated Embed embeds = 6; // URLs or cast ids to be embedded in the cast
   CastType type = 8; // Type of cast
+  uint32 format_version = 9; // How to read the text. 0 = plain text
+  optional ChainCast chain = 10; // Set on every cast of a chain
+}
+
+/** Places a cast in an ordered chain of casts by one author */
+message ChainCast {
+  CastId root = 1; // The first cast of the chain. Absent on that cast itself (index 0)
+  uint32 index = 2; // Position in the chain, from 0
+  uint32 count = 3; // Number of casts in the chain. 0 = the chain is still growing
 }
 
 /** Removes an existing Cast */
@@ -275,10 +284,23 @@ enum CastingMode {
 }
 
 /**
- * Protocol-relevant, unlike CastingMode: this is intended to gate whether an fid
- * may add itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
- * whose fid equals the sending message's fid). OPEN admits self-adds; APPROVAL
- * requires a moderator. Not enforced yet — no channel message merges on any network.
+ * Protocol-relevant, unlike CastingMode: this gates whether an fid may add
+ * itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
+ * whose fid equals the sending message's fid).
+ *
+ * Under OPEN an fid may self-add, but only from no membership at all or from
+ * REMOVED: a banned fid stays banned, and one already MEMBER or MODERATOR is
+ * rejected rather than re-added. Under APPROVAL the add must come from the
+ * channel OWNER or a MODERATOR — an owner satisfies it directly and does not
+ * need a moderator role. Either mode still rejects an add whose target is
+ * banned.
+ *
+ * NONE is the proto3 zero value, not a third policy: an absent or explicitly
+ * zero mode folds to APPROVAL, so a cosmetic-only ChannelUpdate closes
+ * membership rather than opening it.
+ *
+ * Enforced at shard-0 admission wherever channel messages are active (they are
+ * version-gated and inert on networks below that version).
  */
 enum MembershipMode {
   MEMBERSHIP_MODE_NONE = 0;
@@ -302,6 +324,12 @@ enum ChannelModerateAction {
   CHANNEL_MODERATE_ACTION_UNHIDE = 2;
 }
 
+// WHOLE-REPLACE, NOT MERGE-PATCH. The winning ChannelUpdate is the channel's
+// entire configuration: a field omitted here reads as unset, it is NOT inherited
+// from the update this one supersedes. Sending `{channel_id, name}` to rename a
+// channel therefore CLEARS its description, image_url, header, rules, and both
+// modes (which fold back to the restrictive defaults). Clients must send the
+// full desired state on every update, not just the fields they are changing.
 message ChannelUpdateBody {
   // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
   // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto

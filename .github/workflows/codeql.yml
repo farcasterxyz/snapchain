@@ -12,7 +12,7 @@ on:
 jobs:
   analyze-rust:
     name: Analyze (rust)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       security-events: write
@@ -27,13 +27,13 @@ jobs:
         tool: protoc
 
     - name: Checkout snapchain
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         path: ./snapchain
         fetch-depth: 0
 
     - name: Checkout malachite (path dependency)
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         repository: informalsystems/malachite
         ref: 13bca14cd209d985c3adf101a02924acde8723a5
@@ -75,7 +75,7 @@ jobs:
 
   analyze-other:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       security-events: write
@@ -90,7 +90,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4

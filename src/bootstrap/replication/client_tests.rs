@@ -655,7 +655,18 @@ mod tests {
             Some(&fid_signer),
         );
 
-        commit_message(&mut source_engine, &address_verification_add).await;
+        // Post-V24 verifications reach data shards as shard-0 BlockEvents. Seed the source
+        // through that public replay path so replication coverage keeps a verification row
+        // without relying on the now-rejected direct-submission path.
+        let verification_block_event = factory::events_factory::create_merge_message_event(
+            address_verification_add.clone(),
+            1,
+        );
+        test_helper::commit_block_events(&mut source_engine, vec![&verification_block_event]).await;
+        assert!(test_helper::message_exists_in_trie(
+            &mut source_engine,
+            &address_verification_add,
+        ));
 
         timestamp += 1;
 
@@ -844,7 +855,7 @@ mod tests {
         let mut txn_batch = RocksDbTransactionBatch::new();
         for trie_message in trie_messages {
             let inserted = dest_engine
-                .replay_replicator_message(&mut txn_batch, &trie_message)
+                .replay_replicator_message(&mut txn_batch, &trie_message, false)
                 .expect("Failed to replay replicator message");
             assert!(fids.contains(&inserted.fid));
             assert!(all_trie_keys.contains(&inserted.trie_keys[0]));

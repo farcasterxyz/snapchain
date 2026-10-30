@@ -13,14 +13,15 @@ If your goal is to get started as quickly as possible, consider a managed servic
 
 ## Sync a node
 
-The easiest way to run Snapchain is using [Docker](https://www.docker.com/get-started/). Once installed, run the following commands in a new folder
-
+The easiest way to run Snapchain is with the install script, which runs the node under [Docker](https://www.docker.com/get-started/) and installs Docker for you if it is missing:
 
 ``` bash
 curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
 
-Check the the docker logs to ensure that the snapshot is being downloaded. 
+The script installs everything into `~/snapchain`, whichever directory you run it from. It asks you to confirm that you will not receive rewards for running a node and for your FID, then starts the node and follows its logs. See [Manage a node with snapchain.sh](/guides/managing-a-node) for what each step does and how to start, stop and upgrade the node later.
+
+Check the logs to make sure the snapshot is downloading:
 
 ```bash
 ./snapchain.sh logs
@@ -35,59 +36,63 @@ Check the the docker logs to ensure that the snapshot is being downloaded.
 ....
 ```
 
-Snapshots are about 200 GB in size and may take a few hours to sync and decompress. Once complete, you should see logs like this: 
+The snapshot is several hundred gigabytes and can take a few hours to download and decompress. Once it is done, you should see logs like this:
 
 ```
 2025-04-16T08:20:01.749980Z  INFO node{name=Block}:sync{height.tip=[0] 1875918 height.sync=[0] 1875919}: informalsystems_malachitebft_sync::handle: Requesting sync value from peer height.sync=[0] 1875920 peer=12D3KooWCc28TYrrXFivwUshyZ8R5HqPMgx4f7AP54iCDLYr7kFR
 2025-04-16T08:20:01.752425Z  INFO Actor{id="0.7"}: snapchain::consensus::read_validator: Processed decided block height=[0] 1875920 hash="d7a6e107fed6e1e90d4888f4aa2bfb922d9e6950d83c621db0500b15e1caccfe"
 ```
 
-It will take a few hours for the node to sync. You can monitor it by running:
+The node then syncs the blocks produced since the snapshot was taken. Check its progress with:
 
 ``` bash
-curl localhost:3381/v1/info | jq
+curl -s localhost:3381/v1/info | jq
+```
 
-# if the nodes are in sync, the blockdelay values for shards should be in the single digits.
-
+```json
 {
   "dbStats": {
-    "numMessages": 656823920,
-    "numFidRegistrations": 1049519,
-    "approxSize": 324437755099
+    "numMessages": 914092103,
+    "numFidRegistrations": 3354008,
+    "approxSize": 548529692074
   },
   "numShards": 2,
   "shardInfos": [
     {
       "shardId": 0,
-      "maxHeight": 1932723,
-      "numMessages": 0,
+      "maxHeight": 47583086,
+      "numMessages": 12661169,
       "numFidRegistrations": 0,
-      "approxSize": 1114006028,
-      "blockDelay": 5,
+      "approxSize": 38012136899,
+      "blockDelay": 1,
       "mempoolSize": 0
     },
     {
       "shardId": 2,
-      "maxHeight": 1945363,
-      "numMessages": 326936052,
-      "numFidRegistrations": 523905,
-      "approxSize": 161319650355,
-      "blockDelay": 6,
+      "maxHeight": 48091473,
+      "numMessages": 455556375,
+      "numFidRegistrations": 1676871,
+      "approxSize": 273017268128,
+      "blockDelay": 0,
       "mempoolSize": 4294967295
     },
     {
       "shardId": 1,
-      "maxHeight": 1966901,
-      "numMessages": 329887868,
-      "numFidRegistrations": 525614,
-      "approxSize": 163118104744,
-      "blockDelay": 5,
+      "maxHeight": 48256318,
+      "numMessages": 458535728,
+      "numFidRegistrations": 1677137,
+      "approxSize": 275512423946,
+      "blockDelay": 0,
       "mempoolSize": 4294967295
     }
-  ]
+  ],
+  "version": "0.14.2",
+  "peer_id": "12D3KooWCjFRfnj2yrWyADcW3adS45YigbUPwEyGZ6fB9rbxDW2T",
+  "nextEngineVersionTimestamp": 0
 }
-
 ```
+
+`blockDelay` is how many seconds each shard's newest block is behind the current time. While the node catches up it counts down; once every shard is in the single digits, the node is in sync. `maxHeight` differs between shards because each shard is its own chain. On a read node `mempoolSize` reads `4294967295` for shards 1 and 2, which means "not reported" (see [Validators vs. read nodes](/node-types#mempool)).
 
 ## Query a node
 
@@ -120,3 +125,9 @@ curl http://localhost:3381/v1/castsByFid\?fid\=1 \
  | jq ".messages[].data.castAddBody.text \
  | select( . != null)"
 ```
+
+## Next steps
+
+- [Manage a node with snapchain.sh](/guides/managing-a-node): commands, auto-upgrades, customizing the node and troubleshooting.
+- [Validators vs. read nodes](/node-types): how the node you just started differs from a validator.
+- [HTTP API](/reference/httpapi/httpapi) and [gRPC API](/reference/grpcapi/grpcapi) references.

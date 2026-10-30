@@ -16,12 +16,14 @@ export default defineConfig({
           { text: 'Getting started', link: '/getting-started' },
           { text: 'Whitepaper', link: '/whitepaper' },
           { text: 'Validators', link: '/validators' },
+          { text: 'Validators vs. read nodes', link: '/node-types' },
         ],
       },
       {
         text: 'Guides',
         items: [
           { text: 'Run Snapchain on AWS', link: '/guides/running-a-node' },
+          { text: 'Manage a node with snapchain.sh', link: '/guides/managing-a-node' },
           { text: 'Make a new post using Snapchain', link: '/guides/writing-messages' },
           { text: 'Sync Snapchain to Postgres', link: '/guides/syncing-to-db' },
           { text: 'Migrate to Snapchain', link: '/guides/migrating-to-snapchain' },

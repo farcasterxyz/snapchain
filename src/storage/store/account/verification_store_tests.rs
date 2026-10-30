@@ -4,8 +4,8 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType, ReactionType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        make_fid_key, make_ts_hash, Store, StoreEventHandler, VerificationStore,
-        VerificationStoreDef, TS_HASH_LENGTH,
+        make_fid_key, make_ts_hash, select_verification_address_winner, Store, StoreEventHandler,
+        VerificationStore, VerificationStoreDef, TS_HASH_LENGTH,
     };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::{address, messages_factory};
@@ -208,7 +208,8 @@ mod tests {
         merge_message_success(&store, &db, &verification_add1);
         merge_message_success(&store, &db, &verification_add2);
 
-        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, None).unwrap();
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().any(|(fid, ts_hash)| {
             *fid == fid1
@@ -266,7 +267,8 @@ mod tests {
         merge_message_success(&store, &db, &verification_add2);
         merge_message_with_conflicts(&store, &db, &verification_remove1, vec![verification_add1]);
 
-        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, fid2);
         assert_eq!(
@@ -306,7 +308,8 @@ mod tests {
         merge_message_success(&store, &db, &verification_add);
         merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
 
-        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, FID_FOR_TEST);
         assert_eq!(
@@ -335,7 +338,8 @@ mod tests {
 
         // The reader tolerates the transitional shape: it skips the legacy slot
         // rather than erroring the whole read.
-        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, None).unwrap();
         assert!(entries.is_empty());
 
         // A real (new-format) verification coexisting with the legacy slot is
@@ -351,7 +355,8 @@ mod tests {
         );
         merge_message_success(&store, &db, &verification_add);
 
-        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, FID_FOR_TEST);
     }
@@ -377,10 +382,74 @@ mod tests {
         );
         db.commit(txn).unwrap();
 
-        let eth = VerificationStore::get_verifications_by_address(&store, &addr_eth).unwrap();
+        let eth = VerificationStore::get_verifications_by_address(&store, &addr_eth, None).unwrap();
         assert_eq!(eth, vec![(10u64, ts_eth)]);
-        let sol = VerificationStore::get_verifications_by_address(&store, &addr_sol).unwrap();
+        let sol = VerificationStore::get_verifications_by_address(&store, &addr_sol, None).unwrap();
         assert_eq!(sol, vec![(20u64, ts_sol)]);
+    }
+
+    #[test]
+    fn test_get_verifications_by_address_overlays_same_transaction_puts_and_deletes() {
+        let (store, _db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+        let add1 = messages_factory::verifications::create_verification_add(
+            101,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let remove1 = messages_factory::verifications::create_verification_remove(
+            101,
+            address.clone(),
+            Some(2),
+            None,
+        );
+        let add2 = messages_factory::verifications::create_verification_add(
+            202,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(3),
+            None,
+        );
+        let mut txn = RocksDbTransactionBatch::new();
+        store.merge(&add1, &mut txn, &default_merge_ctx()).unwrap();
+        store
+            .merge(&remove1, &mut txn, &default_merge_ctx())
+            .unwrap();
+        store.merge(&add2, &mut txn, &default_merge_ctx()).unwrap();
+
+        assert!(
+            VerificationStore::get_verifications_by_address(&store, &address, None)
+                .unwrap()
+                .is_empty()
+        );
+        let entries =
+            VerificationStore::get_verifications_by_address(&store, &address, Some(&txn)).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 202);
+        assert_eq!(
+            entries[0].1,
+            make_ts_hash(add2.data.as_ref().unwrap().timestamp, &add2.hash).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_select_verification_address_winner_uses_ts_hash_then_lower_fid() {
+        let lower = [1u8; TS_HASH_LENGTH];
+        let higher = [2u8; TS_HASH_LENGTH];
+        assert_eq!(
+            select_verification_address_winner(vec![(1, lower), (999, higher)]),
+            Some(999)
+        );
+        assert_eq!(
+            select_verification_address_winner(vec![(999, higher), (1, higher)]),
+            Some(1)
+        );
     }
 
     // getVerificationAddsByFid tests

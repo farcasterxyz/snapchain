@@ -28,13 +28,13 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -81,7 +81,7 @@ jobs:
         id: build
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.distroless
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=farcasterxyz/snapchain,push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ steps.cache.outputs.from }}
@@ -99,11 +99,11 @@ jobs:
 
   create-manifest:
     timeout-minutes: 10
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: build
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 

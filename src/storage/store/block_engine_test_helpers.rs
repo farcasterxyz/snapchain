@@ -1,16 +1,18 @@
 use crate::core::types::Height;
-use crate::core::util::FarcasterTime;
+use crate::core::util::{expected_transactions_root, FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, Block, BlockEvent, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness,
     StorageUnitType,
 };
 use crate::storage::db::RocksDB;
+use crate::storage::store::account::StoreOptions;
 use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::utils::factory::events_factory;
+use crate::version::version::EngineVersion;
 use ed25519_dalek::{SecretKey, SigningKey};
 use hex::FromHex;
 use prost::Message;
@@ -31,6 +33,8 @@ pub fn default_signer() -> SigningKey {
 pub struct BlockEngineOptions {
     pub network: FarcasterNetwork,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    // Test-only channel slot cap override; see `StoreOptions::channel_slot_cap_override`.
+    pub channel_slot_cap_override: Option<u32>,
 }
 
 impl Default for BlockEngineOptions {
@@ -38,6 +42,7 @@ impl Default for BlockEngineOptions {
         BlockEngineOptions {
             network: FarcasterNetwork::Devnet,
             messages_request_tx: None,
+            channel_slot_cap_override: None,
         }
     }
 }
@@ -51,13 +56,17 @@ pub fn setup_with_options(engine_options: BlockEngineOptions) -> (BlockEngine, T
     let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
 
-    let block_engine = BlockEngine::new(
+    let block_engine = BlockEngine::new_with_opts(
         trie,
         statsd_client,
         db,
         100,
         engine_options.messages_request_tx,
         engine_options.network,
+        StoreOptions {
+            channel_slot_cap_override: engine_options.channel_slot_cap_override,
+            ..Default::default()
+        },
     );
 
     (block_engine, temp_dir)
@@ -85,6 +94,7 @@ pub fn default_block() -> Block {
             chain_id: 0,
             version: 0,
             shard_witnesses_hash: vec![],
+            transactions_root: vec![],
         }),
         shard_witness: Some(ShardWitness {
             shard_chunk_witnesses: vec![],
@@ -106,6 +116,10 @@ pub fn state_change_to_block(block_number: u64, change: &BlockStateChange) -> Bl
         block_number,
     });
     block.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
+    block.header.as_mut().unwrap().transactions_root = expected_transactions_root(
+        &change.transactions,
+        EngineVersion::version_for(&change.timestamp, FarcasterNetwork::Devnet),
+    );
     block.transactions = change.transactions.clone();
     block.events = change.events.clone();
     block

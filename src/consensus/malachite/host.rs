@@ -1,11 +1,13 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
 use crate::consensus::validator::{ProposalSource, ShardValidator};
-use crate::core::types::{CommitsExt, FullProposalExt, SnapchainValidatorContext};
+use crate::core::types::{CommitsExt, SnapchainValidatorContext, WellFormedProposal};
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
+use informalsystems_malachitebft_core_consensus::ProposedValue;
+use informalsystems_malachitebft_core_types::{Round, Validity};
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
@@ -109,7 +111,8 @@ impl Host {
                 bytes.extend_from_slice(&height.as_u64().to_be_bytes());
                 bytes.extend_from_slice(&round.as_i64().to_be_bytes());
                 let stream_id = StreamId::new(bytes.into());
-                let stream_message = StreamMessage::new(stream_id, 0, StreamContent::Data(value));
+                let stream_message =
+                    StreamMessage::new(stream_id, 0, StreamContent::Data(value.into_proposal()));
                 state
                     .network
                     .cast(NetworkMsg::PublishProposalPart(stream_message))?;
@@ -150,16 +153,19 @@ impl Host {
                     Some(full_proposal) => {
                         if full_proposal.height() != height
                             || full_proposal.round() != round
-                            || full_proposal.proposer != address.to_vec()
+                            || *full_proposal.proposer_address() != address
                         {
-                            info!(request_height = height.as_u64(), proposal_height = full_proposal.height().as_u64(), request_round = round.as_i64(), proposal_round = full_proposal.round().as_i64(), request_address= hex::encode(address.to_vec()), proposal_address = hex::encode(&full_proposal.proposer), "Proposal published in RestreamValue does not match height/round/proposer in the request")
+                            info!(request_height = height.as_u64(), proposal_height = full_proposal.height().as_u64(), request_round = round.as_i64(), proposal_round = full_proposal.round().as_i64(), request_address= hex::encode(address.to_vec()), proposal_address = full_proposal.proposer_address().to_hex(), "Proposal published in RestreamValue does not match height/round/proposer in the request")
                         }
                         let mut bytes = Vec::new();
                         bytes.extend_from_slice(&height.as_u64().to_be_bytes());
                         bytes.extend_from_slice(&round.as_i64().to_be_bytes());
                         let stream_id = StreamId::new(bytes.into());
-                        let stream_message =
-                            StreamMessage::new(stream_id, 0, StreamContent::Data(full_proposal));
+                        let stream_message = StreamMessage::new(
+                            stream_id,
+                            0,
+                            StreamContent::Data(full_proposal.into_proposal()),
+                        );
                         state
                             .network
                             .cast(NetworkMsg::PublishProposalPart(stream_message))?;
@@ -177,12 +183,27 @@ impl Host {
                 reply_to,
             } => {
                 let now = tokio::time::Instant::now();
-                let data = part.content.as_data();
-                match data {
-                    Some(proposal) => {
+                let proposal = part
+                    .content
+                    .as_data()
+                    .ok_or_else(|| "not a data part".to_string())
+                    .and_then(|proposal| WellFormedProposal::try_from(proposal.clone()));
+                match proposal {
+                    Ok(proposal) if !state.shard_validator.is_expected_proposer(&proposal) => {
+                        // No reply, so consensus never sees this proposal: it keeps the first
+                        // validity recorded for a value id.
+                        warn!(
+                            %from,
+                            height = %proposal.height(),
+                            round = proposal.round().as_i64(),
+                            proposer = proposal.proposer_address().to_hex(),
+                            "Dropping full proposal from a validator that is not the proposer for its round"
+                        );
+                    }
+                    Ok(proposal) => {
                         let proposed_value = state
                             .shard_validator
-                            .add_proposed_value(proposal, ProposalSource::Consensus);
+                            .add_proposed_value(&proposal, ProposalSource::Consensus);
                         let height = proposed_value.height;
                         let round = proposed_value.round.as_i64();
                         let valid_round = proposed_value.valid_round.as_i64();
@@ -201,8 +222,8 @@ impl Host {
                             elapsed.as_millis()
                         );
                     }
-                    None => {
-                        error!("Received invalid proposal part from {from}");
+                    Err(err) => {
+                        error!("Received invalid proposal part from {from}: {err}");
                     }
                 }
             }
@@ -255,16 +276,17 @@ impl Host {
                 //commit
                 state.shard_validator.decide(commits.clone()).await;
 
-                let decided_value = if let Some(block) = proposed_value.block(commits.clone()) {
+                let proposal = proposed_value.proposal();
+                let decided_value = if let Some(block) = proposal.block(commits.clone()) {
                     Some(decided_value::Value::Block(block))
-                } else if let Some(shard_chunk) = proposed_value.shard_chunk(commits.clone()) {
+                } else if let Some(shard_chunk) = proposal.shard_chunk(commits.clone()) {
                     Some(decided_value::Value::Shard(shard_chunk))
                 } else {
                     None
                 };
 
                 // Only publish decided values if you're the proposer to reduce network traffic
-                if proposed_value.proposer_address() == state.shard_validator.get_address() {
+                if *proposed_value.proposer_address() == state.shard_validator.get_address() {
                     state
                         .gossip_tx
                         .send(GossipEvent::BroadcastDecidedValue(proto::DecidedValue {
@@ -352,26 +374,46 @@ impl Host {
                 state
                     .statsd
                     .count_with_shard(height.shard_index, "sync.process_value", 1, vec![]);
-                let proposal = if height.shard_index == 0 {
-                    let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
-                    FullProposal {
-                        height: Some(height),
-                        round: round.as_i64(),
-                        proposer: validator_address.to_vec(),
-                        proposed_value: Some(full_proposal::ProposedValue::Block(decoded_block)),
-                    }
+                // The bytes and certificate come from a sync peer, so they may be malformed.
+                let decoded_value = if height.shard_index == 0 {
+                    Block::decode(value_bytes.as_ref()).map(full_proposal::ProposedValue::Block)
                 } else {
-                    let chunk = ShardChunk::decode(value_bytes.as_ref()).unwrap();
-                    FullProposal {
+                    ShardChunk::decode(value_bytes.as_ref())
+                        .map(full_proposal::ProposedValue::Shard)
+                };
+                let proposal = decoded_value
+                    .map_err(|err| err.to_string())
+                    .map(|proposed_value| FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
                         proposer: validator_address.to_vec(),
-                        proposed_value: Some(full_proposal::ProposedValue::Shard(chunk)),
+                        proposed_value: Some(proposed_value),
+                    })
+                    .and_then(WellFormedProposal::try_from);
+                let proposed_value = match proposal {
+                    Ok(proposal) => state
+                        .shard_validator
+                        .add_proposed_value(&proposal, ProposalSource::Sync),
+                    Err(err) => {
+                        warn!(
+                            height = height.to_string(),
+                            shard = height.shard_index,
+                            "Rejecting malformed synced value: {}",
+                            err
+                        );
+                        ProposedValue {
+                            height,
+                            round,
+                            valid_round: Round::Nil,
+                            proposer: validator_address,
+                            value: proto::ShardHash {
+                                shard_index: height.shard_index,
+                                hash: vec![],
+                            },
+                            validity: Validity::Invalid,
+                        }
                     }
                 };
-                let proposed_value = state
-                    .shard_validator
-                    .add_proposed_value(&proposal, ProposalSource::Sync);
                 info!(
                     height = height.to_string(),
                     shard = height.shard_index,

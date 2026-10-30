@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use super::validator::StoredValidatorSets;
 use crate::consensus::consensus::SystemMessage;
 use crate::core::types::{CommitsExt, SnapchainValidatorContext};
-use crate::core::util::{verify_signatures, FarcasterTime};
+use crate::core::util::{
+    block_events_match_hash, block_hash, shard_chunk_hash, shard_witness_hash, verify_signatures,
+    FarcasterTime,
+};
 use crate::proto::{self, DecidedValue, FarcasterNetwork, Height};
 use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::engine::ShardEngine;
@@ -46,36 +49,50 @@ impl ReadValidator {
         }
     }
 
-    async fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
-        match &mut self.engine {
-            Engine::ShardEngine(shard_engine) => match &value.value {
-                Some(proto::decided_value::Value::Shard(shard_chunk)) => {
-                    shard_engine.commit_shard_chunk(&shard_chunk).await;
-                    info!(
-                        %height,
-                        hash = hex::encode(&shard_chunk.hash),
-                        "Processed decided shard chunk"
-                    );
+    /// Replays and commits `value`. Returns false, leaving state untouched, if its transactions
+    /// do not reproduce the state root in its header.
+    async fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) -> bool {
+        match (&mut self.engine, &value.value) {
+            (
+                Engine::ShardEngine(shard_engine),
+                Some(proto::decided_value::Value::Shard(shard_chunk)),
+            ) => {
+                // The certificate signs only the header hash, so the transactions are bound to it
+                // solely through the state root. Check that without panicking before committing,
+                // since `commit_shard_chunk` treats a mismatch as fatal. This caches the replay, so
+                // the commit does not replay again.
+                if !shard_engine.validate_shard_chunk(shard_chunk) {
+                    error!(%height, hash = hex::encode(&shard_chunk.hash), "Dropping decided shard chunk whose transactions do not match its header");
+                    return false;
                 }
-                _ => {
-                    panic!("Invalid decided value")
+                shard_engine.commit_shard_chunk(&shard_chunk).await;
+                info!(
+                    %height,
+                    hash = hex::encode(&shard_chunk.hash),
+                    "Processed decided shard chunk"
+                );
+            }
+            (
+                Engine::BlockEngine(block_engine),
+                Some(proto::decided_value::Value::Block(block)),
+            ) => {
+                if !block_engine.validate_block(block) {
+                    error!(%height, hash = hex::encode(&block.hash), "Dropping decided block whose transactions do not match its header");
+                    return false;
                 }
-            },
-            Engine::BlockEngine(block_engine) => match &value.value {
-                Some(proto::decided_value::Value::Block(block)) => {
-                    block_engine.commit_block(&block);
-                    info!(
-                        %height,
-                        hash = hex::encode(&block.hash),
-                        "Processed decided block"
-                    );
-                }
-                _ => {
-                    panic!("Invalid decided value")
-                }
-            },
+                block_engine.commit_block(&block);
+                info!(
+                    %height,
+                    hash = hex::encode(&block.hash),
+                    "Processed decided block"
+                );
+            }
+            _ => {
+                panic!("Invalid decided value")
+            }
         };
         self.last_height = height;
+        true
     }
 
     async fn process_buffered_blocks(&mut self) -> u64 {
@@ -83,7 +100,9 @@ impl ReadValidator {
         // This works only because [buffered_blocks] is ordered by height. It's important to maintain this property
         while let Some((height, value)) = self.buffered_blocks.pop_first() {
             if height == self.last_height.increment() {
-                self.commit_decided_value(&value, height).await;
+                if !self.commit_decided_value(&value, height).await {
+                    break;
+                }
                 num_blocks_processed += 1;
             } else if height > self.last_height.increment() {
                 self.buffered_blocks.insert(height, value);
@@ -94,35 +113,102 @@ impl ReadValidator {
         num_blocks_processed
     }
 
-    fn get_decided_value_height(value: &proto::DecidedValue) -> Height {
-        match value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => {
-                shard_chunk.header.as_ref().unwrap().height.unwrap()
-            }
-
-            proto::decided_value::Value::Block(block) => {
-                block.header.as_ref().unwrap().height.unwrap()
-            }
+    /// Returns the height in a decided value's header, or `None` if the value, header or height
+    /// is missing.
+    pub fn decided_value_height(value: &proto::DecidedValue) -> Option<Height> {
+        match value.value.as_ref()? {
+            proto::decided_value::Value::Shard(shard_chunk) => shard_chunk.header.as_ref()?.height,
+            proto::decided_value::Value::Block(block) => block.header.as_ref()?.height,
         }
     }
 
-    fn verify_signatures(&self, value: &proto::DecidedValue) -> bool {
-        let commits = match value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => {
-                shard_chunk.commits.as_ref().unwrap()
-            }
+    fn matches_engine(&self, value: &proto::DecidedValue) -> bool {
+        matches!(
+            (&self.engine, &value.value),
+            (
+                Engine::ShardEngine(_),
+                Some(proto::decided_value::Value::Shard(_))
+            ) | (
+                Engine::BlockEngine(_),
+                Some(proto::decided_value::Value::Block(_))
+            )
+        )
+    }
 
-            proto::decided_value::Value::Block(block) => block.commits.as_ref().unwrap(),
+    /// Checks that the value carries a valid commit certificate for exactly this value. The
+    /// certificate signs `(height, hash)`, so the hash must be the header's hash and the
+    /// certificate's height and value must match the header; otherwise a peer could attach a
+    /// genuine certificate to a forged header.
+    fn verify_certificate(&self, value: &proto::DecidedValue) -> bool {
+        let (height, hash, expected_hash, body_matches_header, commits) = match value.value.as_ref()
+        {
+            Some(proto::decided_value::Value::Shard(shard_chunk)) => {
+                let Some(header) = shard_chunk.header.as_ref() else {
+                    return false;
+                };
+                (
+                    header.height,
+                    &shard_chunk.hash,
+                    shard_chunk_hash(header),
+                    true,
+                    shard_chunk.commits.as_ref(),
+                )
+            }
+            Some(proto::decided_value::Value::Block(block)) => {
+                let Some(header) = block.header.as_ref() else {
+                    return false;
+                };
+                // Witnesses and events are stored and served but not replayed, so bind them
+                // to the header too. Blocks from before witnesses were introduced have no hash.
+                let witness_matches = header.shard_witnesses_hash.is_empty()
+                    || block.shard_witness.as_ref().is_some_and(|witness| {
+                        shard_witness_hash(witness) == header.shard_witnesses_hash
+                    });
+                let events_match = block_events_match_hash(&block.events, &header.events_hash);
+                (
+                    header.height,
+                    &block.hash,
+                    block_hash(header),
+                    witness_matches && events_match,
+                    block.commits.as_ref(),
+                )
+            }
+            None => return false,
+        };
+        let (Some(height), Some(commits)) = (height, commits) else {
+            return false;
         };
 
-        verify_signatures(&commits, &self.validator_sets)
+        if *hash != expected_hash {
+            error!(%height, "Decided value hash does not match its header");
+            return false;
+        }
+        if !body_matches_header {
+            error!(%height, "Decided block witness or events do not match its header");
+            return false;
+        }
+        let expected_value = proto::ShardHash {
+            shard_index: height.shard_index,
+            hash: hash.clone(),
+        };
+        if commits.height != Some(height) || commits.value.as_ref() != Some(&expected_value) {
+            error!(%height, "Commit certificate is for a different height or value");
+            return false;
+        }
+
+        verify_signatures(commits, &self.validator_sets)
     }
 
     pub fn validate_protocol_version(&self, value: &DecidedValue) -> bool {
         match &value.value {
             Some(proto::decided_value::Value::Block(block)) => {
-                let header = block.header.as_ref().unwrap();
-                let network = FarcasterNetwork::try_from(header.chain_id).unwrap();
+                let Some(header) = block.header.as_ref() else {
+                    return false;
+                };
+                let Ok(network) = FarcasterNetwork::try_from(header.chain_id) else {
+                    error!(%self.last_height, chain_id = header.chain_id, "Invalid chain id in decided block");
+                    return false;
+                };
                 let timestamp = FarcasterTime::new(header.timestamp);
                 let expected_version =
                     EngineVersion::version_for(&timestamp, network).protocol_version();
@@ -130,7 +216,7 @@ impl ReadValidator {
                 if header.version != expected_version {
                     let error_message = format!(
                         "Invalid protocol version in decided block at height {}: expected {}, got {}. Does your node need an upgrade?",
-                        header.height.unwrap().block_number,
+                        header.height.unwrap_or_default().block_number,
                         expected_version, header.version
                     );
                     error!(%self.last_height, error_message);
@@ -150,10 +236,16 @@ impl ReadValidator {
     }
 
     pub async fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
-        let height = Self::get_decided_value_height(&value);
-        let verified = self.verify_signatures(&value);
-        if !verified {
-            error!(%height, last_height = %self.last_height, "Dropping decided block because its signatures are invalid");
+        let Some(height) = Self::decided_value_height(&value) else {
+            warn!(last_height = %self.last_height, "Dropping decided value with missing header or height");
+            return 0;
+        };
+        if height.shard_index != self.shard_id || !self.matches_engine(&value) {
+            warn!(%height, last_height = %self.last_height, "Dropping decided value for a different shard");
+            return 0;
+        }
+        if !self.verify_certificate(&value) {
+            error!(%height, last_height = %self.last_height, "Dropping decided block because its commit certificate is invalid");
             return 0;
         }
 
@@ -172,9 +264,12 @@ impl ReadValidator {
                 0
             }
         } else if height == self.last_height.increment() {
-            self.commit_decided_value(&value, height).await;
-            let num_buffered_blocks_processed = self.process_buffered_blocks().await;
-            num_buffered_blocks_processed + 1
+            if self.commit_decided_value(&value, height).await {
+                let num_buffered_blocks_processed = self.process_buffered_blocks().await;
+                num_buffered_blocks_processed + 1
+            } else {
+                0
+            }
         } else {
             debug!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
             0

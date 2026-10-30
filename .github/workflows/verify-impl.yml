@@ -25,7 +25,7 @@ jobs:
         with:
           tool: protoc
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: informalsystems/malachite
           ref: ${{ env.MALACHITE_GIT_REF }}
@@ -48,11 +48,11 @@ jobs:
         with:
           components: rustfmt, llvm-tools-preview
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: ./snapchain
           fetch-depth: 0
@@ -82,7 +82,7 @@ jobs:
 
       - name: Set up Python
         if: github.event_name == 'pull_request'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -99,8 +99,11 @@ jobs:
             --markdown-report=diff-coverage.md \
             --fail-under=0
 
+      # Fork PRs get a read-only GITHUB_TOKEN and can't comment. The comment is
+      # informational, so a failure here must not skip the checks below.
       - name: Post diff coverage comment
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage

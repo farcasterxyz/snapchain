@@ -1,7 +1,7 @@
 # Mainnet Validators
 
 Snapchain uses a set of trusted validators to reach consensus on the state of the network.
-The full, authoritative list of validator sets is maintained in [`validators.toml`](https://github.com/farcasterxyz/snapchain/blob/main/validators.toml) at the root of the repository.
+The full validator set history is kept in [`validators.toml`](https://github.com/farcasterxyz/snapchain/blob/main/validators.toml) at the root of the repository, and is mirrored in the onchain config registry described [below](#onchain-config-registry).
 
 ## What are validator sets?
 
@@ -10,7 +10,7 @@ Each `validator_set` entry in `validators.toml` specifies:
 - **`shard_ids`** – the shard(s) governed by this set (`0` = block shard, `1`/`2` = message shards).
 - **`validator_public_keys`** – hex-encoded Ed25519 public keys of the validators in the set.
 
-When a validator is added or removed, a new entry is appended with the appropriate `effective_at` height so the complete history is preserved.
+When a validator is added or removed, a new entry is appended with the appropriate `effective_at` height so the complete history is preserved. Each shard reaches that height at a different time, so a change is usually rolled out with one entry per shard.
 
 ## Current validators
 
@@ -22,5 +22,28 @@ When a validator is added or removed, a new entry is appended with the appropria
 | `db65769b...58081`  | Neynar |
 | `67474a42...7102`   | Neynar |
 | `80d7800b...6860`   | Uno |
+| `3376e30a...318b5e` | Degen |
+
+All seven validators carry equal weight. A block commits once more than two thirds of them have signed it, which is five of seven, so the network keeps producing blocks with up to two validators offline.
 
 For the full list of validator set history with exact public keys and effective heights, see [`validators.toml`](https://github.com/farcasterxyz/snapchain/blob/main/validators.toml).
+
+## Onchain config registry
+
+Validators do not read `validators.toml` directly. At every boot they pull their validator sets, bootstrap peers and direct peers from the `SnapchainConfigRegistry` contract on Ethereum mainnet at [`0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85`](https://etherscan.io/address/0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85), and restart one at a time when it changes. Read nodes still take their validator sets from `validators.toml`, so a validator set change has to land in both places.
+
+The `fc` CLI in the Snapchain image reads the registry. Print the current config version:
+
+```bash
+docker run --rm farcasterxyz/snapchain:latest \
+  ./fc config version --rpc-url <ethereum-mainnet-rpc-url>
+```
+
+Or, from inside a running node's container, show the config the registry would produce without writing it:
+
+```bash
+docker compose exec snapchain \
+  ./fc config pull --config config.toml --rpc-url <ethereum-mainnet-rpc-url> --dry-run
+```
+
+See [Validators vs. read nodes](/node-types#configuration) for how the pull and the restart schedule work.

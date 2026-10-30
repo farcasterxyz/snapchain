@@ -4,6 +4,8 @@ use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::SnapchainValidatorContext;
 use snapchain::mempool::block_receiver::BlockReceiver;
+use snapchain::mempool::l1_gate::GossipL1Gate;
+use snapchain::mempool::l1_validator::L1Validator;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -25,6 +27,7 @@ use snapchain::storage::store::stores::Stores;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
@@ -52,7 +55,7 @@ async fn start_servers(
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     block_stores: BlockStores,
-    chain_clients: ChainClients,
+    l1_validator: Arc<L1Validator>,
     replicator: Option<Arc<replication::replicator::Replicator>>,
     local_state_store: LocalStateStore,
 ) {
@@ -101,7 +104,7 @@ async fn start_servers(
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         gossip_tx,
-        chain_clients,
+        l1_validator,
         VERSION.unwrap_or("unknown").to_string(),
         local_peer_id_str,
         fname_lookup,
@@ -245,6 +248,25 @@ fn is_dir_empty(path: &str) -> std::io::Result<bool> {
     Ok(entries.next().is_none())
 }
 
+/// Spawns a task the node cannot run without. If it ever returns or panics, the node exits
+/// with an error so its supervisor restarts it, rather than running on without it.
+fn spawn_critical<F>(name: &'static str, task: F, system_tx: mpsc::Sender<SystemMessage>)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        let reason = match handle.await {
+            Ok(()) => format!("{} task exited", name),
+            Err(err) => format!("{} task failed: {}", name, err),
+        };
+        if let Err(err) = system_tx.send(SystemMessage::ExitWithError(reason)).await {
+            error!("Could not request exit after {} task ended: {}", name, err);
+            process::exit(1);
+        }
+    });
+}
+
 fn create_replicator(
     app_config: &snapchain::cfg::Config,
     shard_stores: HashMap<u32, Stores>,
@@ -283,6 +305,10 @@ fn create_replicator(
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Initialize rustls before any HTTPS or gRPC.
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .expect("Failed to install rustls crypto provider");
+
     let args: Vec<String> = std::env::args().collect();
 
     let app_config = match snapchain::cfg::load_and_merge_config(args) {
@@ -305,23 +331,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if app_config.clear_db {
-        let db_dir = format!("{}", app_config.rocksdb_dir);
-        if std::path::Path::new(&db_dir).exists() {
-            let remove_result = std::fs::remove_dir_all(db_dir.clone());
-            if let Err(e) = remove_result {
-                error!("Failed to clear db at {:?}: {}", db_dir, e);
-            }
-            let create_result = std::fs::create_dir_all(db_dir.clone());
-            if let Err(e) = create_result {
-                error!("Failed to create db dir at {:?}: {}", db_dir, e);
-            }
-            warn!("Cleared db at {:?}", db_dir);
-        } else {
-            warn!("No db to clear at {:?}", db_dir);
-        }
-    }
-
     if app_config.statsd.prefix == "" {
         // TODO: consider removing this check
         return Err("statsd prefix must be specified in config".into());
@@ -340,6 +349,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )),
     }?;
 
+    // Deploy scripts run `snapchain --check-config` between rewriting config.toml
+    // (fc config pull) and restarting the node, so a bad config fails here — before
+    // the running node is stopped — rather than as a crash loop after. Placed after
+    // the log_format and statsd checks so everything main() itself validates
+    // pure-config (no side effects) is covered; --clear-db stays behind the gate,
+    // since a validation run must never touch the database. Note the gate is
+    // otherwise loader-deep only — values that panic later in startup (e.g. a
+    // malformed consensus.private_key) are not exercised here.
+    if app_config.check_config {
+        println!("config OK");
+        return Ok(());
+    }
+
+    if app_config.clear_db {
+        let db_dir = format!("{}", app_config.rocksdb_dir);
+        if std::path::Path::new(&db_dir).exists() {
+            let remove_result = std::fs::remove_dir_all(db_dir.clone());
+            if let Err(e) = remove_result {
+                error!("Failed to clear db at {:?}: {}", db_dir, e);
+            }
+            let create_result = std::fs::create_dir_all(db_dir.clone());
+            if let Err(e) = create_result {
+                error!("Failed to create db dir at {:?}: {}", db_dir, e);
+            }
+            warn!("Cleared db at {:?}", db_dir);
+        } else {
+            warn!("No db to clear at {:?}", db_dir);
+        }
+    }
+
     let host = (statsd_host, statsd_port);
     let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();
     let sink = cadence::UdpMetricSink::from(host, socket)?;
@@ -355,15 +394,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                use rustls::crypto::{self, ring};
                 use snapchain::bootstrap::replication::service::{
                     ReplicatorBootstrap, WorkUnitResponse,
                 };
                 use tokio::time::{sleep, Duration};
-
-                // Initialize SSL for rustls
-                crypto::CryptoProvider::install_default(ring::default_provider())
-                    .expect("Failed to install rustls crypto provider");
 
                 info!("Starting node with replication bootstrap");
                 let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
@@ -476,11 +510,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Driving it in parallel with shard DB init lets QUIC keep-alives and
     // gossipsub control messages flow during the heavy boot window, instead
     // of being deferred until after all RocksDB stores are open.
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
-    });
+    spawn_critical(
+        "Gossip",
+        async move {
+            info!("Starting gossip");
+            gossip.start().await;
+        },
+        system_tx.clone(),
+    );
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -548,7 +585,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.fc_network,
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         // Setup replication if enabled
         let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
@@ -579,6 +620,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None
         };
 
+        let l1_validator = Arc::new(L1Validator::new(
+            chains_clients,
+            node.shard_stores.clone(),
+            Box::new(routing::ShardRouter {}),
+            app_config.consensus.num_shards,
+            app_config.fc_network,
+            app_config.l1_gate.cache_config(),
+        ));
+
         start_servers(
             &app_config,
             local_peer_id_str.clone(),
@@ -591,7 +641,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             node.block_stores.clone(),
-            chains_clients,
+            l1_validator,
             replicator,
             local_state_store.clone(),
         )
@@ -703,7 +753,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_rx,
             statsd_client.clone(),
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
@@ -724,6 +778,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.onchain_events,
                     node_local_state::Chain::Optimism,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
@@ -745,6 +800,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 snapchain::connectors::onchain_events::Subscriber::new(
                     &app_config.base_onchain_events,
                     node_local_state::Chain::Base,
+                    app_config.fc_network,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store.clone(),
@@ -808,6 +864,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        let l1_validator = Arc::new(L1Validator::new(
+            chains_clients,
+            node.shard_stores.clone(),
+            Box::new(routing::ShardRouter {}),
+            app_config.consensus.num_shards,
+            app_config.fc_network,
+            app_config.l1_gate.cache_config(),
+        ));
+        let (gossip_l1_gate, gossip_l1_gate_worker) = GossipL1Gate::new(
+            app_config.l1_gate.clone(),
+            l1_validator.clone(),
+            app_config.fc_network,
+            mempool_tx.clone(),
+            statsd_client.clone(),
+        );
+        tokio::spawn(gossip_l1_gate_worker.run());
+
         start_servers(
             &app_config,
             local_peer_id_str.clone(),
@@ -820,7 +893,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             node.block_stores.clone(),
-            chains_clients,
+            l1_validator,
             replicator,
             local_state_store.clone(),
         )
@@ -890,12 +963,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Forward to appropriate consensus actors
                             node.dispatch(shard, event);
                         },
-                        SystemMessage::Mempool(msg) => {
-                            let res = mempool_tx.try_send(msg);
-                            if let Err(e) = res {
-                                warn!("Failed to add to local mempool: {:?}", e);
-                            }
-                        },
+                        SystemMessage::Mempool(msg) => gossip_l1_gate.admit(msg),
                         SystemMessage::BlockRequest {block_event_seqnum, block_tx } => {
                             let block= node.block_stores.get_block_by_event_seqnum(block_event_seqnum);
                             block_tx.send(block).unwrap();

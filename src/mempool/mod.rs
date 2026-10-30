@@ -1,4 +1,6 @@
 pub mod block_receiver;
+pub mod l1_gate;
+pub mod l1_validator;
 pub mod mempool;
 pub mod routing;
 
@@ -10,3 +12,6 @@ mod rate_limits_tests;
 
 #[cfg(test)]
 mod block_receiver_tests;
+
+#[cfg(test)]
+mod l1_gate_tests;

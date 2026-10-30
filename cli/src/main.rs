@@ -1,9 +1,13 @@
 //! `fc` — command-line client for Farcaster's Snapchain network.
 //!
-//! ALPHA — This binary is a developer sketch, not a stable product. Flags, subcommand names,
-//! output format, and error semantics may change without notice. Don't depend on it from scripts
-//! you care about, and don't point it at mainnet without reading what each subcommand actually
-//! does.
+//! Stability varies by subcommand:
+//!
+//! * `config pull` is **stable**: its flags and behaviour only change with a deprecation
+//!   period. It is intended for production use from deploy scripts.
+//! * Every message-submission subcommand (and `devnet`/`subscribe`) is **ALPHA** — a developer
+//!   sketch, not a stable product. Flags, subcommand names, output format, and error semantics
+//!   may change without notice. Don't depend on them from scripts you care about, and don't
+//!   point them at mainnet without reading what each subcommand actually does.
 //!
 //! Subcommands:
 //!   key-add      submit a gasless KEY_ADD (generate fresh signer or reuse one with --signer-secret)
@@ -12,11 +16,16 @@
 //!   cast-remove  submit a CAST_REMOVE signed by an existing Ed25519 key
 //!   link         submit LINK_ADD / LINK_REMOVE / LINK_COMPACT_STATE (follows, blocks)
 //!   live-at      submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
+//!   verification submit VERIFICATION_ADD_ETH_ADDRESS / VERIFICATION_REMOVE
+//!   config       pull onchain-managed node config from the SnapchainConfigRegistry (stable)
+//!   devnet       devnet-only AdminService helpers (register FIDs)
 //!   subscribe    stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
 //! `factory::create_message_with_data` hard-codes `FarcasterNetwork::Mainnet`, so every message is
 //! re-tagged via `retarget_network` before submission.
 
+mod config_pull;
+mod config_slot;
 mod eip712;
 mod factory;
 mod helpers;
@@ -47,10 +56,12 @@ const LONG_VERSION: &str = concat!(
 #[derive(Parser)]
 #[command(
     name = "fc",
-    about = "Submit Farcaster messages against a snapchain node",
-    long_about = "ALPHA — developer sketch for submitting Farcaster messages against a \
-                  snapchain HTTP/gRPC node. Flags, subcommand names, and output format are \
-                  unstable and may change without notice. Defaults target testnet.",
+    about = "Client for Farcaster's Snapchain network: submit messages, stream events, \
+             manage node config",
+    long_about = "Client for Farcaster's Snapchain network. `config pull` is stable and \
+                  intended for production use (defaults to mainnet). The message-submission \
+                  subcommands are ALPHA developer sketches — flags, names, and output format \
+                  may change without notice — and default to testnet.",
     version = env!("CARGO_PKG_VERSION"),
     long_version = LONG_VERSION,
 )]
@@ -59,9 +70,11 @@ struct Cli {
     #[arg(long, default_value = "https://iris.farcaster.xyz:3381", global = true)]
     node: String,
 
-    /// Network to tag messages with.
-    #[arg(long, value_enum, default_value = "testnet", global = true)]
-    network: NetworkArg,
+    /// Network to operate on. Defaults per subcommand: message submission
+    /// defaults to testnet (the safe direction for a tool that submits);
+    /// `config pull` defaults to mainnet (it only reads a registry).
+    #[arg(long, value_enum, global = true)]
+    network: Option<NetworkArg>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -83,8 +96,129 @@ enum Cmd {
     /// Submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat).
     // TODO: support all user data types
     LiveAt(LiveAtArgs),
+    /// Submit a VERIFICATION_ADD_ETH_ADDRESS / VERIFICATION_REMOVE.
+    #[command(subcommand)]
+    Verification(VerificationCmd),
+    /// Manage node configuration from the onchain SnapchainConfigRegistry.
+    #[command(subcommand)]
+    Config(ConfigCmd),
+    /// Devnet-only helpers that drive the AdminService directly.
+    #[command(subcommand)]
+    Devnet(DevnetCmd),
     /// Stream HubEvents from a snapchain gRPC node and log them to stdout as JSON.
     Subscribe(SubscribeArgs),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Fetch the registry's rendered config and merge it into a local config.toml.
+    ///
+    /// Stable, unlike the message-submission subcommands: flags and behaviour
+    /// only change with a deprecation period. Writes to the local filesystem and
+    /// talks to an Ethereum JSON-RPC endpoint (Ethereum L1 for mainnet, Sepolia
+    /// for testnet) — never to a snapchain node, so --node is ignored.
+    /// --network selects which registry to read and defaults to mainnet here.
+    Pull(config_pull::ConfigPullArgs),
+    /// Print the registry's configVersion() counter (decimal, on stdout).
+    ///
+    /// Stable, like `pull`: the rollout gate polls this to decide whether a
+    /// restart is warranted. Read-only — talks to an Ethereum JSON-RPC
+    /// endpoint, never to a snapchain node, and writes nothing.
+    Version(config_pull::ConfigVersionArgs),
+    /// Print this validator's deterministic restart-stagger slot as
+    /// "<index> <count>".
+    ///
+    /// Stable, like `pull`: the rollout gate uses it to spread validator
+    /// restarts. Purely local — derives the node's public key from
+    /// consensus.private_key in --config and locates it in the file's
+    /// validator_sets. Writes nothing, prints no key material.
+    Slot(config_slot::ConfigSlotArgs),
+}
+
+#[derive(Subcommand)]
+enum VerificationCmd {
+    /// Submit a VERIFICATION_ADD_ETH_ADDRESS proving an Ethereum EOA belongs to a FID.
+    Add(VerificationAddArgs),
+    /// Submit a VERIFICATION_REMOVE, dropping a previously verified address.
+    Remove(VerificationRemoveArgs),
+}
+
+#[derive(clap::Args)]
+struct VerificationAddArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// Hex secp256k1 secret for the address being verified. The claim is signed by this key
+    /// and the node requires the recovered signer to equal the address, so it must be the
+    /// real key for that address. Defaults to deriving from MNEMONIC at --path.
+    #[arg(long, env = "WALLET_SECRET")]
+    wallet_secret: Option<String>,
+
+    /// BIP-44 derivation path, used only when --wallet-secret is absent.
+    #[arg(long, default_value = "m/44'/60'/0'/0/0")]
+    path: String,
+
+    /// 32-byte block hash to embed in the claim, hex. Random if unset. Devnet does not check
+    /// that this corresponds to a real block; on other networks it should.
+    #[arg(long)]
+    block_hash: Option<String>,
+
+    /// Hex Ed25519 secret of the signing key registered to --fid.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+}
+
+#[derive(clap::Args)]
+struct VerificationRemoveArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// Hex 20-byte address to un-verify.
+    #[arg(long)]
+    address: String,
+
+    /// Hex Ed25519 secret of the signing key registered to --fid.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+}
+
+#[derive(Subcommand)]
+enum DevnetCmd {
+    /// Register one or more FIDs on a local devnet by submitting synthetic storage-rent,
+    /// ID-register, and signer on-chain events through the AdminService.
+    ///
+    /// Prints each FID's signer secret so it can be piped into `fc verification add`.
+    Bootstrap(DevnetBootstrapArgs),
+}
+
+#[derive(clap::Args)]
+struct DevnetBootstrapArgs {
+    /// gRPC endpoint serving the AdminService.
+    #[arg(long, default_value = "http://127.0.0.1:3383")]
+    grpc_node: String,
+
+    /// Admin RPC basic-auth credentials as "user:password". The devnet Docker image bakes in
+    /// "dev:dev"; a devnet generated by `setup_local_testnet` uses whatever value that binary
+    /// was given for `--admin-rpc-auth`.
+    #[arg(long)]
+    auth: Option<String>,
+
+    /// First FID to register.
+    #[arg(long)]
+    fid: u64,
+
+    /// How many consecutive FIDs to register, starting at --fid.
+    #[arg(long, default_value_t = 1)]
+    count: u64,
+
+    /// Storage units to rent per FID.
+    #[arg(long, default_value_t = 10)]
+    units: u32,
+
+    /// Reuse one Ed25519 signer across every FID instead of generating one each. Convenient
+    /// when scripting, since the caller then needs to track only a single secret.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -95,6 +229,26 @@ struct CastAddArgs {
     /// Cast text body.
     #[arg(long)]
     text: String,
+
+    /// How clients should read --text. 0 = plain text.
+    #[arg(long, default_value_t = 0)]
+    format_version: u32,
+
+    /// Position of this cast in a chain, from 0. Omit for a cast outside any chain.
+    #[arg(long)]
+    chain_index: Option<u32>,
+
+    /// Number of casts in the chain. 0 = the chain is still growing.
+    #[arg(long, default_value_t = 0, requires = "chain_index")]
+    chain_count: u32,
+
+    /// Hash of the chain's first cast (hex, optional 0x prefix). Required past index 0.
+    #[arg(long, requires = "chain_index")]
+    chain_root: Option<String>,
+
+    /// Author of the chain root. Defaults to --fid; nodes reject any other FID.
+    #[arg(long, requires = "chain_root")]
+    chain_root_fid: Option<u64>,
 
     /// Hex Ed25519 secret of the signing key.
     #[arg(long, env = "SIGNER_SECRET")]
@@ -669,7 +823,28 @@ async fn run_cast_add(
     network: FarcasterNetwork,
 ) -> Result<(), BoxedError> {
     let signer = parse_secret(&args.signer_secret)?;
-    let mut msg = factory::casts::create_cast_add(args.fid, &args.text, None, &signer);
+    let chain = match args.chain_index {
+        Some(index) => Some(proto::ChainCast {
+            root: match &args.chain_root {
+                Some(hash) => Some(proto::CastId {
+                    fid: args.chain_root_fid.unwrap_or(args.fid),
+                    hash: parse_hex(hash)?,
+                }),
+                None => None,
+            },
+            index,
+            count: args.chain_count,
+        }),
+        None => None,
+    };
+    let mut msg = factory::casts::create_cast_add(
+        args.fid,
+        &args.text,
+        args.format_version,
+        chain,
+        None,
+        &signer,
+    );
     retarget_network(&mut msg, network, &signer);
     submit(node, &msg, "CAST_ADD").await
 }
@@ -822,6 +997,166 @@ async fn run_live_at(
     loop_result
 }
 
+async fn run_verification(
+    cmd: VerificationCmd,
+    node: &str,
+    network: FarcasterNetwork,
+) -> Result<(), BoxedError> {
+    match cmd {
+        VerificationCmd::Add(args) => {
+            let signer = parse_secret(&args.signer_secret)?;
+            let wallet = match args.wallet_secret.as_deref() {
+                Some(s) => s
+                    .trim()
+                    .trim_start_matches("0x")
+                    .parse::<PrivateKeySigner>()?,
+                None => derive_custody(&args.path)?,
+            };
+            let block_hash = match args.block_hash.as_deref() {
+                Some(s) => {
+                    let bytes = parse_hex(s)?;
+                    if bytes.len() != 32 {
+                        return Err(
+                            format!("block hash must be 32 bytes, got {}", bytes.len()).into()
+                        );
+                    }
+                    bytes
+                }
+                None => {
+                    let mut buf = [0u8; 32];
+                    OsRng.fill_bytes(&mut buf);
+                    buf.to_vec()
+                }
+            };
+
+            println!("Verifying address: {}", wallet.address());
+            println!("FID:               {}", args.fid);
+
+            // Build the claim against the network the message will actually be submitted
+            // under. `create_message_with_data` stamps Mainnet and `retarget_network` rewrites
+            // it, but the claim signature is bound to the network and is NOT re-signed there,
+            // so passing anything else here yields a message the node rejects.
+            let mut msg = factory::verifications::create_verification_add(
+                args.fid,
+                &wallet,
+                &block_hash,
+                network,
+                None,
+                &signer,
+            )?;
+            retarget_network(&mut msg, network, &signer);
+            submit(node, &msg, "VERIFICATION_ADD_ETH_ADDRESS").await
+        }
+        VerificationCmd::Remove(args) => {
+            let signer = parse_secret(&args.signer_secret)?;
+            let address = parse_hex(&args.address)?;
+            if address.len() != 20 {
+                return Err(format!("address must be 20 bytes, got {}", address.len()).into());
+            }
+            let mut msg = factory::verifications::create_verification_remove(
+                args.fid, &address, None, &signer,
+            );
+            retarget_network(&mut msg, network, &signer);
+            submit(node, &msg, "VERIFICATION_REMOVE").await
+        }
+    }
+}
+
+async fn run_devnet(cmd: DevnetCmd) -> Result<(), BoxedError> {
+    match cmd {
+        DevnetCmd::Bootstrap(args) => run_devnet_bootstrap(args).await,
+    }
+}
+
+async fn run_devnet_bootstrap(args: DevnetBootstrapArgs) -> Result<(), BoxedError> {
+    use base64::Engine as _;
+    use snapchain_proto::admin_service_client::AdminServiceClient;
+
+    // Validate arguments before opening a connection, so a bad invocation fails on its own
+    // terms rather than behind a connection error.
+    if args.count == 0 {
+        return Err("--count must be at least 1".into());
+    }
+    // Inclusive range, so the end is `fid + count - 1`. Computed with `checked_add` because
+    // `fid + count` on a near-`u64::MAX` FID would wrap and produce an empty or absurd loop
+    // rather than an error.
+    let last_fid = args
+        .fid
+        .checked_add(args.count - 1)
+        .ok_or("--fid + --count overflows u64")?;
+    let shared_signer = match args.signer_secret.as_deref() {
+        Some(s) => Some(parse_secret(s)?),
+        None => None,
+    };
+
+    let mut client = AdminServiceClient::connect(args.grpc_node.clone()).await?;
+    let auth_header = args.auth.as_ref().map(|auth| {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(auth);
+        format!("Basic {}", encoded)
+    });
+
+    for fid in args.fid..=last_fid {
+        // A fresh custody address per FID. Nothing in this flow needs to sign as custody —
+        // gasless KEY_ADD would, but the signer is registered by on-chain event here.
+        let mut custody = [0u8; 20];
+        OsRng.fill_bytes(&mut custody);
+
+        let signer = match &shared_signer {
+            Some(key) => key.clone(),
+            None => {
+                let mut secret = [0u8; 32];
+                OsRng.fill_bytes(&mut secret);
+                EdSigningKey::from_bytes(&secret)
+            }
+        };
+
+        // Order matters: rent grants the storage every later message is accounted against,
+        // and ID-register must land before the signer event references the FID.
+        let events = vec![
+            (
+                "STORAGE_RENT",
+                factory::events::create_rent_event(fid, args.units),
+            ),
+            (
+                "ID_REGISTER",
+                factory::events::create_id_register_event(fid, custody.to_vec()),
+            ),
+            (
+                "SIGNER_ADD",
+                factory::events::create_signer_event(fid, &signer),
+            ),
+        ];
+
+        for (label, event) in events {
+            let mut request = tonic::Request::new(event);
+            if let Some(header) = &auth_header {
+                request
+                    .metadata_mut()
+                    .insert("authorization", header.parse()?);
+            }
+            client.submit_on_chain_event(request).await.map_err(|e| {
+                format!("fid {}: {} failed: {}", fid, label, e.message().to_string())
+            })?;
+        }
+
+        println!("fid {} registered", fid);
+        println!("  custody:       0x{}", hex::encode(custody));
+        println!("  signer secret: 0x{}", hex::encode(signer.to_bytes()));
+        println!(
+            "  signer pubkey: 0x{}",
+            hex::encode(signer.verifying_key().to_bytes())
+        );
+    }
+
+    println!();
+    println!(
+        "Registered {} FID(s). On-chain events are applied asynchronously — give the node a \
+         few blocks before submitting messages.",
+        args.count
+    );
+    Ok(())
+}
+
 async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
     // tonic's TLS support uses rustls, which requires a process-wide CryptoProvider.
     // Ignore the result — re-running fc in tests can install twice.
@@ -893,8 +1228,16 @@ async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
+    // Err means a provider is already installed. Panic only if none is set.
+    if rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .is_err()
+        && rustls::crypto::CryptoProvider::get_default().is_none()
+    {
+        panic!("Failed to install rustls crypto provider");
+    }
+
     let cli = Cli::parse();
-    let network = cli.network.as_proto();
+    let network = cli.network.unwrap_or(NetworkArg::Testnet).as_proto();
     match cli.cmd {
         Cmd::KeyAdd(a) => run_key_add(a, &cli.node, network).await,
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
@@ -902,6 +1245,15 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::CastRemove(a) => run_cast_remove(a, &cli.node, network).await,
         Cmd::Link(c) => run_link(c, &cli.node, network).await,
         Cmd::LiveAt(a) => run_live_at(a, &cli.node, network).await,
+        Cmd::Verification(c) => run_verification(c, &cli.node, network).await,
+        Cmd::Config(ConfigCmd::Pull(a)) => {
+            config_pull::run(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
+        Cmd::Config(ConfigCmd::Version(a)) => {
+            config_pull::run_version(a, cli.network.unwrap_or(NetworkArg::Mainnet)).await
+        }
+        Cmd::Config(ConfigCmd::Slot(a)) => config_slot::run(a),
+        Cmd::Devnet(c) => run_devnet(c).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }
 }

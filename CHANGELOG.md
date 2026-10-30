@@ -2,6 +2,112 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-10-28
+
+### 🐛 Bug Fixes
+
+- *(scripts)* Unblind the onchain-config watcher and ship fc in the distroless image (NS-367, NS-1893) (#1088)
+- *(consensus)* Tighten validation of decided values and peer messages (#1089)
+- *(consensus)* Tighten proposal caching, proposer checks and sync peers (NS-1973) (#1091)
+- *(consensus)* Require a checked proposal wherever its height, round or hash is read (NS-675) (#1090)
+
+### 💼 Other
+
+- Slimmer snapchain image without a shell (#1085)
+
+## [0.15.0] - 2026-10-23
+
+### 🚀 Features
+
+- *(cast)* Allow 10k casts and banners for all users, not just Pro (#1054)
+- *(cast)* Add format_version and an optional chain field to casts (FIP: Cast Format and Chained Casts) (#1074)
+- *(cli)* Add chain and format_version flags to fc cast-add (#1082)
+
+### 🐛 Bug Fixes
+
+- *(read-node)* Drop malformed decided values instead of panicking (#1070)
+- *(mempool)* Validate gossiped messages and supervise the mempool task (#1071)
+
+### 🧪 Testing
+
+- *(consensus)* Cover the V21/V22 cutover and gossip trust boundaries end to end (#1078)
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip coverage comment and cache push on fork PRs (#1075)
+- *(version)* Schedule V21 and V22 on testnet for 2026-10-22 12:00 UTC (#1079)
+- *(version)* Schedule V21 and V22 on mainnet for 2026-10-23 12:00 UTC (#1083)
+
+## [0.14.3] - 2026-10-15
+
+### 🐛 Bug Fixes
+
+- *(mempool)* Validate gossiped ENS proofs and contract verifications on validators (#1029)
+
+### 📚 Documentation
+
+- Document snapchain.sh and validator vs. read node differences (#1034)
+
+### ⚙️ Validator Set
+
+- Add registry v18 validator sets to validators.toml (#1038)
+- h/t @christopherwxyz and @marcinlad for running snapchain validators
+
+## [0.14.2] - 2026-08-13
+
+### 🚀 Features
+
+- *(cli)* `fc config pull` — merge onchain-managed config from SnapchainConfigRegistry (#1002)
+- Rollout safety — version-gated restart, stagger, rollback, default-on (#1007)
+- *(scripts)* Env knob for the bootstrap-peers opt-out flag (#1011)
+- *(cli)* Bake the canonical mainnet registry address (#1022)
+
+### 🐛 Bug Fixes
+
+- *(compose)* Thread the accept-local-bootstrap-peers knob through environment (#1012)
+
+### 💼 Other
+
+- Apply-onchain-config.sh plus image and compose wiring (#1005)
+
+## [0.14.1] - 2026-08-06
+
+### 🚀 Features
+
+- Add http-served ui for checking network health (#977)
+- Ingest channel registrations as onchain events (#957)
+- Redesign verification by-address index to support multiple verifiers (#958)
+- Add channel owner resolution and read APIs (#960)
+- Emit channel ownership-change hint events (#964)
+- Add channel message protos (#973)
+- Merge verifications on shard 0 and replay them onto data shards (#974)
+- Admit and merge channel messages on shard 0 (#975)
+- Fan out channel messages to data shards and add channel read APIs (#976)
+- *(channels)* Channel follows via reactions (#993)
+- *(cli)* Add fc verification and devnet bootstrap commands (#996)
+- *(cast)* Allow 4 embeds for all users, not just Pro (#1001)
+
+### 🐛 Bug Fixes
+
+- (reactions): replace flaky live test with a representative fixture set (#981)
+- Sort block engine onchain replay events (V21-gated) (#959)
+- *(devnet)* Enable block_receiver in generated node configs (#990)
+- *(onchain_events)* Watch both channel registry contracts (#992)
+
+### 🚜 Refactor
+
+- *(ens)* Inline ENS glue, drop foundry-common git pin [NEYN-12731] (#984)
+
+### 📚 Documentation
+
+- Use gasless signers in the writing-messages guide (#989)
+
+### 🧪 Testing
+
+- Stop test storage fixtures aging out against the wall clock (#971)
+- Replace flaky live cast & link validation tests with fixtures (#983)
+- Bump wait_for_block timeout in shard-decoupling test (#988)
+
 ## [0.14.0] - 2026-07-16
 
 ### 🚀 Features

@@ -2,8 +2,12 @@ use crate::core::util::FarcasterTime;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
-    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, StorageUnitType,
-    UserDataBody, UserDataType, UserNameType,
+    self, FarcasterNetwork, FrameActionBody, MessageType, StorageUnitType, UserDataBody,
+    UserDataType, UserNameType,
+};
+use crate::storage::store::account::{
+    decode_message_data, drop_unknown_data_fields, CHANNEL_ID_LENGTH,
+    CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
@@ -102,13 +106,13 @@ pub fn validate_message(
     version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let data_bytes;
-    let message_data;
+    let mut message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
         if data_bytes.is_empty() {
             return Err(ValidationError::MissingData);
         }
-        match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
+        match decode_message_data(message.data_bytes.as_ref().unwrap(), Some(version)) {
             Ok(data) => {
                 message_data = data.clone();
             }
@@ -120,15 +124,19 @@ pub fn validate_message(
         if message.data.is_none() {
             return Err(ValidationError::MissingData);
         }
-        data_bytes = message.data.as_ref().unwrap().encode_to_vec();
         message_data = message.data.as_ref().unwrap().clone();
+        // Older nodes skip added fields as unknown, so they size and hash `data` without them.
+        drop_unknown_data_fields(&mut message_data, version);
+        data_bytes = message_data.encode_to_vec();
     }
 
     let max_data_size =
         if version.is_enabled(crate::version::version::ProtocolFeature::MessageLengthCheckFix) {
             if message_data.r#type() == MessageType::LinkCompactState {
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
-            } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
+            } else if message_data.r#type() == MessageType::CastAdd
+                && (is_pro_user || version.is_enabled(ProtocolFeature::UngateProMessageVariants))
+            {
                 MAX_DATA_BYTES_FOR_10K_CAST
             } else if message_data.r#type() == MessageType::UsernameProof
                 && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
@@ -205,7 +213,13 @@ pub fn validate_message(
                 &cast_add_body,
                 message_data.timestamp < EMBEDS_V1_CUTOFF,
                 is_pro_user,
+                version,
             )?;
+            if let Some(chain) = &cast_add_body.chain {
+                if version.is_enabled(ProtocolFeature::ChainedCasts) {
+                    cast::validate_chain(chain, message_data.fid)?;
+                }
+            }
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {
             cast::validate_cast_remove_body(&cast_remove_body)?;
@@ -235,20 +249,105 @@ pub fn validate_message(
         Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
             key::validate_key_remove_body(&key_remove_body)?;
         }
-        // Channel messages have no defined semantics and no engine can merge them, so they fail
-        // stateless validation outright. This is the only type-level rejection on the data-shard
-        // path: `ShardEngine::validate_user_message`'s body dispatch ends in a permissive `_ => {}`.
-        // Replacing this arm with real body validation therefore ADMITS these types to submit and
-        // gossip — do it only together with a `ProtocolFeature::ChannelMessages` gate.
-        Some(proto::message_data::Body::ChannelUpdateBody(_))
-        | Some(proto::message_data::Body::ChannelMemberBody(_))
-        | Some(proto::message_data::Body::ChannelPinBody(_))
-        | Some(proto::message_data::Body::ChannelModerateBody(_)) => {
-            return Err(ValidationError::InvalidMessageType);
+        // Channel bodies become statelessly admissible only with ChannelMessages. BlockEngine
+        // independently retains the consensus-critical width and state-aware authority checks.
+        Some(proto::message_data::Body::ChannelUpdateBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_update_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelMemberBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_member_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelPinBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_pin_body(&body)?;
+        }
+        Some(proto::message_data::Body::ChannelModerateBody(body)) => {
+            if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                return Err(ValidationError::InvalidMessageType);
+            }
+            validate_channel_moderate_body(&body)?;
         }
         None => {}
     }
 
+    Ok(())
+}
+
+fn invalid_channel(reason: &str) -> ValidationError {
+    ValidationError::HubError(crate::core::error::HubError::validation_failure(reason))
+}
+
+fn validate_channel_id(channel_id: &[u8]) -> Result<(), ValidationError> {
+    if channel_id.len() != CHANNEL_ID_LENGTH {
+        return Err(invalid_channel("channel id must be 32 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_channel_update_body(body: &proto::ChannelUpdateBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body
+        .casting_mode
+        .is_some_and(|mode| proto::CastingMode::try_from(mode).is_err())
+    {
+        return Err(invalid_channel("invalid channel casting mode"));
+    }
+    if body
+        .membership_mode
+        .is_some_and(|mode| proto::MembershipMode::try_from(mode).is_err())
+    {
+        return Err(invalid_channel("invalid channel membership mode"));
+    }
+    Ok(())
+}
+
+fn validate_channel_member_body(body: &proto::ChannelMemberBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body.fid == 0 || u32::try_from(body.fid).is_err() {
+        return Err(invalid_channel(
+            "channel member fid must fit in a non-zero u32",
+        ));
+    }
+    let action = proto::ChannelMemberAction::try_from(body.action)
+        .map_err(|_| invalid_channel("invalid channel member action"))?;
+    if action == proto::ChannelMemberAction::None {
+        return Err(invalid_channel("invalid channel member action"));
+    }
+    Ok(())
+}
+
+fn validate_channel_pin_body(body: &proto::ChannelPinBody) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if !body.cast_hash.is_empty() && body.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+        return Err(invalid_channel(
+            "channel pin cast hash must be empty or 20 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_channel_moderate_body(
+    body: &proto::ChannelModerateBody,
+) -> Result<(), ValidationError> {
+    validate_channel_id(&body.channel_id)?;
+    if body.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+        return Err(invalid_channel(
+            "channel moderate cast hash must be 20 bytes",
+        ));
+    }
+    let action = proto::ChannelModerateAction::try_from(body.action)
+        .map_err(|_| invalid_channel("invalid channel moderate action"))?;
+    if action == proto::ChannelModerateAction::None {
+        return Err(invalid_channel("invalid channel moderate action"));
+    }
     Ok(())
 }
 
@@ -588,7 +687,7 @@ pub fn validate_user_data_add_body(
             }
         }
         UserDataType::Banner => {
-            if !is_pro_user {
+            if !is_pro_user && !version.is_enabled(ProtocolFeature::UngateProMessageVariants) {
                 return Err(ValidationError::ProUserFeature);
             }
             if value_bytes.len() > 256 {

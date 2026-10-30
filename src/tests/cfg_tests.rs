@@ -236,6 +236,60 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_check_config_flag() {
+        run_test(vec![], || {
+            let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+
+            // Off unless the flag is passed.
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert!(!config.check_config);
+
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+                "--check-config".to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert!(config.check_config);
+        })
+    }
+
+    #[test]
+    #[serial]
+    fn test_syntax_error_does_not_echo_source_line() {
+        run_test(vec![], || {
+            const FAKE_SECRET: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefFAKE";
+            let (_tmpdir, file_path) = write_config_file(&format!(
+                r#"
+                log_format = "text"
+                [consensus]
+                private_key = "{FAKE_SECRET}" stray
+            "#
+            ));
+
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let err = load_and_merge_config(args).unwrap_err().to_string();
+
+            // The config file carries the consensus private key; a parse
+            // error must report position only, never the source line.
+            assert!(!err.contains(FAKE_SECRET), "leaked source line: {err}");
+            assert!(err.contains("TOML parse error"), "got: {err}");
+            assert!(err.contains("line"), "got: {err}");
+        })
+    }
+
+    #[test]
+    #[serial]
     fn test_missing_config_file() {
         run_test(vec![], || {
             let args = vec![
@@ -259,5 +313,43 @@ mod tests {
                 );
             }
         })
+    }
+
+    /// Contract test for `fc config pull`'s read_node handling
+    /// (`cli/src/config_pull.rs::effective_read_node` mirrors these exact
+    /// semantics): the env overlay wins over the file, and figment parses the
+    /// value strictly — exactly "true"/"false", anything else aborts config
+    /// loading. If a figment upgrade loosens or changes this, fc's mirror
+    /// must follow.
+    #[test]
+    #[serial]
+    fn read_node_env_overlay_is_strict() {
+        let load = |env_val: Option<&str>| {
+            let envs = match env_val {
+                Some(v) => vec![set("SNAPCHAIN_READ_NODE", v)],
+                None => vec![clr("SNAPCHAIN_READ_NODE")],
+            };
+            let mut result = None;
+            run_test(envs, || {
+                let (_tmpdir, file_path) = write_config_file(r#"read_node = true"#);
+                let args = vec![
+                    "test_binary".to_string(),
+                    "--config-path".to_string(),
+                    file_path,
+                ];
+                result = Some(load_and_merge_config(args).map(|c| c.read_node));
+            });
+            result.unwrap()
+        };
+
+        assert_eq!(load(None).unwrap(), true); // file alone decides
+        assert_eq!(load(Some("true")).unwrap(), true);
+        assert_eq!(load(Some("false")).unwrap(), false); // env beats file
+        for bad in ["TRUE", "True", "1", "0", "yes", ""] {
+            assert!(
+                load(Some(bad)).is_err(),
+                "loader unexpectedly accepted SNAPCHAIN_READ_NODE={bad:?}"
+            );
+        }
     }
 }

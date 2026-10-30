@@ -2,10 +2,11 @@ use crate::cfg::{DEFAULT_GOSSIP_PORT, DEFAULT_RPC_PORT};
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
+use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext, WellFormedProposal};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::mesh::diagnostics;
 use crate::network::mesh::metrics::GossipMetrics;
+use crate::network::mesh::view::peer_id_from_validator_key;
 use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
     GossipMessage,
@@ -938,7 +939,7 @@ impl SnapchainGossip {
                             let maybe_sender = self.system_tx.as_ref().cloned();
                             if let Some(system_tx) = maybe_sender {
                                 let data = message.data.clone();
-                                if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, data) {
+                                if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, message.source, data) {
                                     if let Err(e) = system_tx.send(system_message).await {
                                         warn!("Failed to send system block message: {}", e);
                                     }
@@ -1105,7 +1106,13 @@ impl SnapchainGossip {
             "Received contact info from peer"
         );
 
-        let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
+        let Ok(contact_peer_id) = PeerId::from_bytes(&contact_info_body.peer_id) else {
+            warn!(
+                peer_id = peer_id.to_string(),
+                "Received contact info with an invalid peer id"
+            );
+            return;
+        };
 
         self.peers
             .insert(contact_peer_id, contact_info_body.clone());
@@ -1149,9 +1156,11 @@ impl SnapchainGossip {
         }
     }
 
+    /// `peer_id` is the peer that relayed the message and `source` is its signed author.
     pub fn map_gossip_bytes_to_system_message(
         &mut self,
         peer_id: PeerId,
+        source: Option<PeerId>,
         gossip_message: Vec<u8>,
     ) -> Option<SystemMessage> {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
@@ -1174,24 +1183,41 @@ impl SnapchainGossip {
                 }
 
                 Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
+                    let full_proposal = match WellFormedProposal::try_from(full_proposal) {
+                        Ok(full_proposal) => full_proposal,
+                        Err(err) => {
+                            warn!(
+                                peer_id = peer_id.to_string(),
+                                "Dropping malformed full proposal: {}", err
+                            );
+                            return None;
+                        }
+                    };
                     let height = full_proposal.height();
                     debug!(
                         "Received block with height {} from peer: {}",
                         height, peer_id
                     );
-                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
-                    let bytes = Bytes::from(full_proposal.encode_to_vec());
+                    // Gossipsub runs in strict mode, so `source` is the signature-checked author.
+                    // A validator's gossip identity is its consensus key, so this checks that the
+                    // named proposer published this proposal.
+                    let proposer = peer_id_from_validator_key(&full_proposal.proposer_address().0);
+                    let Some(author) = source.filter(|author| proposer == Some(*author)) else {
+                        warn!(
+                            peer_id = peer_id.to_string(),
+                            height = height.to_string(),
+                            "Dropping full proposal not published by its proposer"
+                        );
+                        return None;
+                    };
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&author);
+                    let bytes = Bytes::from(full_proposal.proposal().encode_to_vec());
                     let event = MalachiteNetworkEvent::Message(
                         Channel::ProposalParts,
                         malachite_peer_id,
                         bytes,
                     );
-                    let shard_result = full_proposal.shard_id();
-                    if shard_result.is_err() {
-                        warn!("Failed to get shard id from consensus message");
-                        return None;
-                    }
-                    let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                    let shard = MalachiteEventShard::Shard(height.shard_index);
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {

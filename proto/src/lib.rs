@@ -144,22 +144,6 @@ impl proto::FullProposal {
         }
     }
 
-    pub fn shard_hash(&self) -> proto::ShardHash {
-        match &self.proposed_value {
-            Some(proto::full_proposal::ProposedValue::Block(block)) => proto::ShardHash {
-                shard_index: self.height().shard_index as u32,
-                hash: block.hash.clone(),
-            },
-            Some(proto::full_proposal::ProposedValue::Shard(shard_chunk)) => proto::ShardHash {
-                shard_index: self.height().shard_index as u32,
-                hash: shard_chunk.hash.clone(),
-            },
-            _ => {
-                panic!("Invalid proposal type");
-            }
-        }
-    }
-
     pub fn block(&self, commits: proto::Commits) -> Option<proto::Block> {
         match &self.proposed_value {
             Some(proto::full_proposal::ProposedValue::Block(block)) => {
@@ -180,14 +164,6 @@ impl proto::FullProposal {
             }
             _ => None,
         }
-    }
-
-    pub fn height(&self) -> proto::Height {
-        self.height.clone().unwrap()
-    }
-
-    pub fn round(&self) -> informalsystems_malachitebft_core_types::Round {
-        informalsystems_malachitebft_core_types::Round::new(self.round.try_into().unwrap())
     }
 
     pub fn to_sign_bytes(&self) -> Vec<u8> {

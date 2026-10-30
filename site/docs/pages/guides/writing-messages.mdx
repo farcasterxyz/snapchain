@@ -6,12 +6,14 @@ The example shows you how to:
 
 - Make onchain transactions to create an account
 - Rent a storage unit so you can publish messages
-- Add signer key to sign messages
+- Add a gasless signer key to sign messages
 - Acquire an fname for your account
 - Create, sign and publish messages
 
 This example can be checked out as a fully functional
 repository [here](https://github.com/farcasterxyz/hub-monorepo/tree/main/packages/hub-nodejs/examples/hello-world).
+That repository still registers its signer onchain via the key gateway; the gasless flow described in
+step 3 below replaces that step and needs no ETH.
 
 ### Requirements
 
@@ -24,7 +26,33 @@ See [running a node](/guides/running-a-node) for more information on how to set 
 ### Custody address vs signer
 In order to register an account and send messages, you need 2 pairs of keys: 
 - Custody: This is the ETH account which funds the initial id registration and storage. You need ~$10 USD in this account. You can use any ETH address as long as the $10 required is transferred via OP mainnet. The private key will be used to sign any signer requests and fname registrations. The person registering should always hold this private key.
-- Signer: This is a keypair registered with the key registry that's used to sign messages a user publishes to the Farcaster network. If an app is publishing on behalf of a user, the app will hold the private key for this keypair. 
+- Signer: This is an Ed25519 keypair that's used to sign messages a user publishes to the Farcaster network. If an app is publishing on behalf of a user, the app will hold the private key for this keypair. 
+
+### Gasless signers
+Signers used to be registered by sending a transaction to the onchain key registry. Snapchain also
+accepts **gasless signers**: the key is registered by submitting a `KEY_ADD` message to a node,
+authorized by an EIP-712 signature from the FID's custody address. There is no transaction and no
+gas, so a signer can be added in a second rather than waiting for an OP Mainnet block.
+
+Gasless signers differ from onchain signers in three ways:
+
+- **Scopes.** Every gasless key declares the message types it may sign. A key scoped to `CAST_ADD`
+  cannot publish a `LINK_ADD`. `KEY_ADD` and `KEY_REMOVE` are never admissible scopes — a signer can
+  never mint or revoke another signer. Onchain signers are grandfathered and remain scope-free.
+- **Sliding TTL.** Each key carries a TTL (max 90 days). The window is refreshed every time the key
+  signs a merged message, so an actively used key stays alive and an abandoned one expires on its own.
+- **Nonces.** Each FID has a monotonically increasing nonce counter. Every `KEY_ADD` must carry a
+  nonce strictly greater than the FID's current value, which makes an intercepted authorization
+  unreplayable.
+
+A single FID may hold up to 1000 active gasless keys. Onchain signers are counted separately and are
+capped by the key registry contract instead.
+
+:::note
+Gasless signers are live on mainnet as of engine version V16. Read both key types back through
+`GetSignersByFid` / `GET /v1/signersByFid`, which returns onchain and gasless keys in one list.
+The older `GetOnChainSignersByFid` returns onchain keys only and is deprecated.
+:::
 
 ## 1. Set up constants
 
@@ -32,12 +60,12 @@ In order to register an account and send messages, you need 2 pairs of keys:
 import {
   ID_GATEWAY_ADDRESS,
   idGatewayABI,
-  KEY_GATEWAY_ADDRESS,
-  keyGatewayABI,
   ID_REGISTRY_ADDRESS,
   idRegistryABI,
   FarcasterNetwork,
+  MessageType,
 } from '@farcaster/hub-web';
+import { Metadata } from '@grpc/grpc-js';
 import { zeroAddress } from 'viem';
 import { optimism } from 'viem/chains';
 import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
@@ -58,6 +86,14 @@ const HUB_PASS = ''; // Password for auth, leave blank if not using TLS
 const USE_SSL = false; // set to true if talking to a node that uses SSL (3rd party hosted nodes or nodes that require auth)
 const FC_NETWORK = FarcasterNetwork.MAINNET; // Network of the node
 
+// Call metadata for every hubClient call below. Carries basic auth when the node requires it;
+// stays empty otherwise. Named `rpcMetadata` to keep it distinct from `KeyAddBody.metadata`,
+// which is a different thing entirely (see step 3).
+const rpcMetadata = new Metadata();
+if (HUB_USERNAME && HUB_PASS) {
+  rpcMetadata.set('authorization', `Basic ${Buffer.from(`${HUB_USERNAME}:${HUB_PASS}`).toString('base64')}`);
+}
+
 const CHAIN = optimism;
 
 const IdGateway = {
@@ -70,11 +106,22 @@ const IdContract = {
   address: ID_REGISTRY_ADDRESS,
   chain: CHAIN,
 };
-const KeyContract = {
-  abi: keyGatewayABI,
-  address: KEY_GATEWAY_ADDRESS,
-  chain: CHAIN,
-};
+
+// Message types this signer may sign. KEY_ADD and KEY_REMOVE are never admissible; the full
+// admissible set is exported as ADMISSIBLE_KEY_ADD_SCOPES.
+const SCOPES = [
+  MessageType.CAST_ADD,
+  MessageType.CAST_REMOVE,
+  MessageType.REACTION_ADD,
+  MessageType.REACTION_REMOVE,
+  MessageType.LINK_ADD,
+  MessageType.LINK_REMOVE,
+  MessageType.USER_DATA_ADD,
+  MessageType.VERIFICATION_ADD_ETH_ADDRESS,
+  MessageType.VERIFICATION_REMOVE,
+];
+
+const TTL = 30 * 24 * 60 * 60; // Sliding window, refreshed on every use. Max 90 days.
 ```
 
 ## 2. Register and pay for storage
@@ -140,11 +187,142 @@ const fid = await getOrRegisterFid();
 ```
 
 ## 3. Add a signer 
-Now, we will add a signer to the key registry. Every signer must have a signed metadata field from the fid of the app requesting it.
-In our case, we will use our own fid. Note, this requires you to sign a message with the private key of the address
-holding the fid. If this is not possible, register a separate fid for the app first and use that.
+
+Now we will add a gasless signer. There is no transaction here — the key is registered by
+submitting a `KEY_ADD` message to a node, so this step costs nothing and confirms in about a second.
+
+A `KEY_ADD` carries two EIP-712 signatures:
+
+1. A **`SignedKeyRequest`** from the app requesting the key, ABI-encoded into the `metadata` field.
+   It binds the app's `requestFid` to the key, so an app cannot spoof another app's identity. We use
+   our own fid and custody address here for simplicity; a real app uses its own fid and custody key.
+2. A **`KeyAdd`** signature from the custody address of the fid receiving the key. This is what
+   authorizes the key, and it covers the scopes, the TTL and the nonce, so none of them can be
+   tampered with in flight.
+
+The message envelope itself is signed by the new Ed25519 key — proof that whoever submits the
+`KEY_ADD` actually holds it. This is why `KEY_ADD` is exempt from the usual "signer must already be
+registered" check.
+
+:::warning
+Do not use `getSignedKeyRequestMetadata()` here. It signs the onchain
+`Farcaster SignedKeyRequestValidator` domain (chainId 10, with a `verifyingContract`), which
+snapchain rejects. `makeKeyAddBody` uses `getGaslessSignedKeyRequestMetadata()`, its off-chain
+counterpart. The two are not interchangeable.
+:::
 
 ```typescript
+const getOrRegisterSigner = async (fid: number) => {
+  if (SIGNER_PRIVATE_KEY !== zeroAddress) {
+    // If a private key is provided, we assume the signer is already registered
+    return fromHex(SIGNER_PRIVATE_KEY, "bytes");
+  }
+
+  const privateKey = new Uint8Array(randomBytes(32));
+  const signer = new NobleEd25519Signer(Buffer.from(privateKey));
+  const key = (await signer.getSignerKey())._unsafeUnwrap();
+
+  // Nonces are strictly increasing per fid. Read the current value and add one.
+  const signers = await hubClient.getSignersByFid({ fid, requesterFids: [] }, rpcMetadata);
+  if (signers.isErr()) {
+    throw new Error(`Error reading signers: ${signers.error}`);
+  }
+
+  // Signs the SignedKeyRequest metadata and the custody authorization over the key, its
+  // scopes and its TTL. Pass a separate Eip712Signer as the third argument when the
+  // requesting app's custody key differs from the fid's.
+  const body = await makeKeyAddBody(
+    {
+      fid: BigInt(fid),
+      key,
+      scopes: SCOPES,
+      ttl: TTL,
+      nonce: signers.value.currentUserNonce + 1,
+      deadline: getFarcasterTime()._unsafeUnwrap() + 60 * 60, // Farcaster time, 1 hour from now
+    },
+    new ViemLocalEip712Signer(toAccount(account)),
+  );
+  if (body.isErr()) {
+    throw new Error(`Error building KEY_ADD: ${body.error}`);
+  }
+
+  // The envelope is signed by the new key itself — proof of possession.
+  const message = await makeKeyAdd(body.value, { fid, network: FC_NETWORK }, signer);
+  if (message.isErr()) {
+    throw new Error(`Error creating KEY_ADD: ${message.error}`);
+  }
+
+  const result = await hubClient.submitMessage(message.value, rpcMetadata);
+  if (result.isErr()) {
+    throw new Error(`Error submitting KEY_ADD to node: ${result.error}`);
+  }
+
+  return privateKey;
+};
+
+
+const signerPrivateKey = await getOrRegisterSigner(fid);
+```
+
+`makeKeyAddBody`, `makeKeyAdd`, `NobleEd25519Signer`, `ViemLocalEip712Signer` and
+`getFarcasterTime` come from `@farcaster/hub-nodejs` (or `@farcaster/hub-web`); `fromHex` and
+`toAccount` come from `viem`; `randomBytes` comes from `node:crypto`.
+
+If you need to drive the EIP-712 signatures yourself, `signKeyAdd`,
+`getGaslessSignedKeyRequestMetadata` and the `GASLESS_KEY_*` domain and type constants are
+exported too, and `makeKeyAdd` accepts any `KeyAddBody` you build by hand.
+
+If the node rejects the message, the error is usually one of:
+
+| Error | Cause |
+| --- | --- |
+| `nonce is not greater than stored nonce` | Another `KEY_ADD` or `KEY_REMOVE` landed first. Re-read `currentUserNonce` and retry. |
+| `invalid signature` | The `KeyAdd` signature did not recover the fid's custody address. Check that the custody key matches `idOf(address)`. |
+| `invalid signed key request` | The metadata is malformed, or `requestSigner` is not the custody address of `requestFid`. |
+| `invalid scope` | A scope is not an admissible message type. `KEY_ADD` / `KEY_REMOVE` are always rejected. |
+| `active key cap exceeded` | The fid already holds 1000 active gasless keys. |
+
+### Revoking a gasless signer
+
+A gasless key is revoked with a `KEY_REMOVE` message, in one of two modes:
+
+- **Custody revocation** — `makeKeyRemoveBody(...)`, an EIP-712 `KeyRemove` signature over
+  `(fid, key, nonce, deadline)` from the custody address, on the same domain as `KeyAdd`. It consumes
+  the same per-fid user nonce, so it must also be strictly greater than `currentUserNonce`.
+- **Self-revocation** — `makeKeyRemoveBodySelfRevoke(...)`, which needs no custody signature: the
+  key signs the message envelope itself. This consumes the *app* nonce namespace scoped to the
+  `requestFid` that originally registered the key, so a compromised app can revoke its keys in bulk.
+  Read the current value by passing `requesterFids` to `GetSignersByFid` and reading
+  `requesterFidNonces`.
+
+Either body goes to `makeKeyRemove(body, { fid, network }, signer)`. For self-revocation `signer`
+must be the key being revoked.
+
+You do not have to revoke a key you have simply stopped using — its sliding TTL expires it.
+
+### The old onchain flow
+
+Before gasless signers, a key was registered by calling `add()` on the onchain key gateway. That
+still works — existing onchain signers keep functioning and are never expired or scoped — but it
+costs gas, takes an OP Mainnet block to confirm, and needs a funded wallet. Prefer `KEY_ADD` for
+anything new.
+
+<details>
+<summary>Deprecated: registering a signer onchain (costs gas)</summary>
+
+This is the flow this guide used previously. It requires the `KEY_GATEWAY_ADDRESS` and
+`keyGatewayABI` imports and the `KeyContract` constant, all of which step 1 above drops.
+
+Note that `getSignedKeyRequestMetadata()` here signs the **onchain**
+`Farcaster SignedKeyRequestValidator` domain, which is the correct domain for this flow and the
+wrong one for `KEY_ADD` — see the warning above.
+
+```typescript
+const KeyContract = {
+  abi: keyGatewayABI,
+  address: KEY_GATEWAY_ADDRESS,
+  chain: CHAIN,
+};
 
 const getOrRegisterSigner = async (fid: number) => {
   if (SIGNER_PRIVATE_KEY !== zeroAddress) {
@@ -182,8 +360,10 @@ const getOrRegisterSigner = async (fid: number) => {
 };
 
 
-const signer = await getOrRegisterSigner(fid);
+const signerPrivateKey = await getOrRegisterSigner(fid);
 ```
+
+</details>
 
 ## 4. Register an fname
 
@@ -240,13 +420,17 @@ Note that this only associated the name to our fid, we still need to set it as o
 Finally, we're now ready to submit messages. First, we shall set the fname as our username. And then post a
 cast.
 
+Both message types below are covered by the scopes we granted in step 3. Signing a message type
+outside a gasless key's scopes is rejected — add it to `SCOPES` and resubmit the `KEY_ADD` with a
+higher nonce if you need to widen them.
+
 ```typescript
 const submitMessage = async (resultPromise: HubAsyncResult<Message>) => {
   const result = await resultPromise;
   if (result.isErr()) {
     throw new Error(`Error creating message: ${result.error}`);
   }
-  const messageSubmitResult = await hubClient.submitMessage(result.value, metadata);
+  const messageSubmitResult = await hubClient.submitMessage(result.value, rpcMetadata);
   if (messageSubmitResult.isErr()) {
     throw new Error(`Error submitting message to node: ${messageSubmitResult.error}`);
   }

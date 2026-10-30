@@ -1,0 +1,130 @@
+# Validators vs. read nodes
+
+Every Snapchain node runs the same binary. The `read_node` config flag decides which role it plays:
+
+- A **validator** (`read_node = false`) proposes blocks and votes on them. Only nodes whose keys are in the [validator set](/validators) can do this.
+- A **read node** (`read_node = true`) follows the chain, stores the full state and serves the HTTP and gRPC APIs. Anyone can run one, and it is what [`snapchain.sh`](/guides/managing-a-node) installs.
+
+Most of the differences below come from that split. They matter when you move a node between roles, when you read metrics or logs from both kinds side by side, or when you debug why a message submitted to one node never shows up on another.
+
+## At a glance
+
+| | Validator | Read node |
+| --- | --- | --- |
+| Who can run it | Holders of a key in the validator set | Anyone |
+| Consensus | Proposes and votes on every shard | Never votes; applies decided blocks it syncs from peers |
+| Gossip topics | `consensus`, `mempool`, `contact-info` | `read-node-peers`, `mempool`, `contact-info` |
+| Validator set and peers | Pulled from the onchain config registry at boot, then watched | Static: `validators.toml` and the compose file |
+| Submitted messages | Validated, then included in blocks it proposes | Validated, then relayed to validators over gossip |
+| `mempoolSize` in `/v1/info` | Real count per shard | `4294967295` (not reported) on shards 1 and 2 |
+| Block pruning | Never | Optional (`pruning.block_retention`) |
+| Restarting it | Affects consensus; one at a time | Safe at any time |
+| Typical deployment | Operator-managed | `snapchain.sh` |
+
+## How each role gets blocks
+
+A validator runs [Malachite](https://github.com/informalsystems/malachite) BFT consensus for each shard it is assigned. It receives proposals on the `consensus` gossip topic, re-executes them, votes, and commits a block once votes from more than two thirds of the validator set's weight are in. Shard 0 (the block shard) orders the shard chunks produced by shards 1 and 2.
+
+A read node is not subscribed to the `consensus` topic, so it never sees proposals or votes. It requests decided blocks from peers through Malachite's sync protocol, verifies their commit certificates against the validator set, and applies them. Its logs show this as `Processed decided block` lines rather than `Decided value with round` lines.
+
+Both roles end up with the same state. A read node is always slightly behind the validators, by however long sync takes to fetch each decided block.
+
+## Message submission and the mempool
+
+`submitMessage` (gRPC) and `POST /v1/submitMessage` (HTTP) work on both roles, but the path a message takes differs:
+
+Before either role accepts a message, it routes the message to a shard and validates it against that shard's state. Most messages (casts, reactions, links, user data) go to a message shard chosen from the FID: the first four bytes of the SHA-256 of the FID, modulo the number of message shards, plus one. Messages whose state every shard depends on go to shard 0 instead: signer `KEY_ADD`/`KEY_REMOVE`, storage lends, channel messages, and, once the protocol version that moves them is active, Ethereum address verifications.
+
+- **Submitted to a validator:** the message enters that validator's mempool for its shard. The validator also gossips it on the `mempool` topic, so it can be included when any validator proposes.
+- **Submitted to a read node:** a read node has no mempool of its own. It checks that the message is valid and not already merged, gossips it on the `mempool` topic, and keeps nothing. The message reaches a block only once a validator picks it up from gossip. If that gossip is lost, the message is gone and needs resubmitting.
+
+In both cases a successful response means the message passed validation and was accepted for relay, not that it is in a block. Watch for the `MERGE_MESSAGE` event, or query the message back, to confirm inclusion.
+
+Messages that need an Ethereum L1 check (ENS username proofs, `.eth` usernames and ERC-1271 contract verifications) get one extra step on validators. When such a message arrives over gossip, each validator re-runs the L1 check before adding it to its block-producing mempool. That check is rate-limited per FID, capped in concurrency, and fails closed on RPC errors or timeouts. A message submitted directly to a validator is still proposed by that validator if gossip drops it elsewhere. A message submitted to a read node depends entirely on gossip, so under heavy load it is more likely to be dropped and need resubmitting.
+
+### Mempool
+
+Because read nodes keep no mempool, they have no size to report for the message shards. `/v1/info` shows `mempoolSize: 4294967295` (`u32::MAX`) for shards 1 and 2. Treat it as "not reported", not as an overflow. On validators `mempoolSize` is a real per-shard count; a shard whose mempool keeps growing while its height stays flat is not committing blocks.
+
+## Configuration
+
+### Validator set and peers
+
+**Read nodes** use static configuration. `docker-compose.yml` writes the gossip bootstrap peers inline, and `validators.toml` supplies the validator set history. `snapchain.sh upgrade` refreshes both from the latest release.
+
+**Validators** pull three keys from the `SnapchainConfigRegistry` contract every time they boot:
+
+- `consensus.validator_sets`
+- `gossip.bootstrap_peers`
+- `gossip.direct_peers`
+
+The registry lives on Ethereum mainnet at [`0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85`](https://etherscan.io/address/0x00000000fc51aD6eb74EAE89ba4b01b1776fBA85) for mainnet. The testnet registry is on Sepolia. The compose entrypoint calls `scripts/apply-onchain-config.sh`, which runs `fc config pull`, merges the result into the generated config, and checks it with `snapchain --check-config` before the node starts. Read nodes skip this step entirely.
+
+The pull is designed never to keep a validator from booting. If it fails, the script falls back to the last known-good config cached under `.onchain-config/`, then to the static config. Each fallback is logged as a warning and counted in `.onchain-config/config.<network>.toml.fallback-boots`. A node running on stale config otherwise looks healthy, so alert on that file existing.
+
+After a successful boot, `scripts/onchain-config-watch.sh` polls the registry's `configVersion()` every 300 seconds. When the version moves and the new document differs from what is running, the watcher restarts the node, but only inside a time window assigned to it by its position in the sorted validator key list. That keeps at most one validator restarting at once. It logs `alive; watermark N` once an hour, where `N` is the registry version the node has applied. Every validator should report the same `N`.
+
+Validator settings for the pull:
+
+| Variable | Notes |
+| --- | --- |
+| `ONCHAIN_CONFIG_RPC_URL` | JSON-RPC endpoint for the chain the registry is on. On mainnet, falls back to `l1_rpc_url` from the config file if unset. On testnet it must be a Sepolia endpoint. The endpoint decides which config document the node sees, so use one you trust. |
+| `ONCHAIN_CONFIG_ENABLED` | On by default. `false` disables the pull and the watcher, and the local config wins verbatim. Any value other than empty, `true`, `1`, `false` or `0` refuses to boot. |
+| `ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS` | `true` keeps the local `gossip.bootstrap_peers` instead of the registry's list, for validators that peer over private addresses. Validator sets and direct peers stay registry-managed. |
+| `ONCHAIN_CONFIG_POLL_INTERVAL` | Seconds between watcher polls (default `300`). `0` disables the watcher. |
+
+The watcher applies changes by sending `SIGTERM` to PID 1 and relying on Docker to start the container again. A validator's compose service therefore needs both `init: true` and `restart: always`. Without `restart: always`, the first registry change stops the validator and leaves it down.
+
+### Other validator-only settings
+
+- **`l1_rpc_url`** must point at an Ethereum mainnet endpoint, on testnet as well as mainnet. Validators use it for the ENS and ERC-1271 checks described above.
+- **`admin_rpc_auth`** protects the admin gRPC service and the `/v1/mesh` endpoint. Set it on every validator.
+- **Container health checks** tuned for a read node can restart a validator during an ordinary dip in commit rate, and a validator restart is not free (see below). Disable them or tune them for validator behavior.
+
+## Gossip and peering
+
+Validators keep direct links to each other through `gossip.direct_peers`, which libp2p gossipsub treats as explicit peers: every message is forwarded to them, but they never show up as members of the emergent gossip mesh. Validators also do not publish contact info, so other nodes only know their observed connection address.
+
+Read nodes rely on `bootstrap_peers` and the emergent mesh. When validators stop producing blocks, read nodes log `Failed to publish gossip message: InsufficientPeers ("read-node-peers")` continuously. That is a symptom of the halt, not its cause.
+
+To see a node's view of its peers, query the admin-gated mesh endpoint described in the [repository README](https://github.com/farcasterxyz/snapchain#mesh--topology-endpoint):
+
+```bash
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh?format=ascii"
+```
+
+On a validator, the `consensus-mesh N/M` header counts how many validator peers it has a working consensus link to. Anything short of every other validator is a partition risk.
+
+## Restarts and consensus safety
+
+Restarting a read node only affects the clients it serves. Restarting a validator removes one vote from every shard until it is back.
+
+A block commits when validators holding more than two thirds of the voting weight sign it. With mainnet's seven equally weighted validators, five signatures are needed. A commit certificate usually carries five or six signers, because the certificate closes as soon as quorum is reached and the slowest votes are dropped. That is normal.
+
+What that means in practice:
+
+- **Check before you restart.** If one validator is already down, restarting a second leaves no spare vote. If two are down, a restart stalls the chain until a node comes back.
+- **Restart one validator at a time,** and wait for it to commit again before touching the next. The onchain config watcher follows the same rule.
+- **Brief disconnects can stall a shard.** If a validator drops out partway through a voting round, validators that already locked on a value and ones that did not can fail to reach quorum on any later round. When a shard stays stuck with repeated `Consensus is halted` warnings, find the minority that is voting differently and restart only those nodes.
+
+## Background jobs
+
+| Job | Runs on | Default schedule (UTC) | Notes |
+| --- | --- | --- | --- |
+| Event pruning | All nodes, shards 1 and 2 | 00:00 daily (`pruning.event_pruning_schedule`) | Deletes hub events older than `pruning.event_retention` (default 3 days). |
+| Block pruning | Read nodes only | 10:00 daily | Only when `pruning.block_retention` is set. Off by default. |
+| Snapshot upload | Nodes with snapshot upload configured | 05:00 daily | Disk-heavy. |
+
+Event retention matters for anyone consuming the event stream. A subscriber that resumes from an event ID older than the retention window will not get the events it missed. It needs to backfill from the message APIs instead.
+
+Event pruning is disk-heavy. On validators, give each node its own `event_pruning_schedule` so they do not all prune at the same time.
+
+## Health signals
+
+| Signal | Read node | Validator |
+| --- | --- | --- |
+| `blockDelay` in `/v1/info` | Single digits when synced | Should be `0`–`1` |
+| Logs | `Processed decided block` | `Decided value with round: N`, with `round`, `shard` and `signers` fields |
+| Round number | n/a | `0` is healthy. Persistent `1` or higher means a proposer is missing. |
+| Signers per block | n/a | 5–7 of 7 on mainnet. Investigate a validator only if it is missing from many blocks in a row. |
+| Config watermark | n/a | Same `alive; watermark N` on every validator |

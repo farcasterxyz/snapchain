@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "snapchain"
-version = "0.14.0"
+version = "0.16.0"
 edition = "2021"
 default-run = "snapchain"
 
@@ -50,7 +50,7 @@ prometheus-client = "0.22"
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
-reqwest = { version = "0.12.9", features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "charset", "http2", "system-proxy", "rustls-no-provider"] }
 figment = { version = "0.10.19", features = ["env", "toml"] }
 futures-util = "0.3.31"
 indicatif = "0.17.7"
@@ -85,7 +85,9 @@ gzp = "0.11.3"
 flate2 = "1.0.28"
 fancy-regex = "0.14.0"
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
-aws-sdk-s3 = { version = "1.71.0", features = ["behavior-version-latest"] }
+# Default features include `rustls`, which pulls in the legacy hyper 0.14 / rustls 0.21 connector
+# (and a vulnerable rustls-webpki 0.101). `default-https-client` already uses rustls 0.23.
+aws-sdk-s3 = { version = "1.71.0", default-features = false, features = ["behavior-version-latest", "sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 hyper = "1.5.1"
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"

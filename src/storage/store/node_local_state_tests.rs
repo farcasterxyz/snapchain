@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use crate::proto::{FullProposal, Height};
+    use crate::core::types::WellFormedProposal;
+    use crate::proto::{full_proposal::ProposedValue, FullProposal, Height};
     use crate::storage::db;
     use crate::storage::store::node_local_state::LocalStateStore;
+    use crate::utils::factory::shard_chunk_factory;
     use std::sync::Arc;
 
     fn store() -> LocalStateStore {
@@ -15,35 +17,38 @@ mod tests {
         LocalStateStore::new(Arc::new(db))
     }
 
-    fn make_proposal(shard_index: u32, block_number: u64, round: i64) -> FullProposal {
-        FullProposal {
+    fn make_proposal(shard_index: u32, block_number: u64, round: i64) -> WellFormedProposal {
+        let chunk =
+            shard_chunk_factory::create_shard_chunk(shard_index, Some(block_number), Some(0));
+        WellFormedProposal::try_from(FullProposal {
             height: Some(Height {
                 shard_index,
                 block_number,
             }),
             round,
-            proposer: vec![],
-            proposed_value: None,
-        }
+            proposer: vec![0; 32],
+            proposed_value: Some(ProposedValue::Shard(chunk)),
+        })
+        .unwrap()
     }
 
-    fn assert_proposal_exists(store: &LocalStateStore, proposal: &FullProposal) {
-        let proposal = store
+    fn assert_proposal_exists(store: &LocalStateStore, proposal: &WellFormedProposal) {
+        let stored = store
             .get_proposal(
-                proposal.shard_id().unwrap(),
+                proposal.height().shard_index,
                 proposal.height(),
                 proposal.round(),
             )
             .unwrap()
             .unwrap();
 
-        assert_eq!(proposal, proposal);
+        assert_eq!(&stored, proposal.proposal());
     }
 
-    fn assert_proposal_not_exists(store: &LocalStateStore, proposal: &FullProposal) {
+    fn assert_proposal_not_exists(store: &LocalStateStore, proposal: &WellFormedProposal) {
         let proposal = store
             .get_proposal(
-                proposal.shard_id().unwrap(),
+                proposal.height().shard_index,
                 proposal.height(),
                 proposal.round(),
             )
@@ -60,10 +65,10 @@ mod tests {
         let proposal3 = make_proposal(1, 3, 1);
         let proposal4 = make_proposal(2, 3, 1);
 
-        store.put_proposal(proposal1.clone()).unwrap();
-        store.put_proposal(proposal2.clone()).unwrap();
-        store.put_proposal(proposal3.clone()).unwrap();
-        store.put_proposal(proposal4.clone()).unwrap();
+        store.put_proposal(&proposal1).unwrap();
+        store.put_proposal(&proposal2).unwrap();
+        store.put_proposal(&proposal3).unwrap();
+        store.put_proposal(&proposal4).unwrap();
 
         assert_proposal_exists(&store, &proposal1);
         assert_proposal_exists(&store, &proposal2);
@@ -71,7 +76,7 @@ mod tests {
         assert_proposal_exists(&store, &proposal4);
 
         store
-            .delete_proposals(proposal1.shard_id().unwrap(), proposal1.height())
+            .delete_proposals(proposal1.height().shard_index, proposal1.height())
             .unwrap();
 
         assert_proposal_not_exists(&store, &proposal1);

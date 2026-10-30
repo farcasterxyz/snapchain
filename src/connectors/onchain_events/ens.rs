@@ -18,6 +18,13 @@ sol! {
     contract EnsRegistry {
         /// Returns the resolver for the specified node.
         function resolver(bytes32 node) view returns (address);
+        /// Returns the owner of the specified node.
+        ///
+        /// Used to derive the channel registry's ERC-721 from its controller: the
+        /// deploy hands the root 2LD to the BaseRegistrar, so the owner of the
+        /// controller's `rootNode` IS that registrar. See
+        /// `Subscriber::resolve_channel_registrar_token`.
+        function owner(bytes32 node) view returns (address);
     }
 
     /// ENS Resolver interface.

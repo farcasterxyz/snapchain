@@ -28,6 +28,10 @@ pub enum EngineVersion {
     V18 = 18,
     V19 = 19,
     V20 = 20,
+    V21 = 21,
+    V22 = 22,
+    V23 = 23,
+    V24 = 24,
 }
 
 pub enum ProtocolFeature {
@@ -57,6 +61,16 @@ pub enum ProtocolFeature {
     SortedBlockEngineEvents,
     ChannelOwnershipEvents,
     ChannelMessages,
+    VerificationsOnShardZero,
+    ChannelFollows,
+    IncreaseEmbedLimitForAllUsers,
+    UngateProMessageVariants,
+    ChainedCasts,
+    // An onchain event merge is skipped when the event's trie key is already present, so the
+    // onchain event store only changes when the trie does.
+    UniqueOnchainEventTrieKeys,
+    // Shard and block headers commit to their transactions through `transactions_root`.
+    HeaderTransactionsRoot,
 }
 
 pub struct VersionSchedule {
@@ -145,6 +159,22 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1785160800, // 2026-07-27 2PM UTC (9:00 AM CDT)
         version: EngineVersion::V19,
     },
+    VersionSchedule {
+        active_at: 1786640400, // 2026-08-13 5PM UTC (12:00 PM CDT)
+        version: EngineVersion::V20,
+    },
+    VersionSchedule {
+        active_at: 1792756800, // 2026-10-23 12PM UTC (7:00 AM CDT)
+        version: EngineVersion::V21,
+    },
+    VersionSchedule {
+        active_at: 1792756800, // 2026-10-23 12PM UTC (7:00 AM CDT)
+        version: EngineVersion::V22,
+    },
+    VersionSchedule {
+        active_at: 1793257200, // 2026-10-29 7AM UTC (12:00 PM UTC+5)
+        version: EngineVersion::V23,
+    },
 ]
 .as_slice();
 
@@ -213,23 +243,57 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1784124000, // 2026-07-15 2PM UTC (9:00 AM CDT)
         version: EngineVersion::V19,
     },
+    VersionSchedule {
+        active_at: 1786035600, // 2026-08-06 5PM UTC (12:00 PM CDT)
+        version: EngineVersion::V20,
+    },
+    VersionSchedule {
+        active_at: 1792670400, // 2026-10-22 12PM UTC (7:00 AM CDT)
+        version: EngineVersion::V21,
+    },
+    VersionSchedule {
+        active_at: 1792670400, // 2026-10-22 12PM UTC (7:00 AM CDT)
+        version: EngineVersion::V22,
+    },
+    VersionSchedule {
+        active_at: 1793210400, // 2026-10-28 6PM UTC (11:00 PM UTC+5)
+        version: EngineVersion::V23,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V20,
+    version: EngineVersion::V24,
 }]
 .as_slice();
 
+// Mainnet and testnet never read this, so it cannot move a production boundary.
+static DEVNET_SCHEDULE_OVERRIDE: parking_lot::RwLock<Option<&'static [VersionSchedule]>> =
+    parking_lot::const_rwlock(None);
+
+fn schedule_for(network: FarcasterNetwork) -> &'static [VersionSchedule] {
+    match network {
+        FarcasterNetwork::Mainnet => ENGINE_VERSION_SCHEDULE_MAINNET,
+        FarcasterNetwork::Testnet => ENGINE_VERSION_SCHEDULE_TESTNET,
+        _ => DEVNET_SCHEDULE_OVERRIDE
+            .read()
+            .unwrap_or(ENGINE_VERSION_SCHEDULE_DEVNET),
+    }
+}
+
 impl EngineVersion {
+    /// Replaces the devnet schedule for the whole process, or restores the default with `None`.
+    /// Lets integration tests run a devnet across a version boundary. Entries must be sorted by
+    /// `active_at`, and every node in the process sees the same schedule. Each call leaks its
+    /// schedule, so this is not for use outside tests.
+    pub fn set_devnet_schedule(schedule: Option<Vec<VersionSchedule>>) {
+        *DEVNET_SCHEDULE_OVERRIDE.write() =
+            schedule.map(|schedule| &*Box::leak(schedule.into_boxed_slice()));
+    }
+
     pub fn version_for(time: &FarcasterTime, network: FarcasterNetwork) -> EngineVersion {
-        let schedule = match network {
-            FarcasterNetwork::Mainnet => &ENGINE_VERSION_SCHEDULE_MAINNET,
-            FarcasterNetwork::Testnet => &ENGINE_VERSION_SCHEDULE_TESTNET,
-            _ => &ENGINE_VERSION_SCHEDULE_DEVNET,
-        };
-        let version = schedule
+        let version = schedule_for(network)
             .iter()
             .filter(|schedule| schedule.active_at <= time.to_unix_seconds())
             .last();
@@ -244,6 +308,26 @@ impl EngineVersion {
 
     pub fn current(network: FarcasterNetwork) -> Self {
         Self::version_for(&FarcasterTime::current(), network)
+    }
+
+    /// Whether a replication snapshot taken at `snapshot_timestamp` (Farcaster
+    /// seconds) may carry channel rows.
+    ///
+    /// Both sides of replication have to answer this identically or a snapshot
+    /// straddling the boundary is served under one rule and replayed under
+    /// another: the server gates which rows it emits (`replicator.rs`, from
+    /// `ReplicationStores::get_timestamp`) and the bootstrap client gates whether
+    /// it will merge them (`bootstrap/replication/service.rs`, from
+    /// `ShardSnapshotMetadata.timestamp`). Those two timestamps share an origin —
+    /// the replicator's own snapshot metadata is what populates the wire field —
+    /// so keeping the derivation in one function is what makes the pair safe.
+    /// Do not re-inline it at either call site.
+    pub fn channel_messages_enabled_for_snapshot(
+        snapshot_timestamp: u64,
+        network: FarcasterNetwork,
+    ) -> bool {
+        Self::version_for(&FarcasterTime::new(snapshot_timestamp), network)
+            .is_enabled(ProtocolFeature::ChannelMessages)
     }
 
     pub fn is_enabled(&self, feature: ProtocolFeature) -> bool {
@@ -274,6 +358,30 @@ impl EngineVersion {
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
             ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
+            // Raises the cast embed cap to 4 for every fid, not just Pro subscribers. A pure
+            // loosening: nothing that validated before this boundary stops validating after it,
+            // so replay of pre-V20 history is untouched. It is still versioned because the
+            // rolling-upgrade window is not symmetric — an upgraded proposer would include a
+            // 4-embed non-Pro cast that an un-upgraded validator rejects.
+            //
+            // This sits BELOW the channel block on purpose. V20 was originally the channel
+            // rollout; that work is blocked on the mainnet registrar deployment (see SEQUENCING
+            // below), and because every gate here is `self >= VN`, scheduling anything above the
+            // channel version would drag the channel features live with it. Taking the lower slot
+            // is what lets this ship on its own.
+            ProtocolFeature::IncreaseEmbedLimitForAllUsers => self >= &EngineVersion::V20,
+            // Opens the remaining Pro-only message variants to every fid: `TenKCast`, the 16 KiB
+            // data ceiling a 10k cast needs, and `UserDataType::Banner`. Same shape as
+            // IncreaseEmbedLimitForAllUsers: a pure loosening, versioned only because an upgraded
+            // proposer would include a non-Pro 10k cast or banner that an un-upgraded validator
+            // rejects. Like V20, it sits below the channel block so it can ship without it.
+            ProtocolFeature::UngateProMessageVariants => self >= &EngineVersion::V21,
+            // Activates `CastAddBody.format_version`, which has no rule, and validates
+            // `CastAddBody.chain` (FIP: Cast Format and Chained Casts). Below this boundary a node
+            // treats both as older nodes treat unknown fields (see `added_field_feature`), and that
+            // rule stays so pre-activation blocks replay the same. Like V20 and V21, it sits below
+            // the channel block so it can ship without it.
+            ProtocolFeature::ChainedCasts => self >= &EngineVersion::V22,
             // Distinct features, but their activation boundaries MUST stay identical.
             // ChannelRegistrations gates *acceptance* of channel-register events (which build the
             // order-dependent shard-0 channel-owner index); SortedBlockEngineEvents gates the
@@ -286,20 +394,86 @@ impl EngineVersion {
             // gate opens, and it opens at the same instant), making backfill unnecessary.
             // ChannelMessages is consensus-coupled to registrations because channel-message
             // validation depends on the registration state established at that boundary. All four
-            // are kept in one arm so they share the V20 boundary; the lock-step invariant is
+            // are kept in one arm so they share the V24 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
             //
-            // ChannelMessages has no consumer yet: the four channel message types exist on the
-            // wire, but nothing merges, stores, or replicates them. (Routing and JSON read
-            // mapping DO handle them — that is deliberate and inert; do not widen this sentence.)
-            // Whatever adds merge dispatch must gate it on this feature in the same change.
-            // Nothing will remind you: `merge_message` ends in a catch-all arm, so new handling
-            // raises no exhaustiveness error, and no compiler check can demand a runtime gate.
-            // A type that can merge before its gate is a permanent replay divergence.
+            // VerificationsOnShardZero shares the V24 boundary because channel authority consumes
+            // the shard-0 verification set. Post-V24 verification admission routes to shard 0;
+            // accepted rows enter its trie, drive channel-owner resolution, and fan out in shard-0
+            // consensus order to every data shard. The admission timestamp floor deliberately
+            // excludes pre-V24 verification history, so authority begins from post-activation
+            // state rather than a backfill.
+            //
+            // That makes RE-VERIFICATION A REQUIRED MIGRATION STEP, not an edge case: a channel
+            // owner who verified their address before V24 has no shard-0 row, so their channel
+            // resolves to owner fid 0 and rejects every permissioned write until they submit a
+            // fresh verification of the same address. It is documented on GetChannelOwner and
+            // ChannelOwnerResponse.fid because clients have to surface it. Anything that would
+            // change this — a backfill, or relaxing the floor — has to reckon with the
+            // tombstone-resurrection guard the floor exists to provide.
+            //
+            // ChannelMessages has consumers on both sides of the fan-out. BlockEngine validates
+            // authority and merges the four slot stores on shard 0, then emits gated MergeMessage
+            // BlockEvents. Every data shard replays those events through the same StoreDefs using
+            // consensus-order slot replacement, updates its trie, emits its locally derived
+            // HubEvents, and exposes the rows to state-root-verified replication. Direct channel
+            // admission on a data shard remains rejected; replay and replication are its only
+            // writers.
+            //
+            // Keep every future widening of this topology gated in the same change that makes it
+            // reachable. The allowlist, replay dispatch, and replication cache each require an
+            // explicit ChannelMessages check; catch-all match arms and StoreType::None provide no
+            // compiler-enforced reminder. A type or index that mutates before its gate creates
+            // permanent replay divergence. Derived index writes are the one case that IS
+            // compiler-enforced: `DerivedIndexGate` is a required argument on all four channel
+            // merges, so a store that gains a gated index cannot silently skip it.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents
-            | ProtocolFeature::ChannelMessages => self >= &EngineVersion::V20,
+            | ProtocolFeature::ChannelMessages
+            | ProtocolFeature::VerificationsOnShardZero => self >= &EngineVersion::V24,
+            // Ships in the V24 rollout, but deliberately kept in its own arm rather than
+            // appended to the block above. Sharing that arm would assert a lock-step
+            // obligation that does not exist here: those five MUST co-activate or
+            // consensus breaks, whereas channel follows are not consensus-coupled to the
+            // shard-0 channel set at all — a follow is an ordinary ReactionAdd on the
+            // author's own shard, and the feature gates only whether the derived follow
+            // index is written. A future version could move this boundary alone without
+            // touching the invariant those five encode. Keeping the arms separate also
+            // keeps `test_channel_features_activate_together` honest: it names its five
+            // features explicitly, so a sixth sharing the arm would look covered by it
+            // while being asserted nowhere.
+            //
+            // This gate is read from `MergeContext.version`, i.e. the version for the
+            // *message's own embedded timestamp*, and never from a block or snapshot
+            // clock. That is the only clock both write paths share: live merge and
+            // bootstrap replay both reach `ShardEngine::merge_message`, but bootstrap
+            // has only a snapshot timestamp, so gating on that would make a
+            // post-activation snapshot index pre-activation reactions that a node
+            // living through the boundary would have skipped. On the message clock the
+            // index is a pure function of the merged reaction set: same reactions, same
+            // index, however they arrived.
+            //
+            // The teardown side is deliberately ungated — see `FollowIndexGate` in
+            // `store.rs`. Prune and revoke reach `delete_add_transaction` with no
+            // version in hand, so removal is driven by row presence instead.
+            //
+            // SEQUENCING: a mainnet `active_at` for V24 may not be scheduled while
+            // `channel_registrar_for_network(Mainnet)` is still `None` — the registrar
+            // contract is not deployed. Flipping that constant from `None` to `Some`
+            // after activation would itself be an unversioned change to derived state,
+            // so the constant and the schedule entry land together. This is a stricter
+            // precondition than the rest of V24 carries, and it now blocks the whole
+            // version rather than one feature within it.
+            // `channel_follows_requires_a_registrar_wherever_it_is_scheduled` pins this.
+            //
+            // This precondition attaches to V24 ONLY. It is why the channel features live
+            // here rather than at V20, V21 or V22: none of them carries channel behavior, so
+            // they are not gated on the registrar. Do not read a scheduled V20, V21 or V22 as a
+            // violation of this rule.
+            ProtocolFeature::ChannelFollows => self >= &EngineVersion::V24,
+            ProtocolFeature::UniqueOnchainEventTrieKeys
+            | ProtocolFeature::HeaderTransactionsRoot => self >= &EngineVersion::V23,
         }
     }
 
@@ -321,7 +495,13 @@ impl EngineVersion {
             EngineVersion::V15 => 10,
             EngineVersion::V16 => 11,
             EngineVersion::V17 => 12,
-            EngineVersion::V18 | EngineVersion::V19 | EngineVersion::V20 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V18
+            | EngineVersion::V19
+            | EngineVersion::V20
+            | EngineVersion::V21
+            | EngineVersion::V22
+            | EngineVersion::V23
+            | EngineVersion::V24 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -335,13 +515,7 @@ impl EngineVersion {
         time: &FarcasterTime,
         network: FarcasterNetwork,
     ) -> Option<u64> {
-        let schedule = match network {
-            FarcasterNetwork::Mainnet => &ENGINE_VERSION_SCHEDULE_MAINNET,
-            FarcasterNetwork::Testnet => &ENGINE_VERSION_SCHEDULE_TESTNET,
-            _ => &ENGINE_VERSION_SCHEDULE_DEVNET,
-        };
-
-        schedule
+        schedule_for(network)
             .iter()
             .find(|schedule_entry| schedule_entry.active_at > time.to_unix_seconds())
             .map(|schedule_entry| schedule_entry.active_at)
@@ -675,7 +849,7 @@ mod version_test {
             EngineVersion::V19
         );
 
-        // Devnet: V19 from genesis. Devnet runs the latest version (V20+ on this branch), so
+        // Devnet: V19 from genesis. Devnet runs the latest version (V24+ on this branch), so
         // assert the feature rather than version equality.
         assert!(
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
@@ -684,16 +858,218 @@ mod version_test {
     }
 
     #[test]
-    fn test_channel_registrations_feature_gate() {
-        // Gate closed below V20, open at V20+. The engine's admission gate for
-        // channel-register events consults this boundary at replay, so pin it explicitly —
-        // an accidental change would alter pre-V20 replay behavior.
+    fn test_increase_embed_limit_feature_gate() {
+        // Gate closed below V20, open at V20+. Below the boundary the cap is 4 for Pro and 2 for
+        // everyone else; at and above it, 4 for everyone. Pin it explicitly: this decides whether
+        // a replayed non-Pro cast with 3 or 4 embeds validates, so moving it silently would fork
+        // every node's view of history.
         assert_eq!(
-            EngineVersion::V19.is_enabled(ProtocolFeature::ChannelRegistrations),
+            EngineVersion::V19.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
             false
         );
         assert_eq!(
-            EngineVersion::V20.is_enabled(ProtocolFeature::ChannelRegistrations),
+            EngineVersion::V20.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers),
+            true
+        );
+    }
+
+    #[test]
+    fn test_increase_embed_limit_activation_schedule() {
+        // Testnet: V20 at 2026-08-06 17:00 UTC (12:00 PM CDT); pre-activation returns V19.
+        let testnet_active = 1786035600;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active - 1),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V19
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V20
+        );
+
+        // Mainnet: V20 at 2026-08-13 17:00 UTC (12:00 PM CDT); pre-activation returns V19.
+        let mainnet_active = 1786640400;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active - 1),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V19
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V20
+        );
+
+        // Testnet leads mainnet, so a regression that swapped the two constants is caught here
+        // rather than at the cutover.
+        assert!(testnet_active < mainnet_active);
+
+        // Devnet runs the latest version (V24+), so assert the feature rather than version
+        // equality.
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers)
+        );
+    }
+
+    #[test]
+    fn test_ungate_pro_message_variants_feature_gate() {
+        // Gate closed below V21, open at V21+. This decides whether a replayed non-Pro 10k cast
+        // or banner validates, so moving it silently would fork every node's view of history.
+        assert!(!EngineVersion::V20.is_enabled(ProtocolFeature::UngateProMessageVariants));
+        assert!(EngineVersion::V21.is_enabled(ProtocolFeature::UngateProMessageVariants));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::UngateProMessageVariants));
+    }
+
+    #[test]
+    fn test_ungate_pro_message_variants_activation_schedule() {
+        // Testnet: V21 at 2026-10-22 12:00 UTC (7:00 AM CDT), in the same instant as V22;
+        // pre-activation returns V20.
+        let testnet_active = 1792670400;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active - 1),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V20
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V22
+        );
+
+        // Mainnet: V21 and V22 at 2026-10-23 12:00 UTC; pre-activation returns V20.
+        let mainnet_active = 1792756800;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active - 1),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V20
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V22
+        );
+
+        assert!(testnet_active < mainnet_active);
+
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::UngateProMessageVariants)
+        );
+    }
+
+    #[test]
+    fn test_v23_feature_gates() {
+        let devnet = EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet);
+        for version_enables in [
+            |version: EngineVersion| {
+                version.is_enabled(ProtocolFeature::UniqueOnchainEventTrieKeys)
+            },
+            |version: EngineVersion| version.is_enabled(ProtocolFeature::HeaderTransactionsRoot),
+        ] {
+            assert!(!version_enables(EngineVersion::V22));
+            assert!(version_enables(EngineVersion::V23));
+            assert!(version_enables(devnet));
+        }
+    }
+
+    #[test]
+    fn test_v23_schedule() {
+        for (network, active_at) in [
+            (FarcasterNetwork::Testnet, 1793210400),
+            (FarcasterNetwork::Mainnet, 1793257200),
+        ] {
+            let at = |unix_seconds: u64| FarcasterTime::from_unix_seconds(unix_seconds);
+            assert_eq!(
+                EngineVersion::version_for(&at(active_at - 1), network),
+                EngineVersion::V22
+            );
+            assert_eq!(
+                EngineVersion::version_for(&at(active_at), network),
+                EngineVersion::V23
+            );
+        }
+    }
+
+    #[test]
+    fn test_chained_casts_feature_gate() {
+        // Gate closed below V22, open at V22+. This decides whether a replayed cast's `chain` is
+        // validated, so moving it silently would fork every node's view of history.
+        assert!(!EngineVersion::V21.is_enabled(ProtocolFeature::ChainedCasts));
+        assert!(EngineVersion::V22.is_enabled(ProtocolFeature::ChainedCasts));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChainedCasts));
+
+        // V22 activates in the same instant as V21 on each network.
+        for (network, active_at) in [
+            (FarcasterNetwork::Testnet, 1792670400),
+            (FarcasterNetwork::Mainnet, 1792756800),
+        ] {
+            assert!(!EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(active_at - 1),
+                network
+            )
+            .is_enabled(ProtocolFeature::ChainedCasts));
+            assert!(EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(active_at),
+                network
+            )
+            .is_enabled(ProtocolFeature::ChainedCasts));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::ChainedCasts)
+        );
+    }
+
+    #[test]
+    fn test_embed_limit_activates_without_the_channel_rollout() {
+        // The whole point of putting embeds at V20, the Pro ungate at V21, and channels at V24:
+        // scheduling either must NOT drag the channel features live. Both networks now schedule
+        // V22, so every channel gate has to stay shut at their latest scheduled version.
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let version = EngineVersion::version_for(&far_future, network);
+            assert!(version.is_enabled(ProtocolFeature::IncreaseEmbedLimitForAllUsers));
+            assert!(version.is_enabled(ProtocolFeature::UngateProMessageVariants));
+            assert!(!version.is_enabled(ProtocolFeature::ChannelRegistrations));
+            assert!(!version.is_enabled(ProtocolFeature::ChannelMessages));
+            assert!(!version.is_enabled(ProtocolFeature::ChannelFollows));
+            assert!(!version.is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        }
+    }
+
+    #[test]
+    fn test_channel_registrations_feature_gate() {
+        // Gate closed below V24, open at V24+. The engine's admission gate for
+        // channel-register events consults this boundary at replay, so pin it explicitly —
+        // an accidental change would alter pre-V24 replay behavior.
+        assert_eq!(
+            EngineVersion::V22.is_enabled(ProtocolFeature::ChannelRegistrations),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V24.is_enabled(ProtocolFeature::ChannelRegistrations),
             true
         );
         assert_eq!(
@@ -704,10 +1080,10 @@ mod version_test {
 
     #[test]
     fn test_channel_registrations_activation_schedule() {
-        // V20 is unscheduled on mainnet/testnet: the feature must stay dormant there even
+        // V24 is unscheduled on mainnet/testnet: the feature must stay dormant there even
         // far in the future, and active on devnet (which always runs the latest version).
         // Asserted via is_enabled rather than a pinned version so this only breaks when
-        // V20 (or a later version) is scheduled, not when unrelated earlier versions are.
+        // V24 (or a later version) is scheduled, not when unrelated earlier versions are.
         let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
         for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
             assert!(!EngineVersion::version_for(&far_future, network)
@@ -721,14 +1097,14 @@ mod version_test {
 
     #[test]
     fn test_sorted_block_engine_events_feature_gate() {
-        // Gate closed below V20, open at V20+. BlockEngine replay consults this
+        // Gate closed below V24, open at V24+. BlockEngine replay consults this
         // boundary before canonicalizing shard-0 onchain-event order.
         assert_eq!(
-            EngineVersion::V19.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            EngineVersion::V22.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
             false
         );
         assert_eq!(
-            EngineVersion::V20.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            EngineVersion::V24.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
             true
         );
         assert_eq!(
@@ -752,14 +1128,14 @@ mod version_test {
 
     #[test]
     fn test_channel_ownership_events_feature_gate() {
-        // Gate closed below V20, open at V20+. handle_block_event consults this boundary before
+        // Gate closed below V24, open at V24+. handle_block_event consults this boundary before
         // admitting a MergeOnChainEvent BlockEvent, so pin it explicitly.
         assert_eq!(
-            EngineVersion::V19.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+            EngineVersion::V22.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
             false
         );
         assert_eq!(
-            EngineVersion::V20.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
+            EngineVersion::V24.is_enabled(ProtocolFeature::ChannelOwnershipEvents),
             true
         );
         assert_eq!(
@@ -770,9 +1146,9 @@ mod version_test {
 
     #[test]
     fn test_channel_ownership_events_activation_schedule() {
-        // V20 is unscheduled on mainnet/testnet: the feature must stay dormant there even far in
+        // V24 is unscheduled on mainnet/testnet: the feature must stay dormant there even far in
         // the future, and active on devnet (which always runs the latest version). Asserted via
-        // is_enabled rather than a pinned version so this only breaks when V20 (or a later
+        // is_enabled rather than a pinned version so this only breaks when V24 (or a later
         // version) is scheduled, not when unrelated earlier versions are.
         let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
         for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
@@ -787,8 +1163,8 @@ mod version_test {
 
     #[test]
     fn test_channel_messages_feature_gate() {
-        assert!(!EngineVersion::V19.is_enabled(ProtocolFeature::ChannelMessages));
-        assert!(EngineVersion::V20.is_enabled(ProtocolFeature::ChannelMessages));
+        assert!(!EngineVersion::V22.is_enabled(ProtocolFeature::ChannelMessages));
+        assert!(EngineVersion::V24.is_enabled(ProtocolFeature::ChannelMessages));
         assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelMessages));
     }
 
@@ -806,15 +1182,61 @@ mod version_test {
     }
 
     #[test]
+    fn test_verifications_on_shard_zero_feature_gate() {
+        assert!(!EngineVersion::V22.is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        assert!(EngineVersion::V24.is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::VerificationsOnShardZero));
+
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::VerificationsOnShardZero)
+        );
+    }
+
+    #[test]
+    fn test_channel_follows_feature_gate() {
+        assert!(!EngineVersion::V22.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::V24.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelFollows));
+    }
+
+    #[test]
+    fn test_channel_follows_activation_schedule() {
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::ChannelFollows));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::ChannelFollows)
+        );
+    }
+
+    #[test]
     fn test_channel_features_activate_together() {
-        // CONSENSUS INVARIANT: these four features must be enabled at the exact same versions.
+        // CONSENSUS INVARIANT: the four channel features must be enabled at the exact same
+        // versions. VerificationsOnShardZero is pinned alongside them for a weaker reason, spelled
+        // out at the end of this comment — do not read it as consensus-coupled.
         // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
         // channel-register events but replay them unsorted, reintroducing the same-eth-block
         // channel-owner divergence this fix closes. ChannelOwnershipEvents gates the fan-out of
         // those registrations; if it lagged, a registration could be admitted with no shard ever
         // fanning it out (or, mixed across binaries, diverge on which blocks fan out).
         // ChannelMessages validates against the registration state, so it must share the same
-        // boundary. This test fails CI if a future change splits any activation boundary.
+        // boundary. VerificationsOnShardZero has no present coupling — it is pinned here so the
+        // shard-0 replica shares the one V24 rollout boundary rather than drifting into its own;
+        // see the comment on the matching arm in `is_enabled`. This test fails CI if a future
+        // change splits any activation boundary.
+        //
+        // ChannelFollows also activates at V24 but is deliberately NOT asserted here: it ships in
+        // the same rollout without being coupled to it, so a later change may move its boundary
+        // alone. `test_channel_follows_feature_gate` is what pins it.
         use strum::IntoEnumIterator;
         for version in EngineVersion::iter() {
             let channel_registrations = version.is_enabled(ProtocolFeature::ChannelRegistrations);
@@ -836,7 +1258,50 @@ mod version_test {
                 "ChannelRegistrations and ChannelMessages must co-activate; they differ at {:?}",
                 version
             );
+            assert_eq!(
+                channel_registrations,
+                version.is_enabled(ProtocolFeature::VerificationsOnShardZero),
+                "ChannelRegistrations and VerificationsOnShardZero must co-activate; they differ at {:?}",
+                version
+            );
         }
+    }
+
+    #[test]
+    fn snapshot_channel_gate_tracks_the_activation_boundary_on_every_network() {
+        // Both sides of replication derive "may this snapshot carry channel rows?"
+        // from a snapshot timestamp — the server to decide which rows it emits, the
+        // bootstrap client to decide whether it will merge them. They now share this
+        // function, so this is the one place that behavior is pinned. Hardcoding
+        // either call site to a literal used to leave every test green while a
+        // post-activation bootstrap died on its first channel row.
+        for network in [
+            FarcasterNetwork::Mainnet,
+            FarcasterNetwork::Testnet,
+            FarcasterNetwork::Devnet,
+        ] {
+            for timestamp in [0u64, 1, 1_000_000, u32::MAX as u64] {
+                assert_eq!(
+                    EngineVersion::channel_messages_enabled_for_snapshot(timestamp, network),
+                    EngineVersion::version_for(&FarcasterTime::new(timestamp), network)
+                        .is_enabled(ProtocolFeature::ChannelMessages),
+                    "snapshot gate must equal the schedule's answer at {timestamp} on {network:?}"
+                );
+            }
+        }
+
+        // Devnet activates channel messages at genesis, so a devnet snapshot always
+        // carries them — the case the bootstrap tests actually exercise.
+        assert!(EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Devnet
+        ));
+        // Mainnet at timestamp 0 predates every activation, so a snapshot from before
+        // the boundary must not be treated as channel-bearing.
+        assert!(!EngineVersion::channel_messages_enabled_for_snapshot(
+            0,
+            FarcasterNetwork::Mainnet
+        ));
     }
 
     #[test]
@@ -865,7 +1330,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V20);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V24);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
@@ -915,6 +1380,25 @@ mod version_test {
         );
 
         let time = FarcasterTime::from_unix_seconds(1785160800);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1786640400)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1786640400);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1792756800)
+        );
+
+        // V21 and V22 share a timestamp; V23 is the last scheduled mainnet version and V24
+        // (channels) has no entry yet.
+        let time = FarcasterTime::from_unix_seconds(1792756800);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1793257200)
+        );
+        let time = FarcasterTime::from_unix_seconds(1793257200);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None

@@ -981,12 +981,14 @@ mod tests {
     }
 
     #[test]
-    fn key_add_body_rejects_dormant_channel_scopes() {
+    fn key_add_body_rejects_channel_scopes() {
         // Defining a new MessageType must never widen what a KEY_ADD may authorize. Before the
         // channel message types existed, `MessageType::try_from(18..=21)` failed and these scopes
-        // were rejected as unrecognized; a gasless key must not become scopeable to a message type
-        // that no engine can merge. KEY_ADD is live on mainnet, so silently accepting a previously
-        // invalid KEY_ADD would fork nodes running different binaries at the same engine version.
+        // were rejected as unrecognized. KEY_ADD is live on mainnet, so silently accepting a
+        // previously invalid KEY_ADD would fork nodes running different binaries at the same
+        // engine version. That is the whole reason, and it is unaffected by shard 0 now merging
+        // channel messages: channel actions are authorized by the author's fid role (owner /
+        // moderator / member), never by a gasless signer scope.
         for channel_type in [
             MessageType::ChannelUpdate,
             MessageType::ChannelMember,

@@ -783,4 +783,281 @@ mod tests {
         );
         assert!(validate_with_version(&msg, EngineVersion::V17).is_ok());
     }
+
+    fn validate_as(
+        msg: &proto::Message,
+        is_pro_user: bool,
+        version: EngineVersion,
+    ) -> Result<(), ValidationError> {
+        validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            is_pro_user,
+            &FarcasterTime::current(),
+            version,
+        )
+    }
+
+    /// Pins both sides of the `UngateProMessageVariants` boundary for banners. Below it, only Pro
+    /// can set one, so pre-V21 history replays identically; at and above it, anyone can.
+    #[test]
+    fn banners_are_open_to_everyone_from_v21() {
+        let banner = create_user_data_add(
+            1234,
+            proto::UserDataType::Banner,
+            &"https://example.com/banner.png".to_string(),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&banner, false, EngineVersion::V20),
+            Err(ValidationError::ProUserFeature)
+        );
+        assert!(validate_as(&banner, true, EngineVersion::V20).is_ok());
+        for version in [EngineVersion::V21, EngineVersion::latest()] {
+            assert!(validate_as(&banner, false, version).is_ok());
+            assert!(validate_as(&banner, true, version).is_ok());
+        }
+
+        let too_long = create_user_data_add(
+            1234,
+            proto::UserDataType::Banner,
+            &"a".repeat(257),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&too_long, false, EngineVersion::V21),
+            Err(ValidationError::BannerValueTooLong)
+        );
+    }
+
+    /// A 10k cast does not fit in the default 2 KiB data ceiling, so the 16 KiB ceiling has to open
+    /// at the same boundary as the cast type or the ungate is useless. Below V21 a non-Pro 10k cast
+    /// is rejected on size before the cast type is even checked.
+    #[test]
+    fn ten_k_cast_data_ceiling_is_open_to_everyone_from_v21() {
+        let ten_k_cast = messages_factory::casts::create_cast_add_rich(
+            1234,
+            &"a".repeat(9_999),
+            Some(proto::CastType::TenKCast),
+            vec![],
+            None,
+            vec![],
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&ten_k_cast, false, EngineVersion::V20),
+            Err(ValidationError::DataBytesTooLong(2048))
+        );
+        assert!(validate_as(&ten_k_cast, true, EngineVersion::V20).is_ok());
+        for version in [EngineVersion::V21, EngineVersion::latest()] {
+            assert!(validate_as(&ten_k_cast, false, version).is_ok());
+            assert!(validate_as(&ten_k_cast, true, version).is_ok());
+        }
+
+        // The ceiling only applies to casts: other message types keep the default.
+        let oversized_bio = create_user_data_add(
+            1234,
+            proto::UserDataType::Bio,
+            &"a".repeat(4_000),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_as(&oversized_bio, false, EngineVersion::V21),
+            Err(ValidationError::DataBytesTooLong(2048))
+        );
+    }
+
+    fn cast_with_body_suffix(
+        format_version: u32,
+        chain: Option<proto::ChainCast>,
+        extra: &[u8],
+    ) -> proto::Message {
+        messages_factory::casts::create_cast_add_with_body_suffix(
+            1234,
+            format_version,
+            chain,
+            extra,
+            None,
+            &generate_signer(),
+        )
+    }
+
+    /// Pins the `ChainedCasts` boundary. Below it a node accepts exactly what v0.14.3 accepted,
+    /// which skipped fields 9 and 10 as unknown; at and above it, `chain` is validated and any
+    /// `format_version` is valid.
+    #[test]
+    fn chain_and_format_version_activate_at_v22() {
+        let root = |fid, hash_len| {
+            Some(CastId {
+                fid,
+                hash: vec![1; hash_len],
+            })
+        };
+        let chain = |root, index, count| Some(proto::ChainCast { root, index, count });
+        let part = chain(root(1234, 20), 1, 3);
+
+        // The first cast, a part, a part of a growing chain, and the last index the cap allows.
+        for (format_version, valid) in [
+            (1, chain(None, 0, 3)),
+            (u32::MAX, part.clone()),
+            (1, chain(root(1234, 20), 7, 0)),
+            (1, chain(root(1234, 20), 99, 100)),
+        ] {
+            let msg = cast_with_body_suffix(format_version, valid, &[]);
+            for version in [
+                EngineVersion::V21,
+                EngineVersion::V22,
+                EngineVersion::latest(),
+            ] {
+                assert!(validate_with_version(&msg, version).is_ok());
+            }
+        }
+
+        // Each rule, broken once: accepted below the boundary, rejected with its error from V22.
+        for (bad, error) in [
+            (
+                chain(root(1234, 20), 3, 3),
+                ValidationError::ChainIndexOutOfRange,
+            ),
+            (
+                chain(root(1234, 20), 100, 0),
+                ValidationError::ChainIndexOutOfRange,
+            ),
+            (chain(None, 0, 101), ValidationError::ChainIndexOutOfRange),
+            (
+                chain(root(1234, 20), 0, 3),
+                ValidationError::ChainRootInvalid,
+            ),
+            (chain(None, 1, 3), ValidationError::ChainRootInvalid),
+            (
+                chain(root(5678, 20), 1, 3),
+                ValidationError::ChainRootInvalid,
+            ),
+            (chain(root(0, 20), 1, 3), ValidationError::FidIsMissing),
+            (chain(root(1234, 19), 1, 3), ValidationError::HashIsMissing),
+            // The root is checked as a `CastId` before its fid is compared.
+            (chain(root(5678, 19), 1, 3), ValidationError::HashIsMissing),
+        ] {
+            let msg = cast_with_body_suffix(1, bad, &[]);
+            assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
+            assert_eq!(validate_with_version(&msg, EngineVersion::V22), Err(error));
+        }
+
+        // Field 9 as bytes, and field 10 as a varint.
+        for bad_field in [&[0x4a, 0x02, 0xff, 0xff][..], &[0x50, 0x01]] {
+            let msg = cast_with_body_suffix(0, None, bad_field);
+            assert!(validate_with_version(&msg, EngineVersion::V21).is_ok());
+            assert_eq!(
+                validate_with_version(&msg, EngineVersion::V22),
+                Err(ValidationError::InvalidData)
+            );
+        }
+
+        // Sent in `data` alone, v0.14.3 hashes `data` without the added fields: a signed one fails
+        // the hash, and an unsigned one is ignored. From V22 the hash covers them.
+        for (format_version, added) in [(1, None), (0, part)] {
+            let mut signed = cast_with_body_suffix(format_version, added.clone(), &[]);
+            signed.data = Some(
+                proto::MessageData::decode(signed.data_bytes.take().unwrap().as_slice()).unwrap(),
+            );
+            assert_eq!(
+                validate_with_version(&signed, EngineVersion::V21),
+                Err(ValidationError::InvalidHash)
+            );
+            assert!(validate_with_version(&signed, EngineVersion::V22).is_ok());
+
+            let mut unsigned = messages_factory::casts::create_cast_add(1234, "part", None, None);
+            if let Some(proto::message_data::Body::CastAddBody(body)) =
+                &mut unsigned.data.as_mut().unwrap().body
+            {
+                body.format_version = format_version;
+                body.chain = added;
+            }
+            assert!(validate_with_version(&unsigned, EngineVersion::V21).is_ok());
+            assert_eq!(
+                validate_with_version(&unsigned, EngineVersion::V22),
+                Err(ValidationError::InvalidHash)
+            );
+        }
+    }
+
+    #[test]
+    fn test_channel_bodies_validate_stateless_fields() {
+        use proto::message_data::Body;
+        use proto::{ChannelMemberAction, ChannelModerateAction, MessageType};
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            assert_valid(&message);
+        }
+
+        let invalid = |reason: &str| {
+            ValidationError::HubError(crate::core::error::HubError::validation_failure(reason))
+        };
+
+        let mut member = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelMember,
+            Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: vec![1; 32],
+                fid: 0,
+                action: ChannelMemberAction::AddMember as i32,
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(
+            &mut member,
+            invalid("channel member fid must fit in a non-zero u32"),
+        );
+
+        if let Some(Body::ChannelMemberBody(body)) =
+            member.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.fid = 99;
+            body.action = ChannelMemberAction::None as i32;
+        }
+        assert_mutated_invalid(&mut member, invalid("invalid channel member action"));
+
+        let mut pin = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelPin,
+            Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: vec![1; 32],
+                cast_hash: vec![2; 19],
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(
+            &mut pin,
+            invalid("channel pin cast hash must be empty or 20 bytes"),
+        );
+
+        let mut moderate = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelModerate,
+            Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: vec![1; 31],
+                cast_hash: vec![2; 20],
+                action: ChannelModerateAction::Hide as i32,
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(&mut moderate, invalid("channel id must be 32 bytes"));
+
+        if let Some(Body::ChannelModerateBody(body)) =
+            moderate.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.channel_id = vec![1; 32];
+            body.action = ChannelModerateAction::None as i32;
+        }
+        assert_mutated_invalid(&mut moderate, invalid("invalid channel moderate action"));
+    }
 }
