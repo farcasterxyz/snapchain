@@ -44,7 +44,7 @@ jobs:
           find ./malachite -type f -not -path '*/.git/*' -exec touch -d "$commit_ts" {} +
 
       - name: Install Rust 1.95.0
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, llvm-tools-preview
 
