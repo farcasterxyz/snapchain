@@ -15,8 +15,8 @@
     "vocs": "latest"
   },
   "devDependencies": {
-    "@types/react": "latest",
-    "typescript": "latest"
+    "@types/react": "19.2.17",
+    "typescript": "6.0.3"
   },
   "resolutions": {
     "toml": "^5.0.1"
