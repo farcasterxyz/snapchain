@@ -19,6 +19,8 @@
     "typescript": "6.0.3"
   },
   "resolutions": {
+    "@hono/node-server": "2.1.5",
+    "katex": "0.18.11",
     "toml": "^5.0.1"
   }
 }
