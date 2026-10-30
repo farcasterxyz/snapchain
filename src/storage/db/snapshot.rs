@@ -153,9 +153,13 @@ struct SnapshotMetadata {
 
 fn make_snapshot_metadata(
     key_base: String,
-    chunks: Vec<String>,
+    mut chunks: Vec<String>,
     timestamp: i64,
 ) -> SnapshotMetadata {
+    // read_dir order is unspecified, but restore concatenates in metadata order.
+    // MultiChunkWriter uses chunk_{:04}.bin (a minimum width), so compare length
+    // before name to keep chunk_10000.bin after chunk_9999.bin as well.
+    chunks.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     SnapshotMetadata {
         key_base,
         chunks,
