@@ -41,7 +41,7 @@ try {
 
 Responses from the API are encoded as `application/json`, and can be parsed as normal JSON objects.
 
-1. Hashes, ETH addresses, keys etc... are all encoded as hex strings starting with `0x`
+1. Hashes, ETH addresses, keys etc... are all encoded as hex strings starting with `0x`, except `castRemoveBody.targetHash`, which is base64
 2. Signatures and other binary fields are encoded in base64
 3. Constants are encoded as their string types. For example, the `hashScheme` is encoded as `HASH_SCHEME_BLAKE3` which is equivalent to the `HASH_SCHEME_BLAKE3 = 1` from the protobuf schema.
 
@@ -58,7 +58,7 @@ Most endpoints support paging to get a large number of responses.
 | Parameter | Description                                                                                                              | Example                             |
 | --------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
 | pageSize  | Maximum number of messages to return in a single response                                                                | `pageSize=100`                      |
-| reverse   | Reverse the sort order, returning latest messages first                                                                  | `reverse=1`                         |
+| reverse   | Reverse the sort order, returning latest messages first                                                                  | `reverse=true`                      |
 | pageToken | The page token returned by the previous query, to fetch the next page. If this parameters is empty, fetch the first page | `pageToken=AuzO1V0Dta...fStlynsGWT` |
 
 The returned `nextPageToken` is empty if there are no more pages to return.
@@ -85,12 +85,12 @@ import axios from "axios";
 const fid = 2;
 const server = "http://127.0.0.1:3381";
 
-let nextPageToken = "";
+let pageToken = "";
 do {
-    const response = await axios.get(`${server}/v1/castsByFid?fid=${fid}&pageSize=100&nextPageToken=${nextPageToken}`);
+    const response = await axios.get(`${server}/v1/castsByFid?fid=${fid}&pageSize=100&pageToken=${encodeURIComponent(pageToken)}`);
     // Process response....
-    nextPageToken = response.nextPageToken;
-} while (nextPageToken !== "")
+    pageToken = response.data.nextPageToken;
+} while (pageToken)
 ```
 
 ## Timestamp Filtering
@@ -110,24 +110,13 @@ http://127.0.0.1:3381/v1/castsByFid?fid=2&startTimestamp=1000&stopTimestamp=2000
 
 ## Handling Errors
 
-If there's an API error, the HTTP status code is set to `400` or `500` as appropriate. The response is a JSON object with `detail`, `errCode` and `metadata` fields set to identify and debug the errors.
+If there's an API error, the HTTP status code is set to `400` or `500` as appropriate. The response is a JSON object with `error` and `error_detail` fields. Invalid query parameters return a plain-text message instead.
 
 **Example**
 
 ```bash
-$ curl "http://127.0.0.1:3381/v1/castById?fid=invalid"
-{
-  "errCode": "bad_request.validation_failure",
-  "presentable": false,
-  "name": "HubError",
-  "code": 3,
-  "details": "fid must be an integer",
-  "metadata": {
-    "errcode": [
-      "bad_request.validation_failure",
-    ],
-  },
-}
+$ curl "http://127.0.0.1:3381/v1/castById?fid=2&hash=0x0000000000000000000000000000000000000000"
+{"error":"Failed to get cast","error_detail":"status: NotFound, message: \"cast not found\", details: [], metadata: MetadataMap { headers: {} }"}
 ```
 
 ## Limitations
