@@ -161,9 +161,9 @@ Before you begin, ensure you have the following installed:
 
 Clone the snapchain and dependent repos and build snapchain:
 ```
-git clone git@github.com:informalsystems/malachite.git
+git clone git@github.com:farcasterxyz/malachite.git
 cd malachite
-git checkout 13bca14cd209d985c3adf101a02924acde8723a5
+git checkout 41e2e2f90de696d14b1cd2c5a77c567b71b6104b
 cd ..
 git clone git@github.com:farcasterxyz/snapchain.git
 cd snapchain

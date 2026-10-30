@@ -2,9 +2,9 @@ FROM rust:1.95 AS chef
 
 WORKDIR /usr/src/app
 
-ARG MALACHITE_GIT_REPO_URL=https://github.com/informalsystems/malachite.git
+ARG MALACHITE_GIT_REPO_URL=https://github.com/farcasterxyz/malachite.git
 ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
-ARG MALACHITE_GIT_REF=13bca14cd209d985c3adf101a02924acde8723a5
+ARG MALACHITE_GIT_REF=41e2e2f90de696d14b1cd2c5a77c567b71b6104b
 ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu

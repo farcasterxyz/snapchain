@@ -17,8 +17,7 @@ snapchain-proto = { path = "proto" }
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-atty = "0.2"
-libp2p-connection-limits = "0.5.0"
+libp2p-connection-limits = "0.6.0"
 serde_json = "1.0"
 sha2 = "0.10.6"
 tonic = { version ="0.12.3", features = ["tls", "tls-native-roots"] }
@@ -29,7 +28,7 @@ futures-core = "0.3.31"
 parking_lot = "0.12.1"
 tokio-retry2 = { version = "0.5", features = ["jitter", "tracing"] }
 clap = { version = "4.3.0", features = ["derive"] }
-libp2p = { version = "0.55.0", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
+libp2p = { version = "0.56.0", features = ["tokio", "gossipsub", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
 async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
 hex = "0.4.3"
@@ -46,7 +45,7 @@ informalsystems-malachitebft-metrics = { path = "../malachite/code/crates/metric
 informalsystems-malachitebft-wal = { path = "../malachite/code/crates/wal" }
 # Same version Malachite's metrics crate uses, so our gossip counters share the
 # in-process `SharedRegistry` instance (types must unify).
-prometheus-client = "0.22"
+prometheus-client = "0.23.1"
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
