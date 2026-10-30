@@ -35,8 +35,8 @@ jobs:
     - name: Checkout malachite (path dependency)
       uses: actions/checkout@v7
       with:
-        repository: informalsystems/malachite
-        ref: 13bca14cd209d985c3adf101a02924acde8723a5
+        repository: farcasterxyz/malachite
+        ref: 58730933edc170a395e6a905d791fac4666da192
         path: ./malachite
 
     - name: Install Rust 1.95.0
