@@ -45,6 +45,12 @@ curl http://127.0.0.1:3381/v1/castById?fid=2&hash=0xd2b1ddc6c88e865a33cb1a565e00
 }
 ```
 
+A cast in a format other than plain text also has `formatVersion` in `castAddBody`, for example
+`"formatVersion": 1`, and a cast in a chain also has `chain`, for example
+`"chain": { "root": { "fid": 2, "hash": "0x..." }, "index": 1, "count": 3 }`. `root` is absent on the
+first cast of a chain. Casts in plain text have no `formatVersion`, and casts that are not in a chain
+have no `chain`.
+
 ## castsByFid
 
 Fetch all casts for authored by an FID.

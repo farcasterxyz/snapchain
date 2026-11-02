@@ -137,6 +137,8 @@ Adds a new Cast message.
 | mentions_positions | uint32                | repeated | Positions of the mentions in the text       |
 | embeds             | [Embed](#Embed)       | repeated | URLs or cast ids to be embedded in the cast |
 | type               | [CastType](#CastType) |          | Type of cast (regular, long, etc.)          |
+| format_version     | uint32                |          | How to read the text: 0 is plain text, 1 is article Markdown |
+| chain              | [ChainCast](#ChainCast) | optional | Set on every cast of a chain              |
 
 #### Embed
 
@@ -161,6 +163,16 @@ Identifier used to look up a Cast
 | ----- | ------ | ----- | ------------------------------------ |
 | fid   | uint64 |       | Fid of the user who created the cast |
 | hash  | bytes  |       | Hash of the cast                     |
+
+### 3.4 ChainCast
+
+Places a cast in an ordered chain of casts by one author, such as an article. Validated once the `ChainedCasts` feature (V22) is active; before it, nodes ignore `chain` and `format_version`. `format_version` has no rule.
+
+| Field   | Type              | Label | Description                                                          |
+| ------- | ----------------- | ----- | -------------------------------------------------------------------- |
+| root    | [CastId](#CastId) |       | First cast of the chain, by the same fid; absent on that cast itself |
+| index   | uint32            |       | Position in the chain, from 0; below 100, and below `count` when `count` > 0 |
+| count   | uint32            |       | Number of casts in the chain, at most 100; 0 while it is growing     |
 
 ## 4. Reaction
 

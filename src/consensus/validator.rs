@@ -1,14 +1,14 @@
 use super::consensus::ValidatorSetConfig;
 use crate::consensus::proposer::{BlockProposer, Proposer, ShardProposer};
 use crate::core::types::{
-    Address, FullProposalExt, Height, ShardId, SnapchainShard, SnapchainValidator,
-    SnapchainValidatorContext, SnapchainValidatorSet,
+    Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
+    SnapchainValidatorSet, WellFormedProposal,
 };
-use crate::proto::{full_proposal, Commits, FullProposal, ShardHash};
+use crate::proto::{full_proposal, Commits, ShardHash};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
-use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
+use informalsystems_malachitebft_core_types::{Round, ValidatorSet, Validity};
 use libp2p::identity::ed25519::PublicKey;
 use std::cmp::PartialEq;
 use std::time::Duration;
@@ -41,6 +41,16 @@ impl StoredValidatorSets {
             }
         }
         result.validators.clone()
+    }
+
+    /// Every validator in any set this shard can use, across all `effective_at` heights.
+    pub fn all_validators(&self) -> impl Iterator<Item = &SnapchainValidator> {
+        self.sets
+            .iter()
+            .enumerate()
+            // `get_validator_set` falls back to the first set when none applies to the shard.
+            .filter(|(i, config)| *i == 0 || config.shard_ids.contains(&self.shard_id))
+            .flat_map(|(_, config)| config.validators.validators.iter())
     }
 }
 
@@ -128,6 +138,19 @@ impl ShardValidator {
 
     pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
         self.validator_sets.get_validator_set(height)
+    }
+
+    /// Whether `full_proposal` names the validator selected to propose at its height and round.
+    pub fn is_expected_proposer(&self, full_proposal: &WellFormedProposal) -> bool {
+        let height = full_proposal.height();
+        self.get_validator_set(height.as_u64())
+            .proposer(height, full_proposal.round())
+            .is_some_and(|validator| validator.address == *full_proposal.proposer_address())
+    }
+
+    /// Every validator this shard has had or will have, across all configured validator sets.
+    pub fn all_validators(&self) -> impl Iterator<Item = &SnapchainValidator> {
+        self.validator_sets.all_validators()
     }
 
     pub fn validator_count(&self, height: u64) -> usize {
@@ -257,22 +280,23 @@ impl ShardValidator {
         panic!("No proposer set");
     }
 
+    /// Validates a proposal from consensus or sync.
     pub fn add_proposed_value(
         &mut self,
-        full_proposal: &FullProposal,
+        full_proposal: &WellFormedProposal,
         proposal_source: ProposalSource,
     ) -> ProposedValue<SnapchainValidatorContext> {
-        let value = full_proposal.shard_hash();
+        let value = full_proposal.shard_hash().clone();
         self.proposal_source = proposal_source;
-        if self.shard_id.shard_id() != full_proposal.shard_id().unwrap() {
+        let proposal_shard = full_proposal.height().shard_index;
+        let validity = if self.shard_id.shard_id() != proposal_shard {
             warn!(
                 "Received proposal for shard {} on shard {}",
-                full_proposal.shard_id().unwrap(),
+                proposal_shard,
                 self.shard_id.shard_id()
             );
-            panic!("Received proposal for wrong shard");
-        }
-        let validity = if let Some(block_proposer) = &mut self.block_proposer {
+            Validity::Invalid
+        } else if let Some(block_proposer) = &mut self.block_proposer {
             block_proposer.add_proposed_value(full_proposal)
         } else if let Some(shard_proposer) = &mut self.shard_proposer {
             shard_proposer.add_proposed_value(full_proposal)
@@ -284,7 +308,7 @@ impl ShardValidator {
             height: full_proposal.height(),
             round: full_proposal.round(),
             valid_round: Round::Nil,
-            proposer: full_proposal.proposer_address(),
+            proposer: full_proposal.proposer_address().clone(),
             value,
             validity,
         }
@@ -295,13 +319,16 @@ impl ShardValidator {
         height: Height,
         round: Round,
         timeout: Duration,
-    ) -> FullProposal {
+    ) -> WellFormedProposal {
         // TODO(aditi): As an optimization, we should only look inside the db on the first height after a restart. We do not need to look here in the steady state.
         match self
             .local_state_store
             .get_proposal(self.shard_id.shard_id(), height, round)
         {
-            Ok(Some(proposal)) => return proposal,
+            Ok(Some(proposal)) => match WellFormedProposal::try_from(proposal) {
+                Ok(proposal) => return proposal,
+                Err(err) => error!("Ignoring malformed proposal stored in db: {}", err),
+            },
             Ok(None) => {}
             Err(err) => {
                 error!("Unable to retrieve proposal from db {}", err.to_string())
@@ -315,7 +342,7 @@ impl ShardValidator {
             panic!("No proposer set");
         };
 
-        if let Err(err) = self.local_state_store.put_proposal(proposal.clone()) {
+        if let Err(err) = self.local_state_store.put_proposal(&proposal) {
             error!("Unable to store proposal {}", err.to_string());
         };
 
@@ -323,7 +350,7 @@ impl ShardValidator {
         proposal
     }
 
-    pub fn get_proposed_value(&mut self, shard_hash: &ShardHash) -> Option<FullProposal> {
+    pub fn get_proposed_value(&mut self, shard_hash: &ShardHash) -> Option<WellFormedProposal> {
         // TODO(aditi): In the future, we may want to look the value up in the db
         if let Some(block_proposer) = &mut self.block_proposer {
             block_proposer.get_proposed_value(shard_hash)

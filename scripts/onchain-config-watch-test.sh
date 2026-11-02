@@ -52,6 +52,10 @@ consume() { # pop and print the first line of $1; fails if empty/missing
 case "$subcmd" in
 version)
     printf '%s\n' "$@" > "$here/fc.version.args"
+    # Like the real CLI, `config version` rejects the pull-only flag.
+    for a in "$@"; do
+        [[ "$a" == "--accept-local-bootstrap-peers-config" ]] && exit 2
+    done
     consume "$here/version-seq" || exit 1
     ;;
 pull)
@@ -189,6 +193,9 @@ echo 8 > "$DIR/bound-seq"
 run_tick ONCHAIN_WATCH_WATERMARK=7 ONCHAIN_CONFIG_ACCEPT_LOCAL_BOOTSTRAP_PEERS=true
 check "accept-local-peers: flag passed to the pull" \
     grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.pull.args"
+check "accept-local-peers: flag kept off the version poll" \
+    not grep -qx -- --accept-local-bootstrap-peers-config "$DIR/fc.version.args"
+check "accept-local-peers: change still triggers a restart" restarted
 
 setup
 echo 8 > "$DIR/version-seq"

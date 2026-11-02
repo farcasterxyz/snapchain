@@ -1,7 +1,7 @@
 use crate::consensus::consensus::{Config, MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
-use crate::consensus::read_validator::Engine;
+use crate::consensus::read_validator::{Engine, ReadValidator};
 use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
 use crate::proto;
@@ -187,22 +187,17 @@ impl SnapchainReadNode {
         }
     }
     pub fn dispatch_decided_value(&self, decided_value: proto::DecidedValue) {
-        let shard_id = match decided_value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => {
-                shard_chunk
-                    .header
-                    .as_ref()
-                    .unwrap()
-                    .height
-                    .unwrap()
-                    .shard_index
-            }
-            proto::decided_value::Value::Block(block) => {
-                block.header.as_ref().unwrap().height.unwrap().shard_index
-            }
+        let Some(height) = ReadValidator::decided_value_height(&decided_value) else {
+            warn!("Dropping decided value with missing header or height");
+            return;
         };
-        let actors = self.consensus_actors.get(&shard_id).unwrap();
-        actors.cast_decided_value(decided_value).unwrap();
+        let Some(actors) = self.consensus_actors.get(&height.shard_index) else {
+            warn!(%height, "Dropping decided value for unknown shard");
+            return;
+        };
+        if let Err(e) = actors.cast_decided_value(decided_value) {
+            warn!(%height, "Failed to forward decided value to actor: {:?}", e);
+        }
     }
 
     pub fn dispatch_network_event(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {

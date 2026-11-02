@@ -274,4 +274,131 @@ mod tests {
         let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
         assert_eq!(num_processed, 0);
     }
+
+    async fn assert_dropped(
+        read_validator: &mut ReadValidator,
+        decided_value: proto::DecidedValue,
+    ) {
+        let last_height = read_validator.last_height;
+        assert_eq!(read_validator.process_decided_value(decided_value).await, 0);
+        assert_eq!(read_validator.last_height, last_height);
+        assert!(read_validator.buffered_blocks.is_empty());
+    }
+
+    fn shard_value(shard_chunk: ShardChunk) -> proto::DecidedValue {
+        proto::DecidedValue {
+            value: Some(proto::decided_value::Value::Shard(shard_chunk)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ignore_missing_value() {
+        let (_, _, mut read_validator, _, _) = setup(0).await;
+        assert_dropped(&mut read_validator, proto::DecidedValue { value: None }).await;
+    }
+
+    #[tokio::test]
+    async fn test_ignore_missing_header_or_height() {
+        let (mut proposer_engine, _, mut read_validator, proposer_keypair, _) = setup(0).await;
+        let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+
+        let mut no_header = shard_chunk.clone();
+        no_header.header = None;
+        assert_dropped(&mut read_validator, shard_value(no_header)).await;
+
+        let mut no_height = shard_chunk.clone();
+        no_height.header.as_mut().unwrap().height = None;
+        assert_dropped(&mut read_validator, shard_value(no_height)).await;
+
+        let no_block_header = proto::DecidedValue {
+            value: Some(proto::decided_value::Value::Block(proto::Block::default())),
+        };
+        assert_dropped(&mut read_validator, no_block_header).await;
+    }
+
+    #[tokio::test]
+    async fn test_ignore_malformed_commits() {
+        let (mut proposer_engine, _, mut read_validator, proposer_keypair, _) = setup(0).await;
+        let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+
+        let mut no_commits = shard_chunk.clone();
+        no_commits.commits = None;
+        assert_dropped(&mut read_validator, shard_value(no_commits)).await;
+
+        let mut no_commit_height = shard_chunk.clone();
+        no_commit_height.commits.as_mut().unwrap().height = None;
+        assert_dropped(&mut read_validator, shard_value(no_commit_height)).await;
+
+        let mut no_commit_value = shard_chunk.clone();
+        no_commit_value.commits.as_mut().unwrap().value = None;
+        assert_dropped(&mut read_validator, shard_value(no_commit_value)).await;
+
+        let mut short_signer = shard_chunk.clone();
+        short_signer.commits.as_mut().unwrap().signatures[0].signer = vec![1, 2, 3];
+        assert_dropped(&mut read_validator, shard_value(short_signer)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ignore_value_for_wrong_engine() {
+        let (mut proposer_engine, _, mut read_validator, proposer_keypair, mut system_rx) =
+            setup(0).await;
+        let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+
+        // Validly signed commits wrapped in a Block, sent to a shard engine
+        let block = proto::Block {
+            header: Some(proto::BlockHeader {
+                height: shard_chunk.header.as_ref().unwrap().height,
+                ..Default::default()
+            }),
+            commits: shard_chunk.commits.clone(),
+            ..Default::default()
+        };
+        let decided_value = proto::DecidedValue {
+            value: Some(proto::decided_value::Value::Block(block)),
+        };
+        assert_dropped(&mut read_validator, decided_value).await;
+        assert!(system_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ignore_value_for_other_shard() {
+        let (mut proposer_engine, _, mut read_validator, proposer_keypair, _) = setup(0).await;
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        shard_chunk
+            .header
+            .as_mut()
+            .unwrap()
+            .height
+            .as_mut()
+            .unwrap()
+            .shard_index += 1;
+        assert_dropped(&mut read_validator, shard_value(shard_chunk)).await;
+    }
+
+    #[test]
+    fn test_decided_value_height() {
+        assert_eq!(
+            ReadValidator::decided_value_height(&proto::DecidedValue { value: None }),
+            None
+        );
+        let height = Height {
+            shard_index: 3,
+            block_number: 7,
+        };
+        let shard_chunk = ShardChunk {
+            header: Some(proto::ShardHeader {
+                height: Some(height),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            ReadValidator::decided_value_height(&shard_value(shard_chunk)),
+            Some(height)
+        );
+        assert_eq!(
+            ReadValidator::decided_value_height(&shard_value(ShardChunk::default())),
+            None
+        );
+    }
 }

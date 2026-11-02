@@ -25,6 +25,7 @@ fn state_change_to_shard_chunk(
             }),
             timestamp: 0,
             parent_hash: vec![], // TODO
+            transactions_root: vec![],
         }),
         transactions: change.transactions.clone(),
         hash: vec![],

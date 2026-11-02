@@ -18,9 +18,16 @@ pub type ValidatorPeerIds = HashMap<PeerId, Vec<u8>>;
 /// hex-encoded Ed25519 public key. Returns `None` for malformed keys.
 pub fn peer_id_from_validator_hex(hex_key: &str) -> Option<(PeerId, Vec<u8>)> {
     let bytes = hex::decode(hex_key).ok()?;
-    let ed = libp2p::identity::ed25519::PublicKey::try_from_bytes(&bytes).ok()?;
+    let peer_id = peer_id_from_validator_key(&bytes)?;
+    Some((peer_id, bytes))
+}
+
+/// Derive the libp2p `PeerId` for a validator's raw Ed25519 public key. Returns `None` for
+/// malformed keys.
+pub fn peer_id_from_validator_key(key: &[u8]) -> Option<PeerId> {
+    let ed = libp2p::identity::ed25519::PublicKey::try_from_bytes(key).ok()?;
     let public: libp2p::identity::PublicKey = ed.into();
-    Some((public.to_peer_id(), bytes))
+    Some(public.to_peer_id())
 }
 
 /// Build the validator `PeerId` index from the configured validator public

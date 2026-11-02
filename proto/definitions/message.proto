@@ -151,6 +151,15 @@ message CastAddBody {
   repeated uint32 mentions_positions = 5; // Positions of the mentions in the text
   repeated Embed embeds = 6; // URLs or cast ids to be embedded in the cast
   CastType type = 8; // Type of cast
+  uint32 format_version = 9; // How to read the text. 0 = plain text
+  optional ChainCast chain = 10; // Set on every cast of a chain
+}
+
+/** Places a cast in an ordered chain of casts by one author */
+message ChainCast {
+  CastId root = 1; // The first cast of the chain. Absent on that cast itself (index 0)
+  uint32 index = 2; // Position in the chain, from 0
+  uint32 count = 3; // Number of casts in the chain. 0 = the chain is still growing
 }
 
 /** Removes an existing Cast */

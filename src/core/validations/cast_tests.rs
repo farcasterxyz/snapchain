@@ -114,6 +114,8 @@ mod tests {
                         hash: hex::decode(p.hash.replace("0x", "")).unwrap(),
                     })
                 }),
+                format_version: 0,
+                chain: None,
             };
             // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
             // The fixtures predate the embed-limit change, so validate them at V19 — the version
@@ -188,6 +190,52 @@ mod tests {
                 Err(ValidationError::EmbedsExceedsLimit)
             ));
             assert!(validate_embeds(4, is_pro_user, EngineVersion::latest()).is_ok());
+        }
+    }
+
+    fn cast_with_text(
+        text: String,
+        cast_type: crate::proto::CastType,
+    ) -> crate::proto::CastAddBody {
+        crate::proto::CastAddBody {
+            text,
+            r#type: cast_type as i32,
+            ..Default::default()
+        }
+    }
+
+    /// Pins both sides of the `UngateProMessageVariants` boundary for the cast type itself. The
+    /// pre-V21 rows keep replay of existing history identical: a non-Pro 10k cast was invalid when
+    /// it would have been signed, and must stay invalid forever at that version.
+    #[test]
+    fn ten_k_casts_are_open_to_everyone_from_v21() {
+        use crate::proto::CastType;
+        use validations::error::ValidationError;
+
+        let validate = |text: String, is_pro_user: bool, version: EngineVersion| {
+            validations::cast::validate_cast_add_body(
+                &cast_with_text(text, CastType::TenKCast),
+                false,
+                is_pro_user,
+                version,
+            )
+        };
+
+        // Below the boundary: Pro only.
+        assert_eq!(
+            validate("a".repeat(5_000), false, EngineVersion::V20),
+            Err(ValidationError::ProUserFeature)
+        );
+        assert!(validate("a".repeat(5_000), true, EngineVersion::V20).is_ok());
+
+        // At and above the boundary: everyone, Pro or not, with the length bounds unchanged.
+        for version in [EngineVersion::V21, EngineVersion::latest()] {
+            for is_pro_user in [false, true] {
+                assert!(validate("a".repeat(10_000), is_pro_user, version).is_ok());
+                assert!(validate("a".repeat(1_025), is_pro_user, version).is_ok());
+                assert!(validate("a".repeat(10_001), is_pro_user, version).is_err());
+                assert!(validate("a".repeat(1_024), is_pro_user, version).is_err());
+            }
         }
     }
 }

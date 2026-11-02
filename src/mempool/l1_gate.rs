@@ -41,16 +41,13 @@ use tracing::{debug, error, warn};
 
 use crate::connectors::onchain_events::Chain;
 use crate::core::error::HubError;
-use crate::core::util::FarcasterTime;
-use crate::core::validations;
 use crate::mempool::l1_validator::{L1CacheConfig, L1ValidationError, L1Validator};
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{validate_gossiped_message, MempoolRequest, MempoolSource};
 use crate::proto::{self, FarcasterNetwork};
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::get_active_key;
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::EngineVersion;
 
 type DirectRateLimiter = RateLimiter<NotKeyed, InMemoryState, QuantaClock>;
 
@@ -279,16 +276,8 @@ impl GossipL1GateWorker {
     }
 
     fn precheck(&self, message: &proto::Message) -> Result<(), Refusal> {
-        // Consensus decides pro status. Claiming it here only relaxes limits,
-        // so the gate never refuses what consensus would accept.
-        validations::message::validate_message(
-            message,
-            self.network,
-            true,
-            &FarcasterTime::current(),
-            EngineVersion::current(self.network),
-        )
-        .map_err(|_| Refusal::Rejected("invalid_message"))?;
+        validate_gossiped_message(message, self.network)
+            .map_err(|_| Refusal::Rejected("invalid_message"))?;
 
         let fid = message.fid();
         let stores = self

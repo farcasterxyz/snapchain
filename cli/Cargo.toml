@@ -16,7 +16,7 @@ snapchain-proto = { path = "../proto" }
 tokio = { version = "1.40.0", features = ["full"] }
 tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
 rustls = { version = "0.23", features = ["ring"] }
-reqwest = { version = "0.12.9", features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "charset", "http2", "system-proxy", "rustls-no-provider"] }
 prost = "0.13.3"
 
 # CLI parsing

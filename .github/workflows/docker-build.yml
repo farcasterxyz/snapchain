@@ -16,11 +16,11 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dorny/paths-filter@v4
@@ -34,6 +34,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain*'
               - 'Dockerfile'
+              - 'Dockerfile.distroless'
               - '.dockerignore'
               - '.github/workflows/docker-build.yml'
               - '.github/workflows/docker-build-impl.yml'
@@ -47,7 +48,7 @@ jobs:
   docker-build-required:
     needs: [changes, build]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Evaluate docker build result
         env:

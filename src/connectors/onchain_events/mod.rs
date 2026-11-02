@@ -1918,6 +1918,10 @@ mod tests {
             dir.path().join("test.db").to_str().unwrap(),
         ));
         db.open().unwrap();
+        // reqwest panics without a process-wide rustls provider.
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
         Subscriber {
             provider: RootProvider::new_http("http://127.0.0.1:1".parse().unwrap()),
             mempool_tx,
@@ -2052,9 +2056,9 @@ mod tests {
             "devnet activates channel registrations at genesis, so a bad registry is fatal there"
         );
 
-        // Mainnet and testnet have no V21 entry scheduled yet. Asserted via
+        // Mainnet and testnet have no V24 entry scheduled yet. Asserted via
         // `channel_registrations_active` rather than a pinned version so this
-        // starts reporting `true` — correctly — the moment V21 is scheduled,
+        // starts reporting `true` — correctly — the moment V24 is scheduled,
         // rather than failing.
         for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
             let subscriber = offline_subscriber_on(

@@ -1,4 +1,3 @@
-use prost::Message;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -7,7 +6,7 @@ use tracing::{error, info, warn};
 
 use crate::consensus::consensus::SystemMessage;
 use crate::consensus::validator::StoredValidatorSets;
-use crate::core::util::verify_signatures;
+use crate::core::util::{block_events_match_hash, verify_signatures};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{hub_event, Block, HubEvent};
 use crate::storage::store::{mempool_poller::MempoolMessage, stores::Stores};
@@ -72,26 +71,7 @@ impl BlockReceiver {
             return true;
         }
 
-        let mut events_hasher = blake3::Hasher::new();
-        for event in &block.events {
-            if event.data.is_none() {
-                return false;
-            }
-
-            if event.hash
-                != blake3::hash(&event.data.as_ref().unwrap().encode_to_vec())
-                    .as_bytes()
-                    .to_vec()
-            {
-                return false;
-            }
-
-            events_hasher.update(&event.hash);
-        }
-
-        if block.header.as_ref().unwrap().events_hash
-            != events_hasher.finalize().as_bytes().to_vec()
-        {
+        if !block_events_match_hash(&block.events, &block.header.as_ref().unwrap().events_hash) {
             return false;
         }
 

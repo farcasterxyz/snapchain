@@ -1,5 +1,5 @@
 use crate::core::types::Height;
-use crate::core::util::FarcasterTime;
+use crate::core::util::{expected_transactions_root, FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, Block, BlockEvent, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness,
@@ -12,6 +12,7 @@ use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::utils::factory::events_factory;
+use crate::version::version::EngineVersion;
 use ed25519_dalek::{SecretKey, SigningKey};
 use hex::FromHex;
 use prost::Message;
@@ -93,6 +94,7 @@ pub fn default_block() -> Block {
             chain_id: 0,
             version: 0,
             shard_witnesses_hash: vec![],
+            transactions_root: vec![],
         }),
         shard_witness: Some(ShardWitness {
             shard_chunk_witnesses: vec![],
@@ -114,6 +116,10 @@ pub fn state_change_to_block(block_number: u64, change: &BlockStateChange) -> Bl
         block_number,
     });
     block.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
+    block.header.as_mut().unwrap().transactions_root = expected_transactions_root(
+        &change.transactions,
+        EngineVersion::version_for(&change.timestamp, FarcasterNetwork::Devnet),
+    );
     block.transactions = change.transactions.clone();
     block.events = change.events.clone();
     block

@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, IsTerminal, Read};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
@@ -301,7 +301,7 @@ pub async fn download_snapshots(
     main_pb.set_style(main_style);
 
     // Check if we're in a TTY environment - if not, disable progress bars
-    let use_progress_bars = atty::is(atty::Stream::Stdout);
+    let use_progress_bars = io::stdout().is_terminal();
     let global_start = SystemTime::now();
     if !use_progress_bars {
         info!("No TTY detected, progress will be logged instead of shown as progress bars");

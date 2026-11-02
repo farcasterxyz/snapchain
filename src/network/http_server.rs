@@ -29,7 +29,7 @@ use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
     reaction_request, reactions_by_target_request, GetConnectedPeersRequest, Protocol,
 };
-use crate::storage::store::account::message_decode;
+use crate::storage::store::account::{message_bytes_decode, message_decode};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -211,6 +211,18 @@ pub struct CastAddBody {
     pub mentions_positions: Vec<u32>,
     #[serde(rename = "type")]
     pub cast_type: String,
+    #[serde(rename = "formatVersion", skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainCast>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChainCast {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<CastId>,
+    pub index: u32,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2424,6 +2436,15 @@ fn map_proto_cast_add_body_to_json_cast_add_body(
                 error_detail: None,
                 status: None,
             })?,
+        format_version: (cast_add_body.format_version > 0).then_some(cast_add_body.format_version),
+        chain: cast_add_body.chain.map(|chain| ChainCast {
+            root: chain.root.map(|root| CastId {
+                fid: root.fid,
+                hash: format!("0x{}", hex::encode(root.hash)),
+            }),
+            index: chain.index,
+            count: chain.count,
+        }),
     })
 }
 
@@ -3408,8 +3429,14 @@ fn map_proto_message_data_to_json_message_data(
     }
 }
 
-fn map_proto_message_to_json_message(message: proto::Message) -> Result<Message, ErrorResponse> {
-    match message.data {
+fn map_proto_message_to_json_message(
+    mut message: proto::Message,
+) -> Result<Message, ErrorResponse> {
+    // Map the signed `data_bytes` when present: HTTP has no `data_bytes`, and before ChainedCasts a
+    // block's `data` has no `format_version` or `chain`.
+    let block_data = message.data.take();
+    message_bytes_decode(&mut message);
+    match message.data.or(block_data) {
         Some(message_data) => {
             let result = map_proto_message_data_to_json_message_data(message_data)?;
             Ok(Message {
@@ -5794,6 +5821,54 @@ mod tests {
             network: proto::FarcasterNetwork::Testnet as i32,
             body: Some(body),
         }
+    }
+
+    #[test]
+    fn cast_add_json_takes_format_version_and_chain_from_data_bytes() {
+        use prost::Message as _;
+        let mut data = sample_message_data(Body::CastAddBody(proto::CastAddBody {
+            text: "Part two.".to_string(),
+            format_version: 1,
+            chain: Some(proto::ChainCast {
+                root: Some(proto::CastId {
+                    fid: 1108653,
+                    hash: vec![0x22; 20],
+                }),
+                index: 1,
+                count: 3,
+            }),
+            ..Default::default()
+        }));
+        data.r#type = MessageType::CastAdd as i32;
+        let data_bytes = data.encode_to_vec();
+        // A block's `data` before ChainedCasts, which has neither field.
+        if let Some(Body::CastAddBody(body)) = &mut data.body {
+            body.format_version = 0;
+            body.chain = None;
+        }
+        let cast_json = |data_bytes| {
+            let message = map_proto_message_to_json_message(proto::Message {
+                data: Some(data.clone()),
+                data_bytes,
+                ..Default::default()
+            })
+            .expect("cast maps");
+            serde_json::to_value(message).expect("serialize Message")["data"]["castAddBody"].clone()
+        };
+
+        let body = cast_json(Some(data_bytes));
+        assert_eq!(body["formatVersion"], 1);
+        assert_eq!(
+            body["chain"],
+            serde_json::json!({
+                "root": { "fid": 1108653, "hash": format!("0x{}", "22".repeat(20)) },
+                "index": 1,
+                "count": 3
+            })
+        );
+        // Plain text and no chain: neither key.
+        let body = cast_json(None);
+        assert!(body.get("formatVersion").is_none() && body.get("chain").is_none());
     }
 
     #[test]

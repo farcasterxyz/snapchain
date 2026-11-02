@@ -27,6 +27,7 @@ use snapchain::storage::store::stores::Stores;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
@@ -247,6 +248,25 @@ fn is_dir_empty(path: &str) -> std::io::Result<bool> {
     Ok(entries.next().is_none())
 }
 
+/// Spawns a task the node cannot run without. If it ever returns or panics, the node exits
+/// with an error so its supervisor restarts it, rather than running on without it.
+fn spawn_critical<F>(name: &'static str, task: F, system_tx: mpsc::Sender<SystemMessage>)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        let reason = match handle.await {
+            Ok(()) => format!("{} task exited", name),
+            Err(err) => format!("{} task failed: {}", name, err),
+        };
+        if let Err(err) = system_tx.send(SystemMessage::ExitWithError(reason)).await {
+            error!("Could not request exit after {} task ended: {}", name, err);
+            process::exit(1);
+        }
+    });
+}
+
 fn create_replicator(
     app_config: &snapchain::cfg::Config,
     shard_stores: HashMap<u32, Stores>,
@@ -285,6 +305,10 @@ fn create_replicator(
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Initialize rustls before any HTTPS or gRPC.
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .expect("Failed to install rustls crypto provider");
+
     let args: Vec<String> = std::env::args().collect();
 
     let app_config = match snapchain::cfg::load_and_merge_config(args) {
@@ -370,15 +394,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                use rustls::crypto::{self, ring};
                 use snapchain::bootstrap::replication::service::{
                     ReplicatorBootstrap, WorkUnitResponse,
                 };
                 use tokio::time::{sleep, Duration};
-
-                // Initialize SSL for rustls
-                crypto::CryptoProvider::install_default(ring::default_provider())
-                    .expect("Failed to install rustls crypto provider");
 
                 info!("Starting node with replication bootstrap");
                 let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
@@ -491,11 +510,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Driving it in parallel with shard DB init lets QUIC keep-alives and
     // gossipsub control messages flow during the heavy boot window, instead
     // of being deferred until after all RocksDB stores are open.
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
-    });
+    spawn_critical(
+        "Gossip",
+        async move {
+            info!("Starting gossip");
+            gossip.start().await;
+        },
+        system_tx.clone(),
+    );
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -563,7 +585,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.fc_network,
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         // Setup replication if enabled
         let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
@@ -727,7 +753,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_rx,
             statsd_client.clone(),
         );
-        tokio::spawn(async move { mempool.run().await });
+        spawn_critical(
+            "Mempool",
+            async move { mempool.run().await },
+            system_tx.clone(),
+        );
 
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(

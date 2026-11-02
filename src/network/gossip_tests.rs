@@ -1,11 +1,16 @@
 use crate::consensus::consensus::SystemMessage;
-use crate::core::types::SnapchainValidatorContext;
+use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::core::types::{Height, SnapchainValidatorContext};
+use crate::core::util::shard_chunk_hash;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
-use crate::proto::{FarcasterNetwork, Message, MessageData};
+use crate::proto::{
+    full_proposal, FarcasterNetwork, FullProposal, Message, MessageData, ShardChunk, ShardHeader,
+};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::utils::factory::messages_factory;
+use informalsystems_malachitebft_network::{Channel, PeerId as MalachitePeerId, PeerIdExt};
 use libp2p::identity::ed25519::Keypair;
 use prost::Message as _;
 use serial_test::serial;
@@ -800,4 +805,216 @@ async fn test_read_node_relays_mempool_gossip() {
         received,
         "validator did not receive mempool gossip relayed through read_node_2 within deadline"
     );
+}
+
+fn full_proposal_from(proposer: &Keypair) -> FullProposal {
+    let header = ShardHeader {
+        height: Some(Height::new(1, 1)),
+        timestamp: 0,
+        parent_hash: vec![],
+        shard_root: vec![],
+        transactions_root: vec![],
+    };
+    FullProposal {
+        height: header.height,
+        round: 0,
+        proposer: proposer.public().to_bytes().to_vec(),
+        proposed_value: Some(full_proposal::ProposedValue::Shard(ShardChunk {
+            hash: shard_chunk_hash(&header),
+            header: Some(header),
+            transactions: vec![],
+            commits: None,
+        })),
+    }
+}
+
+/// A full proposal reaches consensus only when its gossip author is the proposer it names,
+/// and it is attributed to that author.
+#[tokio::test]
+#[serial]
+async fn test_full_proposal_must_be_published_by_its_proposer() {
+    let publisher_keypair = Keypair::generate();
+    let receiver_keypair = Keypair::generate();
+    let other_validator = Keypair::generate();
+
+    let publisher_addr = format!(
+        "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
+        BASE_PORT_FOR_TEST + 42
+    );
+    let receiver_addr = format!(
+        "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
+        BASE_PORT_FOR_TEST + 43
+    );
+
+    let (publisher_system_tx, _) = mpsc::channel::<SystemMessage>(100);
+    let (receiver_system_tx, mut receiver_system_rx) = mpsc::channel::<SystemMessage>(100);
+    let mut publisher = SnapchainGossip::create(
+        publisher_keypair.clone(),
+        &Config::new(publisher_addr.clone(), receiver_addr.clone()),
+        Some(publisher_system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let mut receiver = SnapchainGossip::create(
+        receiver_keypair,
+        &Config::new(receiver_addr, publisher_addr),
+        Some(receiver_system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let publisher_tx = publisher.tx.clone();
+    tokio::spawn(async move { publisher.start().await });
+    tokio::spawn(async move { receiver.start().await });
+
+    let own = full_proposal_from(&publisher_keypair);
+    let impersonated = full_proposal_from(&other_validator);
+    let publisher_task = tokio::spawn(async move {
+        loop {
+            for proposal in [&impersonated, &own] {
+                if publisher_tx
+                    .send(GossipEvent::BroadcastFullProposal(proposal.clone()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+
+    let publisher_peer_id = MalachitePeerId::from_libp2p(
+        &libp2p::identity::PublicKey::from(publisher_keypair.public()).to_peer_id(),
+    );
+    let mut received_own = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let Ok(Some(SystemMessage::MalachiteNetwork(
+            _,
+            MalachiteNetworkEvent::Message(Channel::ProposalParts, from, bytes),
+        ))) = tokio::time::timeout(Duration::from_millis(200), receiver_system_rx.recv()).await
+        else {
+            continue;
+        };
+        let proposal = FullProposal::decode(bytes).unwrap();
+        assert_eq!(
+            proposal.proposer,
+            publisher_keypair.public().to_bytes().to_vec(),
+            "delivered a full proposal not published by its proposer"
+        );
+        assert_eq!(from, publisher_peer_id);
+        received_own = true;
+    }
+    publisher_task.abort();
+    assert!(
+        received_own,
+        "proposer's own full proposal was not delivered"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_malformed_gossip_messages_are_dropped() {
+    use crate::proto::{
+        full_proposal::ProposedValue, gossip_message, ContactInfo, ContactInfoBody, FullProposal,
+        GossipMessage, Height,
+    };
+    use crate::utils::factory::shard_chunk_factory;
+    use libp2p::PeerId;
+
+    let addr = format!(
+        "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
+        BASE_PORT_FOR_TEST + 40
+    );
+    let config = Config::new(addr.clone(), addr);
+    let (system_tx, _system_rx) = mpsc::channel::<SystemMessage>(100);
+    let mut gossip = SnapchainGossip::create(
+        Keypair::generate(),
+        &config,
+        Some(system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let peer = PeerId::random();
+    let proposer = Keypair::generate();
+    let author = Some(libp2p::identity::PublicKey::from(proposer.public()).to_peer_id());
+
+    let encode = |message| {
+        GossipMessage {
+            gossip_message: Some(message),
+        }
+        .encode_to_vec()
+    };
+    let well_formed = FullProposal {
+        height: Some(Height::new(1, 1)),
+        round: 0,
+        proposer: proposer.public().to_bytes().to_vec(),
+        proposed_value: Some(ProposedValue::Shard(
+            shard_chunk_factory::create_shard_chunk(1, Some(1), Some(0)),
+        )),
+    };
+
+    let forwarded = gossip.map_gossip_bytes_to_system_message(
+        peer,
+        author,
+        encode(gossip_message::GossipMessage::FullProposal(
+            well_formed.clone(),
+        )),
+    );
+    assert!(matches!(
+        forwarded,
+        Some(SystemMessage::MalachiteNetwork(_, _))
+    ));
+
+    let malformed = [
+        FullProposal {
+            height: None,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            proposed_value: None,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            round: -1,
+            ..well_formed.clone()
+        },
+        FullProposal {
+            round: u32::MAX as i64 + 1,
+            ..well_formed.clone()
+        },
+    ];
+    for proposal in malformed {
+        let forwarded = gossip.map_gossip_bytes_to_system_message(
+            peer,
+            author,
+            encode(gossip_message::GossipMessage::FullProposal(
+                proposal.clone(),
+            )),
+        );
+        assert!(forwarded.is_none(), "forwarded {proposal:?}");
+    }
+
+    let contact_info = gossip.map_gossip_bytes_to_system_message(
+        peer,
+        author,
+        encode(gossip_message::GossipMessage::ContactInfoMessage(
+            ContactInfo {
+                body: Some(ContactInfoBody {
+                    peer_id: vec![1, 2, 3],
+                    ..Default::default()
+                }),
+            },
+        )),
+    );
+    assert!(contact_info.is_none());
 }

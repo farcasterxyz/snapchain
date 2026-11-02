@@ -188,6 +188,25 @@ impl ReadSync {
         )
     }
 
+    fn decode_value_response(
+        value_response: &sync::ValueResponse<SnapchainValidatorContext>,
+    ) -> Result<proto::decided_value::Value, String> {
+        let decided_value = value_response
+            .value
+            .as_ref()
+            .ok_or("Missing value in response")?;
+        let value_bytes = decided_value.value_bytes.as_ref();
+        if decided_value.certificate.value_id.shard_index == 0 {
+            proto::Block::decode(value_bytes)
+                .map(proto::decided_value::Value::Block)
+                .map_err(|err| err.to_string())
+        } else {
+            proto::ShardChunk::decode(value_bytes)
+                .map(proto::decided_value::Value::Shard)
+                .map_err(|err| err.to_string())
+        }
+    }
+
     async fn get_history_min_height(&self) -> Result<Height, ActorProcessingErr> {
         ractor::call!(self.host, |reply_to| ReadHostMsg::GetHistoryMinHeight {
             reply_to
@@ -342,23 +361,21 @@ impl ReadSync {
 
                 match response {
                     Response::ValueResponse(value_response) => {
-                        let decided_value = value_response.value.as_ref().unwrap();
-                        let value_bytes =
-                            value_response.value.as_ref().unwrap().value_bytes.as_ref();
-                        let value = if decided_value.certificate.value_id.shard_index == 0 {
-                            proto::decided_value::Value::Block(
-                                proto::Block::decode(value_bytes).unwrap(),
-                            )
-                        } else {
-                            proto::decided_value::Value::Shard(
-                                proto::ShardChunk::decode(value_bytes).unwrap(),
-                            )
-                        };
-                        debug!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
-                        self.host.cast(ReadHostMsg::ProcessDecidedValue {
-                            value: proto::DecidedValue { value: Some(value) },
-                            sync: myself.clone(),
-                        })?;
+                        // Responses come from arbitrary peers. A malformed one is dropped here but
+                        // still handed to the sync state machine, which clears the pending request so
+                        // the height is re-requested.
+                        match Self::decode_value_response(&value_response) {
+                            Ok(value) => {
+                                debug!(peer_id = %peer, height = %value_response.height, "Received sync value response");
+                                self.host.cast(ReadHostMsg::ProcessDecidedValue {
+                                    value: proto::DecidedValue { value: Some(value) },
+                                    sync: myself.clone(),
+                                })?;
+                            }
+                            Err(err) => {
+                                warn!(peer_id = %peer, height = %value_response.height, "Dropping malformed sync value response: {}", err);
+                            }
+                        }
                         self.process_input(
                             &myself,
                             state,

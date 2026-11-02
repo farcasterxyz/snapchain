@@ -52,6 +52,10 @@ pub enum ValidationError {
     TextTooLongFor10kCast,
     #[error("invalid cast type")]
     InvalidCastType,
+    #[error("chain index out of range")]
+    ChainIndexOutOfRange,
+    #[error("chain root must be absent at index 0 and the author's own cast otherwise")]
+    ChainRootInvalid,
     #[error("string embeds > 2")]
     StringEmbedsExceedsLimit,
     #[error("url < 1 byte")]

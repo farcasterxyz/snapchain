@@ -2,10 +2,13 @@ use crate::core::util::FarcasterTime;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
-    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, StorageUnitType,
-    UserDataBody, UserDataType, UserNameType,
+    self, FarcasterNetwork, FrameActionBody, MessageType, StorageUnitType, UserDataBody,
+    UserDataType, UserNameType,
 };
-use crate::storage::store::account::{CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH};
+use crate::storage::store::account::{
+    decode_message_data, drop_unknown_data_fields, CHANNEL_ID_LENGTH,
+    CHANNEL_MODERATE_CAST_HASH_LENGTH,
+};
 use crate::storage::util::{blake3_20, bytes_compare};
 
 use super::{cast, key, link, reaction, verification};
@@ -103,13 +106,13 @@ pub fn validate_message(
     version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let data_bytes;
-    let message_data;
+    let mut message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
         if data_bytes.is_empty() {
             return Err(ValidationError::MissingData);
         }
-        match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
+        match decode_message_data(message.data_bytes.as_ref().unwrap(), Some(version)) {
             Ok(data) => {
                 message_data = data.clone();
             }
@@ -121,15 +124,19 @@ pub fn validate_message(
         if message.data.is_none() {
             return Err(ValidationError::MissingData);
         }
-        data_bytes = message.data.as_ref().unwrap().encode_to_vec();
         message_data = message.data.as_ref().unwrap().clone();
+        // Older nodes skip added fields as unknown, so they size and hash `data` without them.
+        drop_unknown_data_fields(&mut message_data, version);
+        data_bytes = message_data.encode_to_vec();
     }
 
     let max_data_size =
         if version.is_enabled(crate::version::version::ProtocolFeature::MessageLengthCheckFix) {
             if message_data.r#type() == MessageType::LinkCompactState {
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
-            } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
+            } else if message_data.r#type() == MessageType::CastAdd
+                && (is_pro_user || version.is_enabled(ProtocolFeature::UngateProMessageVariants))
+            {
                 MAX_DATA_BYTES_FOR_10K_CAST
             } else if message_data.r#type() == MessageType::UsernameProof
                 && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
@@ -208,6 +215,11 @@ pub fn validate_message(
                 is_pro_user,
                 version,
             )?;
+            if let Some(chain) = &cast_add_body.chain {
+                if version.is_enabled(ProtocolFeature::ChainedCasts) {
+                    cast::validate_chain(chain, message_data.fid)?;
+                }
+            }
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {
             cast::validate_cast_remove_body(&cast_remove_body)?;
@@ -675,7 +687,7 @@ pub fn validate_user_data_add_body(
             }
         }
         UserDataType::Banner => {
-            if !is_pro_user {
+            if !is_pro_user && !version.is_enabled(ProtocolFeature::UngateProMessageVariants) {
                 return Err(ValidationError::ProUserFeature);
             }
             if value_bytes.len() > 256 {

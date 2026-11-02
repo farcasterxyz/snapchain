@@ -1,6 +1,6 @@
 use crate::core::validations::error::ValidationError;
 use crate::proto::cast_add_body::Parent;
-use crate::proto::{embed, CastAddBody, CastRemoveBody, CastType, Embed};
+use crate::proto::{embed, CastAddBody, CastRemoveBody, CastType, ChainCast, Embed};
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use std::result::Result;
 
@@ -24,7 +24,9 @@ pub fn validate_cast_add_body(
         Ok(CastType::LongCast) if text_bytes.len() <= 320 => {
             return Err(ValidationError::TextTooShortForLongCast);
         }
-        Ok(CastType::TenKCast) if !is_pro_user => {
+        Ok(CastType::TenKCast)
+            if !is_pro_user && !version.is_enabled(ProtocolFeature::UngateProMessageVariants) =>
+        {
             return Err(ValidationError::ProUserFeature);
         }
         Ok(CastType::TenKCast) if text_bytes.len() > 10_000 => {
@@ -108,6 +110,30 @@ pub fn validate_cast_add_body(
     }
 
     Ok(())
+}
+
+/// Most casts in one chain. Raising it later is a versioned loosening; lowering it is never safe.
+pub const MAX_CHAIN_PARTS: u32 = 100;
+
+pub fn validate_chain(chain: &ChainCast, fid: u64) -> Result<(), ValidationError> {
+    if chain.count > MAX_CHAIN_PARTS
+        || chain.index >= MAX_CHAIN_PARTS
+        || (chain.count > 0 && chain.index >= chain.count)
+    {
+        return Err(ValidationError::ChainIndexOutOfRange);
+    }
+    match (&chain.root, chain.index) {
+        (None, 0) => Ok(()),
+        (Some(root), index) if index > 0 => {
+            validate_cast_id(root)?;
+            if root.fid == fid {
+                Ok(())
+            } else {
+                Err(ValidationError::ChainRootInvalid)
+            }
+        }
+        _ => Err(ValidationError::ChainRootInvalid),
+    }
 }
 
 pub fn validate_cast_remove_body(body: &CastRemoveBody) -> Result<(), ValidationError> {

@@ -1,0 +1,36 @@
+# Trivy configuration, loaded automatically by `trivy fs .` from the repo root.
+# Docs: https://trivy.dev/latest/docs/references/configuration/config-file/
+
+scan:
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+  # Build output, local node data, and agent worktrees are not part of the
+  # shipped source and would otherwise produce duplicate or false-positive
+  # findings (e.g. generated node keys under nodes/).
+  skip-dirs:
+    - target
+    - .target_local
+    - .rocks
+    - .rocks.snapshot
+    - nodes
+    - coverage
+    - grafana/data
+    - .claude
+    - scratch
+    - "**/node_modules"
+
+severity:
+  - CRITICAL
+  - HIGH
+  - MEDIUM
+
+vulnerability:
+  ignore-unfixed: true
+
+misconfiguration:
+  scanners:
+    - dockerfile
+
+exit-code: 1

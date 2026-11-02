@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-10-28
+
+### 🐛 Bug Fixes
+
+- *(scripts)* Unblind the onchain-config watcher and ship fc in the distroless image (NS-367, NS-1893) (#1088)
+- *(consensus)* Tighten validation of decided values and peer messages (#1089)
+- *(consensus)* Tighten proposal caching, proposer checks and sync peers (NS-1973) (#1091)
+- *(consensus)* Require a checked proposal wherever its height, round or hash is read (NS-675) (#1090)
+
+### 💼 Other
+
+- Slimmer snapchain image without a shell (#1085)
+
+## [0.15.0] - 2026-10-23
+
+### 🚀 Features
+
+- *(cast)* Allow 10k casts and banners for all users, not just Pro (#1054)
+- *(cast)* Add format_version and an optional chain field to casts (FIP: Cast Format and Chained Casts) (#1074)
+- *(cli)* Add chain and format_version flags to fc cast-add (#1082)
+
+### 🐛 Bug Fixes
+
+- *(read-node)* Drop malformed decided values instead of panicking (#1070)
+- *(mempool)* Validate gossiped messages and supervise the mempool task (#1071)
+
+### 🧪 Testing
+
+- *(consensus)* Cover the V21/V22 cutover and gossip trust boundaries end to end (#1078)
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip coverage comment and cache push on fork PRs (#1075)
+- *(version)* Schedule V21 and V22 on testnet for 2026-10-22 12:00 UTC (#1079)
+- *(version)* Schedule V21 and V22 on mainnet for 2026-10-23 12:00 UTC (#1083)
+
 ## [0.14.3] - 2026-10-15
 
 ### 🐛 Bug Fixes
