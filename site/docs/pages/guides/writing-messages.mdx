@@ -276,11 +276,14 @@ If the node rejects the message, the error is usually one of:
 
 | Error | Cause |
 | --- | --- |
-| `nonce is not greater than stored nonce` | Another `KEY_ADD` or `KEY_REMOVE` landed first. Re-read `currentUserNonce` and retry. |
+| `gasless-key nonce <n> is not greater than stored nonce <m>` | Another `KEY_ADD` or `KEY_REMOVE` landed first. Re-read `currentUserNonce` and retry. |
 | `invalid signature` | The `KeyAdd` signature did not recover the fid's custody address. Check that the custody key matches `idOf(address)`. |
-| `invalid signed key request` | The metadata is malformed, or `requestSigner` is not the custody address of `requestFid`. |
-| `invalid scope` | A scope is not an admissible message type. `KEY_ADD` / `KEY_REMOVE` are always rejected. |
-| `active key cap exceeded` | The fid already holds 1000 active gasless keys. |
+| `SignedKeyRequest metadata is malformed or signature does not verify` | The metadata does not decode, its signature does not recover `requestSigner`, or `requestFid` is not a registered fid. Metadata from `getSignedKeyRequestMetadata()` fails here (see the warning above). |
+| `requestSigner does not match custody address of requestFid` | The metadata is validly signed, but not by the current custody address of `requestFid`. |
+| `SignedKeyRequest deadline has expired` | The metadata `deadline` is earlier than the `KEY_ADD` message timestamp. Both are Farcaster time. |
+| `scope "<n>" is not a valid MessageType` | Scope `<n>` is not an admissible message type. `KEY_ADD` (16) and `KEY_REMOVE` (17) are always rejected. |
+| `active-key cap exceeded: 1000 keys per FID` | The fid already holds 1000 active gasless keys. |
+| `rate limit exceeded for FID <fid>` | Nodes accept one `KEY_ADD` per fid per minute. Wait 60 seconds before retrying. `KEY_REMOVE` is not rate limited. |
 
 ### Revoking a gasless signer
 
