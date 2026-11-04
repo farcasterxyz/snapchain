@@ -9,7 +9,7 @@ ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
 apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --only-upgrade apt && \
-apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake || exit 1
+apt-get -o Acquire::Retries=0 install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake || exit 1
 cargo install cargo-chef --locked
 cd ..
 git clone $MALACHITE_GIT_REPO_URL
