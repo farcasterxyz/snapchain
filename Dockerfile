@@ -8,8 +8,8 @@ ARG MALACHITE_GIT_REF=58730933edc170a395e6a905d791fac4666da192
 ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
-echo 'Acquire::Retries "0";' > /etc/apt/apt.conf.d/99-cve-2026-109518 && \
-apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
+apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --only-upgrade apt && \
+apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
 cargo install cargo-chef --locked
 cd ..
 git clone $MALACHITE_GIT_REPO_URL
@@ -58,6 +58,7 @@ ARG TARGETARCH
 # tonic's `tls-native-roots` reads the system trust store at runtime.
 RUN <<EOF
   set -eu
+  # Ubuntu's fixed apt is not on the mirrors yet; switch to apt-get install --only-upgrade apt once its security archive serves it.
   echo 'Acquire::Retries "0";' > /etc/apt/apt.conf.d/99-cve-2026-109518 && \
   apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
   curl -fL https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_${TARGETOS}_${TARGETARCH}.deb > grpcurl.deb
