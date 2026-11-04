@@ -8,6 +8,7 @@ ARG MALACHITE_GIT_REF=58730933edc170a395e6a905d791fac4666da192
 ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
+echo 'Acquire::Retries "0";' > /etc/apt/apt.conf.d/99-cve-2026-109518 && \
 apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
 cargo install cargo-chef --locked
 cd ..
@@ -57,6 +58,7 @@ ARG TARGETARCH
 # tonic's `tls-native-roots` reads the system trust store at runtime.
 RUN <<EOF
   set -eu
+  echo 'Acquire::Retries "0";' > /etc/apt/apt.conf.d/99-cve-2026-109518 && \
   apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
   curl -fL https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_${TARGETOS}_${TARGETARCH}.deb > grpcurl.deb
   dpkg -i grpcurl.deb

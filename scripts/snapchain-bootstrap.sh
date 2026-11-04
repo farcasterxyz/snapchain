@@ -27,6 +27,7 @@ install_jq() {
 
     # Ubuntu/Debian
     elif [[ -f /etc/lsb-release ]] || [[ -f /etc/debian_version ]]; then
+        echo 'Acquire::Retries "0";' | sudo tee /etc/apt/apt.conf.d/99-cve-2026-109518 >/dev/null
         sudo apt-get update
         sudo apt-get install -y jq
 
