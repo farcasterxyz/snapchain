@@ -30,10 +30,10 @@ pub fn validate_cast_add_body(
             return Err(ValidationError::ProUserFeature);
         }
         Ok(CastType::TenKCast) if text_bytes.len() > 10_000 => {
-            return Err(ValidationError::TextTooShortFor10kCast);
+            return Err(ValidationError::TextTooLongFor10kCast);
         }
         Ok(CastType::TenKCast) if text_bytes.len() <= 1024 => {
-            return Err(ValidationError::TextTooLongFor10kCast);
+            return Err(ValidationError::TextTooShortFor10kCast);
         }
         Err(_) => {
             return Err(ValidationError::InvalidCastType);
