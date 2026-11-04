@@ -94,6 +94,24 @@ curl -s localhost:3381/v1/info | jq
 
 `blockDelay` is how many seconds each shard's newest block is behind the current time. While the node catches up it counts down; once every shard is in the single digits, the node is in sync. `maxHeight` differs between shards because each shard is its own chain. On a read node `mempoolSize` reads `4294967295` for shards 1 and 2, which means "not reported" (see [Validators vs. read nodes](/node-types#mempool)).
 
+### Check readiness, not just liveness
+
+An HTTP 200 from `/v1/info` proves that the API is listening. It does not prove that every shard restored and caught up. A node with a missing or badly lagging shard can still answer partial reads while writes routed through that shard fail.
+
+This check exits successfully only when `shardInfos` contains shard 0 plus every message shard reported by `numShards`, and all of them are less than 10 seconds behind:
+
+```bash
+curl -fsS http://localhost:3381/v1/info | jq -e '
+  .numShards as $messageShardCount
+  | (.shardInfos // []) as $shards
+  | (([$shards[].shardId] | sort) == [range(0; $messageShardCount + 1)])
+    and (($shards | length) == ($messageShardCount + 1))
+    and ([$shards[].blockDelay] | all(type == "number" and . >= 0 and . < 10))
+'
+```
+
+It prints `true` and exits with status 0 when the node is ready. It prints `false` and exits with status 1 while a shard is absent, malformed or still catching up. The 10-second threshold matches the single-digit guidance above; adjust it if your application has a different freshness requirement.
+
 ## Query a node
 
 Once the node is in sync you can start querying it for the latest messages from a user. You'll need the user's account id to get their messages. If you don't have this handy, you can do a lookup by username from the public Farcaster name server. 
