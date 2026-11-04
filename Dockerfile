@@ -58,7 +58,6 @@ ARG TARGETARCH
 # tonic's `tls-native-roots` reads the system trust store at runtime.
 RUN <<EOF
   set -eu
-  # Ubuntu's fixed apt is not on the mirrors yet; switch to apt-get install --only-upgrade apt once its security archive serves it.
   echo 'Acquire::Retries "0";' > /etc/apt/apt.conf.d/99-cve-2026-109518 && \
   apt-get update && apt-get install -y --no-install-recommends ca-certificates curl || exit 1
   curl -fL https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_${TARGETOS}_${TARGETARCH}.deb > grpcurl.deb
