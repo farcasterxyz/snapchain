@@ -135,7 +135,7 @@ services:
 | 3000 | TCP | Grafana (local use only) |
 | 8125 / 8126 | UDP / TCP | `statsd` (local use only) |
 
-3381–3383 must be reachable from the internet for the node to peer and serve clients.
+Open 3382 (gossip) to the internet so other nodes can connect to yours. The node does not need 3381 or 3383 open to sync, so open them only to the clients that use them: the APIs have no authentication.
 
 ## Testnet
 
