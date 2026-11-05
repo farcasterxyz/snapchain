@@ -236,6 +236,26 @@ pub async fn clear_old_snapshots(
     }
 }
 
+/// Shards in `shard_ids` with no data directory (`<db_dir>/shard-<id>`), or an empty one.
+///
+/// A first snapshot restore that dies partway (for example on a 404 after the
+/// snapshot rotated) leaves the earlier shards on disk and the later ones absent.
+/// The DB directory is then no longer empty, so the snapshot step is skipped on
+/// restart and the absent shards would sync from genesis instead.
+pub fn missing_shard_dirs(db_dir: &str, shard_ids: &[u32]) -> Vec<u32> {
+    shard_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            let dir = std::path::Path::new(db_dir).join(format!("shard-{}", id));
+            match std::fs::read_dir(&dir) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(_) => true,
+            }
+        })
+        .collect()
+}
+
 fn metadata_path(network: FarcasterNetwork, shard_id: u32) -> String {
     format!(
         "{}/{}",
@@ -641,4 +661,32 @@ pub async fn upload_to_s3(
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod missing_shard_tests {
+    use super::missing_shard_dirs;
+
+    #[test]
+    fn reports_absent_and_empty_shard_dirs() {
+        let db = tempfile::tempdir().unwrap();
+        let root = db.path();
+        std::fs::create_dir_all(root.join("shard-1")).unwrap();
+        std::fs::write(root.join("shard-1").join("CURRENT"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("shard-2")).unwrap(); // empty
+
+        let missing = missing_shard_dirs(root.to_str().unwrap(), &[1, 2, 0]);
+        assert_eq!(missing, vec![2, 0]);
+    }
+
+    #[test]
+    fn nothing_missing_when_every_shard_has_data() {
+        let db = tempfile::tempdir().unwrap();
+        for id in [0, 1] {
+            let dir = db.path().join(format!("shard-{}", id));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("CURRENT"), b"x").unwrap();
+        }
+        assert!(missing_shard_dirs(db.path().to_str().unwrap(), &[1, 0]).is_empty());
+    }
 }
