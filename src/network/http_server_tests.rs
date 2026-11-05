@@ -807,6 +807,34 @@ pub mod tests {
         ));
     }
 
+    #[test]
+    fn signers_by_fid_request_accepts_single_and_listed_requester_fids() {
+        use crate::network::http_server::SignersByFidHttpRequest;
+
+        let fids = |query: &str| {
+            serde_qs::from_str::<SignersByFidHttpRequest>(query)
+                .unwrap()
+                .to_proto()
+                .requester_fids
+        };
+        // The form the field's doc comment and most HTTP clients use.
+        assert_eq!(fids("fid=3&requesterFids=9152"), vec![9152]);
+        assert_eq!(fids("fid=3&requesterFids=9152,3"), vec![9152, 3]);
+        assert_eq!(fids("fid=3&requester_fids=7"), vec![7]);
+        // serde_qs's own sequence syntax keeps working.
+        assert_eq!(
+            fids("fid=3&requesterFids[]=1&requesterFids[]=2"),
+            vec![1, 2]
+        );
+        assert_eq!(
+            fids("fid=3&requesterFids[0]=5&requesterFids[1]=6"),
+            vec![5, 6]
+        );
+        assert!(fids("fid=3").is_empty());
+
+        assert!(serde_qs::from_str::<SignersByFidHttpRequest>("fid=3&requesterFids=abc").is_err());
+    }
+
     #[tokio::test]
     async fn test_current_peers() {
         let mut mock_hub_service = MockHubService::new();

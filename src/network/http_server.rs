@@ -1231,10 +1231,14 @@ pub struct SignersByFidHttpRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
     /// FIDs whose current app-nonce should be returned alongside the signer
-    /// list. Repeat the query param (`?requesterFids=1&requesterFids=2`) to
-    /// request multiple. The response carries one entry per supplied FID,
-    /// in request order, in `requesterFidNonces`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// list: `?requesterFids=1`, `?requesterFids=1,2` or
+    /// `?requesterFids[]=1&requesterFids[]=2`. The response carries one entry
+    /// per supplied FID, in request order, in `requesterFidNonces`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_fid_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub requester_fids: Vec<u64>,
 
     // For backwards compatibility with the camelCase query params accepted by
@@ -1247,8 +1251,40 @@ pub struct SignersByFidHttpRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub pageToken: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_fid_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub requesterFids: Vec<u64>,
+}
+
+/// serde_qs only builds a `Vec` from bracketed keys (`a[]=1&a[]=2`), so a plain
+/// `?requesterFids=1` failed with "expected a sequence". Accept a single value
+/// or a comma-separated list as well.
+fn deserialize_fid_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        Many(Vec<String>),
+        One(String),
+    }
+    let values = match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::Many(values) => values,
+        OneOrMany::One(value) => value.split(',').map(str::to_string).collect(),
+    };
+    values
+        .iter()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| serde::de::Error::custom(format!("invalid fid: {v}")))
+        })
+        .collect()
 }
 
 impl SignersByFidHttpRequest {
