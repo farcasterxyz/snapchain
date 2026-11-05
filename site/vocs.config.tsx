@@ -55,6 +55,7 @@ export default defineConfig({
               { text: 'Storage API', link: '/reference/grpcapi/storagelimits' },
               { text: 'Blocks API', link: '/reference/grpcapi/blocks' },
               { text: 'Onchain API', link: '/reference/grpcapi/onchain' },
+              { text: 'Channels API', link: '/reference/grpcapi/channels' },
               { text: 'Events API', link: '/reference/grpcapi/events' },
               { text: 'Metadata API', link: '/reference/grpcapi/metadata' },
             ],
@@ -74,6 +75,7 @@ export default defineConfig({
               { text: 'Fid API', link: '/reference/httpapi/fids' },
               { text: 'Storage API', link: '/reference/httpapi/storagelimits' },
               { text: 'Onchain API', link: '/reference/httpapi/onchain' },
+              { text: 'Channels API', link: '/reference/httpapi/channels' },
               { text: 'Events API', link: '/reference/httpapi/events' },
             ],
             collapsed: true
