@@ -6436,6 +6436,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_casts_by_parent_pages_to_the_end_when_shards_are_uneven() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, mut engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        test_helper::register_user(
+            SHARD2_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine2,
+        )
+        .await;
+        let original_cast =
+            messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let timestamp = original_cast.data.as_ref().unwrap().timestamp;
+        test_helper::commit_message(&mut engine1, &original_cast).await;
+
+        // Three replies on one shard, one on the other: the second shard runs out
+        // after the first page while the first keeps going.
+        let mut expected = vec![];
+        for (i, fid) in [SHARD1_FID, SHARD1_FID, SHARD1_FID, SHARD2_FID]
+            .into_iter()
+            .enumerate()
+        {
+            let engine = if fid == SHARD1_FID {
+                &mut engine1
+            } else {
+                &mut engine2
+            };
+            let reply = messages_factory::casts::create_cast_with_parent(
+                fid,
+                &format!("reply {i}"),
+                SHARD1_FID,
+                &original_cast.hash,
+                Some(timestamp + 1 + i as u32),
+                None,
+            );
+            test_helper::commit_message(engine, &reply).await;
+            expected.push(reply.hash.clone());
+        }
+
+        let mut seen = vec![];
+        let mut page_token = None;
+        for _ in 0..10 {
+            let response = service
+                .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                    parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                        proto::CastId {
+                            fid: SHARD1_FID,
+                            hash: original_cast.hash.clone(),
+                        },
+                    )),
+                    page_size: Some(1),
+                    page_token,
+                    reverse: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            seen.extend(response.messages.into_iter().map(|m| m.hash));
+            page_token = response.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        assert!(page_token.is_none(), "paging never reached the end");
+        seen.sort();
+        expected.sort();
+        assert_eq!(seen, expected, "every reply exactly once");
+    }
+
+    #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
         let (
