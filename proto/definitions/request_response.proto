@@ -500,7 +500,7 @@ message Signer {
 
   // Off-chain–only fields
   repeated int32 scopes = 9;          // mirrors KeyAddBody.scopes (raw MessageType ints)
-  optional uint64 request_fid = 10;   // verified requestFid from SignedKeyRequestMetadata
+  optional uint64 request_fid = 10;   // verified requestFid from SignedKeyRequestMetadata (also set for on-chain signers)
   optional uint32 nonce = 11;         // user nonce on the originating KEY_ADD
 
   // On-chain–only payload — original event for callers that need raw fields
