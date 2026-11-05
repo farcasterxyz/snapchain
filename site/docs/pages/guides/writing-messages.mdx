@@ -18,15 +18,31 @@ step 3 below replaces that step and needs no ETH.
 ### Requirements
 
 - Write access to a node(either your own, or a 3rd party one)
-- An ETH wallet with about ~10$ USD of ETH bridged to [Optimism](https://www.optimism.io/)
+- An ETH wallet with a small amount of ETH bridged to [Optimism](https://www.optimism.io/) (registering an fid and its first storage unit currently costs well under $1 — see below)
 - An ETH RPC URL for OP Mainnet (e.g. via [Alchemy](https://www.alchemy.com/), [Infura](https://www.infura.io/) or [QuickNode](https://www.quicknode.com/)).
 
 See [running a node](/guides/running-a-node) for more information on how to set up a node.
 
 ### Custody address vs signer
 In order to register an account and send messages, you need 2 pairs of keys: 
-- Custody: This is the ETH account which funds the initial id registration and storage. You need ~$10 USD in this account. You can use any ETH address as long as the $10 required is transferred via OP mainnet. The private key will be used to sign any signer requests and fname registrations. The person registering should always hold this private key.
+- Custody: This is the ETH account which funds the initial id registration and storage. You can use any ETH address as long as it holds ETH on OP mainnet. The private key will be used to sign any signer requests and fname registrations. The person registering should always hold this private key.
 - Signer: This is an Ed25519 keypair that's used to sign messages a user publishes to the Farcaster network. If an app is publishing on behalf of a user, the app will hold the private key for this keypair. 
+
+Storage is priced in USD and converted to ETH by an oracle, so the cost in ETH moves
+over time. Read it from the contract rather than relying on a figure here:
+
+```ts
+// Cost of registering an fid, including its first storage unit, in wei.
+const price = await publicClient.readContract({
+  address: ID_GATEWAY_ADDRESS,
+  abi: idGatewayABI,
+  functionName: 'price',
+});
+```
+
+At the time of writing `StorageRegistry.usdUnitPrice()` returns `20000000` — $0.20 per
+storage unit — so `IdGateway.price()` works out to a little under `0.0001` ETH. Gas on
+OP mainnet adds a negligible amount.
 
 ### Gasless signers
 Signers used to be registered by sending a transaction to the onchain key registry. Snapchain also
