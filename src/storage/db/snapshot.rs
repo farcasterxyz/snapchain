@@ -151,6 +151,22 @@ struct SnapshotMetadata {
     timestamp: i64,
 }
 
+fn make_snapshot_metadata(
+    key_base: String,
+    mut chunks: Vec<String>,
+    timestamp: i64,
+) -> SnapshotMetadata {
+    // read_dir order is unspecified, but restore concatenates in metadata order.
+    // MultiChunkWriter uses chunk_{:04}.bin (a minimum width), so compare length
+    // before name to keep chunk_10000.bin after chunk_9999.bin as well.
+    chunks.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    SnapshotMetadata {
+        key_base,
+        chunks,
+        timestamp,
+    }
+}
+
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
     // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION are loaded from envvars
     let credentials = Credentials::new(
@@ -601,11 +617,7 @@ pub async fn upload_to_s3(
         file_names.push(file_name)
     }
 
-    let metadata = SnapshotMetadata {
-        key_base: upload_dir,
-        chunks: file_names,
-        timestamp: start_timetamp,
-    };
+    let metadata = make_snapshot_metadata(upload_dir, file_names, start_timetamp);
 
     let metadata_json = serde_json::to_string(&metadata)?;
     let metadata_key = metadata_path(network, shard_id);
@@ -641,4 +653,49 @@ pub async fn upload_to_s3(
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::make_snapshot_metadata;
+
+    #[test]
+    fn snapshot_metadata_orders_shuffled_chunks() {
+        let metadata = make_snapshot_metadata(
+            "snapshot".to_string(),
+            ["chunk_0003.bin", "chunk_0001.bin", "chunk_0002.bin"]
+                .map(String::from)
+                .to_vec(),
+            123,
+        );
+
+        assert_eq!(
+            metadata.chunks,
+            ["chunk_0001.bin", "chunk_0002.bin", "chunk_0003.bin"]
+        );
+        assert_eq!(metadata.key_base, "snapshot");
+        assert_eq!(metadata.timestamp, 123);
+    }
+
+    #[test]
+    fn snapshot_metadata_orders_chunks_beyond_four_digits() {
+        let metadata = make_snapshot_metadata(
+            "snapshot".to_string(),
+            ["chunk_10000.bin", "chunk_9999.bin", "chunk_0001.bin"]
+                .map(String::from)
+                .to_vec(),
+            123,
+        );
+
+        assert_eq!(
+            metadata.chunks,
+            ["chunk_0001.bin", "chunk_9999.bin", "chunk_10000.bin"]
+        );
+    }
+
+    #[test]
+    fn snapshot_metadata_preserves_empty_chunks() {
+        let metadata = make_snapshot_metadata("snapshot".to_string(), vec![], 123);
+        assert!(metadata.chunks.is_empty());
+    }
 }
