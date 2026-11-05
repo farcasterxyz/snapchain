@@ -53,7 +53,23 @@ have no `chain`.
 
 ## castsByFid
 
-Fetch all casts for authored by an FID.
+Fetch the casts authored by an FID, and the removals of casts it deleted.
+
+The response mixes two message types. Casts are `MESSAGE_TYPE_CAST_ADD` with a `castAddBody`. A deleted cast shows up as `MESSAGE_TYPE_CAST_REMOVE` with a `castRemoveBody` instead, whose `targetHash` is base64-encoded (other hashes in this API are `0x` hex). Check `data.type` before reading `castAddBody`:
+
+```json
+{
+  "data": {
+    "type": "MESSAGE_TYPE_CAST_REMOVE",
+    "fid": 207,
+    "timestamp": 149447854,
+    "network": "FARCASTER_NETWORK_MAINNET",
+    "castRemoveBody": { "targetHash": "3pycZZ9CmtaW/Gmi23LZHfp7+oc=" }
+  },
+  "hash": "0x068f7c9d2fa0b77c60a2c7f1f0ff533cf75dd145",
+  ...
+}
+```
 
 **Query Parameters**
 | Parameter      | Description                        | Example                     |
