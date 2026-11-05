@@ -6,8 +6,8 @@ Used to retrieve on chain events (id registry, keys, storage rent)
 
 | Method Name                        | Request Type                    | Response Type            | Description                                                                                              |
 | ---------------------------------- | ------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| GetOnChainSigner                   | SignerRequest                   | OnChainEvent             | Returns the onchain event for an active signer for an Fid                                                |
-| GetOnChainSignersByFid             | FidRequest                      | OnChainEventResponse     | Returns all active account keys (signers) add events for an Fid                                          |
+| GetOnChainSigner                   | SignerRequest                   | OnChainEvent             | Deprecated, use [GetSigner](/reference/grpcapi/signers). Onchain signers only                            |
+| GetOnChainSignersByFid             | FidRequest                      | OnChainEventResponse     | Deprecated, use [GetSignersByFid](/reference/grpcapi/signers). Onchain signers only                      |
 | GetIdRegistryOnChainEvent          | FidRequest                      | OnChainEvent             | Returns the most recent register/transfer on chain event for an fid                                      |
 | GetIdRegistryOnChainEventByAddress | IdRegistryEventByAddressRequest | OnChainEvent             | Returns the registration/transfer event by address if it exists (allows looking up fid by address)       |
 | GetOnChainEvents                   | OnChainEventRequest             | OnChainEventResponse     | Returns all on chain events filtered by type for an Fid (includes inactive keys and expired rent events) |
