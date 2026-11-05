@@ -63,7 +63,7 @@ Most endpoints support paging to get a large number of responses.
 
 The returned `nextPageToken` is empty if there are no more pages to return.
 
-Pagination query parameters can be combined with other query parameters supported by the endpoint. For example, `/v1/casts?fid=2&pageSize=3`.
+Pagination query parameters can be combined with other query parameters supported by the endpoint. For example, `/v1/castsByFid?fid=2&pageSize=3`.
 
 **Example**
 
