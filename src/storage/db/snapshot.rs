@@ -146,6 +146,9 @@ pub enum SnapshotError {
 
     #[error("invalid snapshot chunk name: {0}")]
     InvalidChunkName(String),
+
+    #[error("snapshot shard directory is a symlink: {0}")]
+    ShardDirIsSymlink(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -161,6 +164,16 @@ fn validate_chunk_name(chunk: &str) -> Result<(), SnapshotError> {
         (Some(Component::Normal(_)), None) => Ok(()),
         _ => Err(SnapshotError::InvalidChunkName(chunk.to_string())),
     }
+}
+
+fn reject_shard_dir_symlink(shard_dir: &str) -> Result<(), SnapshotError> {
+    if std::fs::symlink_metadata(shard_dir)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(SnapshotError::ShardDirIsSymlink(shard_dir.to_string()));
+    }
+    Ok(())
 }
 
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
@@ -336,7 +349,9 @@ pub async fn download_snapshots(
         let base_path = &metadata_json.key_base;
         let shard_start = SystemTime::now();
 
-        std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
+        let shard_dir = format!("{}/shard-{}", snapshot_dir, shard_id);
+        std::fs::create_dir_all(&shard_dir)?;
+        reject_shard_dir_symlink(&shard_dir)?;
 
         let mut local_chunks = vec![];
         // Process each chunk sequentially within the shard
@@ -367,7 +382,7 @@ pub async fn download_snapshots(
                 snapshot_config.snapshot_download_url, base_path, chunk
             );
 
-            let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+            let filename = format!("{}/{}", shard_dir, chunk);
 
             // Set up individual progress bar for this chunk (only if TTY available)
             let chunk_pb = if use_progress_bars {
@@ -447,6 +462,16 @@ pub async fn download_snapshots(
     Ok(())
 }
 
+async fn open_chunk_file(path: &Path) -> Result<tokio::fs::File, io::Error> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+        .await
+}
+
 async fn download_file(
     url: &str,
     filename: &str,
@@ -455,7 +480,7 @@ async fn download_file(
     use_progress_bars: bool,
     global_start: SystemTime,
 ) -> Result<(), SnapshotError> {
-    let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
+    let mut file = BufWriter::new(open_chunk_file(Path::new(filename)).await?);
     let download_response = reqwest::get(url).await?.error_for_status()?;
     let content_length = download_response.content_length();
 
@@ -694,5 +719,34 @@ mod tests {
     #[test]
     fn test_accepts_plain_chunk_name() {
         assert!(validate_chunk_name("shard-0-chunk-0003.tar.gz").is_ok());
+    }
+
+    #[test]
+    fn test_rejects_shard_dir_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let shard = dir.path().join("shard-1");
+        std::os::unix::fs::symlink(&target, &shard).unwrap();
+
+        let err = reject_shard_dir_symlink(shard.to_str().unwrap()).unwrap_err();
+        match err {
+            SnapshotError::ShardDirIsSymlink(got) => assert_eq!(got, shard.to_str().unwrap()),
+            other => panic!("expected ShardDirIsSymlink, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_open_chunk_file_does_not_follow_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let chunk = dir.path().join("chunk-0000.tar.gz");
+        let contents = b"leave-me-alone";
+        std::fs::write(&target, contents).unwrap();
+        std::os::unix::fs::symlink(&target, &chunk).unwrap();
+
+        let err = open_chunk_file(&chunk).await.unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(nix::libc::ELOOP));
+        assert_eq!(std::fs::read(&target).unwrap(), contents);
     }
 }
