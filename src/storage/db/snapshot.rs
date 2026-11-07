@@ -21,6 +21,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufReader, IsTerminal, Read};
+use std::path::{Component, Path};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
@@ -142,6 +143,9 @@ pub enum SnapshotError {
 
     #[error(transparent)]
     RocksDbError(#[from] RocksdbError),
+
+    #[error("invalid snapshot chunk name: {0}")]
+    InvalidChunkName(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -149,6 +153,14 @@ struct SnapshotMetadata {
     key_base: String,
     chunks: Vec<String>,
     timestamp: i64,
+}
+
+fn validate_chunk_name(chunk: &str) -> Result<(), SnapshotError> {
+    let mut components = Path::new(chunk).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(SnapshotError::InvalidChunkName(chunk.to_string())),
+    }
 }
 
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
@@ -276,6 +288,12 @@ pub async fn download_snapshots(
     for &shard_id in &shard_ids {
         let metadata = download_metadata(network, shard_id, snapshot_config).await?;
         all_metadata.insert(shard_id.to_string(), metadata);
+    }
+
+    for metadata in all_metadata.values() {
+        for chunk in &metadata.chunks {
+            validate_chunk_name(chunk)?;
+        }
     }
 
     // Persist metadata.json file
@@ -641,4 +659,40 @@ pub async fn upload_to_s3(
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rejects_parent_directory_traversal() {
+        let name = "../../etc/cron.d/x";
+        match validate_chunk_name(name) {
+            Err(SnapshotError::InvalidChunkName(got)) => assert_eq!(got, name),
+            other => panic!("expected InvalidChunkName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rejects_absolute_path() {
+        assert!(validate_chunk_name("/etc/cron.d/x").is_err());
+    }
+
+    #[test]
+    fn test_rejects_nested_path() {
+        assert!(validate_chunk_name("shard-0/chunk-0003.tar.gz").is_err());
+    }
+
+    #[test]
+    fn test_rejects_empty_and_dot_names() {
+        assert!(validate_chunk_name("").is_err());
+        assert!(validate_chunk_name(".").is_err());
+        assert!(validate_chunk_name("..").is_err());
+    }
+
+    #[test]
+    fn test_accepts_plain_chunk_name() {
+        assert!(validate_chunk_name("shard-0-chunk-0003.tar.gz").is_ok());
+    }
 }
