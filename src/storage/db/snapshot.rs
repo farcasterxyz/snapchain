@@ -147,8 +147,8 @@ pub enum SnapshotError {
     #[error("invalid snapshot chunk name: {0}")]
     InvalidChunkName(String),
 
-    #[error("snapshot shard directory is a symlink: {0}")]
-    ShardDirIsSymlink(String),
+    #[error("snapshot shard directory is outside the snapshot directory: {0}")]
+    ShardDirOutsideSnapshotDir(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -166,12 +166,12 @@ fn validate_chunk_name(chunk: &str) -> Result<(), SnapshotError> {
     }
 }
 
-fn reject_shard_dir_symlink(shard_dir: &str) -> Result<(), SnapshotError> {
-    if std::fs::symlink_metadata(shard_dir)?
-        .file_type()
-        .is_symlink()
-    {
-        return Err(SnapshotError::ShardDirIsSymlink(shard_dir.to_string()));
+fn ensure_inside_snapshot_dir(root: &Path, shard_dir: &str) -> Result<(), SnapshotError> {
+    let resolved = std::fs::canonicalize(shard_dir)?;
+    if !resolved.starts_with(root) {
+        return Err(SnapshotError::ShardDirOutsideSnapshotDir(
+            shard_dir.to_string(),
+        ));
     }
     Ok(())
 }
@@ -295,6 +295,7 @@ pub async fn download_snapshots(
 ) -> Result<(), SnapshotError> {
     let snapshot_dir = snapshot_config.snapshot_download_dir.clone();
     std::fs::create_dir_all(snapshot_dir.clone())?;
+    let snapshot_root = std::fs::canonicalize(&snapshot_dir)?;
 
     // First, fetch metadata for all shards
     let mut all_metadata = HashMap::new();
@@ -351,7 +352,7 @@ pub async fn download_snapshots(
 
         let shard_dir = format!("{}/shard-{}", snapshot_dir, shard_id);
         std::fs::create_dir_all(&shard_dir)?;
-        reject_shard_dir_symlink(&shard_dir)?;
+        ensure_inside_snapshot_dir(&snapshot_root, &shard_dir)?;
 
         let mut local_chunks = vec![];
         // Process each chunk sequentially within the shard
@@ -430,7 +431,7 @@ pub async fn download_snapshots(
         }
 
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
-        let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
+        let mut tar_file = BufWriter::new(open_output_file(Path::new(&tar_filename)).await?);
 
         for filename in local_chunks {
             info!(
@@ -462,7 +463,7 @@ pub async fn download_snapshots(
     Ok(())
 }
 
-async fn open_chunk_file(path: &Path) -> Result<tokio::fs::File, io::Error> {
+async fn open_output_file(path: &Path) -> Result<tokio::fs::File, io::Error> {
     tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -480,7 +481,7 @@ async fn download_file(
     use_progress_bars: bool,
     global_start: SystemTime,
 ) -> Result<(), SnapshotError> {
-    let mut file = BufWriter::new(open_chunk_file(Path::new(filename)).await?);
+    let mut file = BufWriter::new(open_output_file(Path::new(filename)).await?);
     let download_response = reqwest::get(url).await?.error_for_status()?;
     let content_length = download_response.content_length();
 
@@ -722,22 +723,36 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_shard_dir_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target");
+    fn test_rejects_shard_dir_outside_snapshot_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target");
         std::fs::create_dir(&target).unwrap();
-        let shard = dir.path().join("shard-1");
+        let shard = root.path().join("shard-1");
         std::os::unix::fs::symlink(&target, &shard).unwrap();
 
-        let err = reject_shard_dir_symlink(shard.to_str().unwrap()).unwrap_err();
+        let snapshot_root = std::fs::canonicalize(root.path()).unwrap();
+        let err = ensure_inside_snapshot_dir(&snapshot_root, shard.to_str().unwrap()).unwrap_err();
         match err {
-            SnapshotError::ShardDirIsSymlink(got) => assert_eq!(got, shard.to_str().unwrap()),
-            other => panic!("expected ShardDirIsSymlink, got {other:?}"),
+            SnapshotError::ShardDirOutsideSnapshotDir(got) => {
+                assert_eq!(got, shard.to_str().unwrap())
+            }
+            other => panic!("expected ShardDirOutsideSnapshotDir, got {other:?}"),
         }
     }
 
+    #[test]
+    fn test_accepts_shard_dir_inside_snapshot_root() {
+        let root = tempfile::tempdir().unwrap();
+        let shard = root.path().join("shard-1");
+        std::fs::create_dir(&shard).unwrap();
+
+        let snapshot_root = std::fs::canonicalize(root.path()).unwrap();
+        assert!(ensure_inside_snapshot_dir(&snapshot_root, shard.to_str().unwrap()).is_ok());
+    }
+
     #[tokio::test]
-    async fn test_open_chunk_file_does_not_follow_symlink() {
+    async fn test_open_output_file_does_not_follow_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         let chunk = dir.path().join("chunk-0000.tar.gz");
@@ -745,7 +760,7 @@ mod tests {
         std::fs::write(&target, contents).unwrap();
         std::os::unix::fs::symlink(&target, &chunk).unwrap();
 
-        let err = open_chunk_file(&chunk).await.unwrap_err();
+        let err = open_output_file(&chunk).await.unwrap_err();
         assert_eq!(err.raw_os_error(), Some(nix::libc::ELOOP));
         assert_eq!(std::fs::read(&target).unwrap(), contents);
     }
