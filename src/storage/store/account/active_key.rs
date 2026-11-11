@@ -37,6 +37,8 @@
 
 use std::sync::Arc;
 
+use tracing::warn;
+
 use super::{
     get_gasless_key_record, verify_key_add_custody, verify_key_remove_authorization,
     OnchainEventStore,
@@ -138,7 +140,14 @@ pub fn get_active_key(
     // A corrupt record whose embedded message lacks `data.body.key_add_body` would have failed
     // to merge in the first place (see `merge_key_add`). Treat it as a miss defensively rather
     // than panicking on a malformed row.
-    let (scopes_mask, ttl_seconds) = extract_scope_and_ttl(&record.message).unwrap_or((0, 0));
+    let (scopes_mask, ttl_seconds) = extract_scope_and_ttl(&record.message).unwrap_or_else(|| {
+        warn!(
+            fid,
+            signer = hex::encode(signer),
+            "Gasless key record has no KEY_ADD body; treating the key as admitting no message types"
+        );
+        (0, 0)
+    });
     Ok(Some(ActiveKey::Gasless {
         scopes_mask,
         ttl_seconds,
