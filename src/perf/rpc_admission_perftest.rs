@@ -15,13 +15,15 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use crate::mempool::mempool::{RateLimits, RateLimitsConfig};
+use crate::proto::StorageUnitType;
 use crate::proto::{self, FarcasterNetwork};
 use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::mempool_poller::MempoolMessage;
-use crate::storage::store::stores::Stores;
+use crate::storage::store::stores::{Limits, StoreLimits, Stores};
 use crate::storage::store::test_helper;
 use crate::utils::cli::compose_message;
 use crate::utils::factory::signers::generate_signer;
+use crate::utils::factory::{events_factory, time};
 
 const FIRST_FID: u64 = 10_000;
 
@@ -67,11 +69,19 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let seed_messages = env_or("SEED_MESSAGES", 10_000);
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
-        limits: None,
+        limits: Some(StoreLimits::new(
+            Limits::of_type(StorageUnitType::UnitType2025),
+            Limits::of_type(StorageUnitType::UnitType2024),
+            Limits::of_type(StorageUnitType::UnitTypeLegacy),
+        )),
         ..Default::default()
     })
     .await;
 
+    // Rent enough units that no fid prunes its seed casts. `register_user` rents one unit.
+    let casts_per_fid = seed_messages.div_ceil(seed_fids) as u32;
+    let casts_per_unit = Limits::of_type(StorageUnitType::UnitType2025).casts;
+    let extra_units = casts_per_fid.div_ceil(casts_per_unit).saturating_sub(1);
     let fids: Vec<u64> = (FIRST_FID..FIRST_FID + seed_fids).collect();
     for fid in &fids {
         test_helper::register_user(
@@ -81,6 +91,17 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             &mut engine,
         )
         .await;
+        if extra_units > 0 {
+            test_helper::commit_event(
+                &mut engine,
+                &events_factory::create_rent_event_with_timestamp(
+                    *fid,
+                    extra_units,
+                    time::current_timestamp(),
+                ),
+            )
+            .await;
+        }
     }
 
     let mut seeded = 0;
@@ -95,14 +116,24 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         let state_change = engine.propose_state_change(1, batch, None);
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
     }
+    let stores = engine.get_stores();
+    let retained_casts: u64 = fids
+        .iter()
+        .flat_map(|fid| stores.get_storage_limits(*fid).unwrap().limits)
+        .filter(|limit| limit.store_type() == proto::StoreType::Casts)
+        .map(|limit| limit.used)
+        .sum();
+    assert_eq!(
+        retained_casts, seed_messages,
+        "seed casts were pruned; the DB holds fewer messages than requested"
+    );
     println!(
-        "seeded {} fids, {} casts, trie items: {}",
+        "seeded {} fids, {} casts retained, trie items: {}",
         fids.len(),
-        seed_messages,
+        retained_casts,
         engine.trie_num_items()
     );
 
-    let stores = engine.get_stores();
     let rate_limits = RateLimits::new(
         HashMap::from([(1, stores.clone())]),
         RateLimitsConfig::default(),
