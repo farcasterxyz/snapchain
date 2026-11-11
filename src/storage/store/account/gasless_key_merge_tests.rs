@@ -16,7 +16,8 @@ mod tests {
     use crate::proto::{self, message_data::Body, IdRegisterEventType, MessageType};
     use crate::storage::db::{self, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        get_gasless_key_owner_fid, get_gasless_key_record, get_last_used_at, merge_key_add,
+        get_active_key, get_gasless_key_owner_fid, get_gasless_key_record, get_last_used_at,
+        merge_key_add, put_gasless_key_record, verify_message_signer, ActiveKey, GaslessKeyRecord,
         OnchainEventStore, StoreEventHandler,
     };
     use crate::storage::store::engine::MessageValidationError;
@@ -345,5 +346,201 @@ mod tests {
             ) => {}
             other => panic!("expected KeyClaimedByDifferentFid, got {other:?}"),
         }
+    }
+
+    fn verify(world: &World, msg: &proto::Message) -> Result<(), MessageValidationError> {
+        verify_message_signer(
+            &world.store,
+            &world.db,
+            &RocksDbTransactionBatch::new(),
+            msg,
+        )
+    }
+
+    fn assert_invalid_signature(result: Result<(), MessageValidationError>) {
+        match result {
+            Err(MessageValidationError::MessageValidationError(
+                ValidationError::InvalidSignature,
+            )) => {}
+            other => panic!("expected InvalidSignature, got {other:?}"),
+        }
+    }
+
+    /// A fid with one merged gasless key, ready for KEY_REMOVE and scoped-message checks.
+    fn world_with_gasless_key() -> (World, Fixture) {
+        let world = new_world();
+        let f = fresh_fixture(7, 99);
+        register_custody(&world, f.fid, &f.fid_custody);
+        register_custody(&world, f.request_fid, &f.app_custody);
+        commit_merge(&world, &f.build());
+        (world, f)
+    }
+
+    #[test]
+    fn verify_message_signer_checks_key_add_custody_signature() {
+        let world = new_world();
+        let mut f = fresh_fixture(7, 99);
+        register_custody(&world, f.fid, &f.fid_custody);
+
+        assert!(verify(&world, &f.build()).is_ok());
+
+        let genuine_custody = f.fid_custody.clone();
+        f.fid_custody = PrivateKeySigner::random();
+        assert_invalid_signature(verify(&world, &f.build()));
+
+        f.fid_custody = genuine_custody;
+        let mut unrecoverable = f.build();
+        if let Some(Body::KeyAddBody(body)) =
+            unrecoverable.data.as_mut().and_then(|d| d.body.as_mut())
+        {
+            body.custody_signature = vec![];
+        }
+        assert_invalid_signature(verify(&world, &unrecoverable));
+    }
+
+    #[test]
+    fn verify_message_signer_checks_key_remove_custody_signature() {
+        let (world, f) = world_with_gasless_key();
+        let remove_by = |custody: &PrivateKeySigner| {
+            messages_factory::keys::create_key_remove_custody(
+                f.fid,
+                custody,
+                &f.envelope_signer,
+                &f.envelope_signer_pubkey,
+                2,
+                f.deadline,
+                Some(f.timestamp + 1),
+            )
+        };
+
+        assert!(verify(&world, &remove_by(&f.fid_custody)).is_ok());
+        assert_invalid_signature(verify(&world, &remove_by(&PrivateKeySigner::random())));
+
+        let mut unrecoverable = remove_by(&f.fid_custody);
+        if let Some(Body::KeyRemoveBody(body)) =
+            unrecoverable.data.as_mut().and_then(|d| d.body.as_mut())
+        {
+            body.signature = vec![];
+        }
+        assert_invalid_signature(verify(&world, &unrecoverable));
+    }
+
+    #[test]
+    fn verify_message_signer_self_revoke_must_be_signed_by_the_removed_key() {
+        let (world, f) = world_with_gasless_key();
+
+        let self_revoke = messages_factory::keys::create_key_remove_self_revoke(
+            f.fid,
+            &f.envelope_signer,
+            2,
+            f.deadline,
+            Some(f.timestamp + 1),
+        );
+        assert!(verify(&world, &self_revoke).is_ok());
+
+        let mut revoked_by_another_key = messages_factory::keys::create_key_remove_self_revoke(
+            f.fid,
+            &signers::generate_signer(),
+            2,
+            f.deadline,
+            Some(f.timestamp + 1),
+        );
+        if let Some(Body::KeyRemoveBody(body)) = revoked_by_another_key
+            .data
+            .as_mut()
+            .and_then(|d| d.body.as_mut())
+        {
+            body.key = f.envelope_signer_pubkey.to_vec();
+        }
+        assert_invalid_signature(verify(&world, &revoked_by_another_key));
+    }
+
+    #[test]
+    fn verify_message_signer_rejects_key_remove_for_unregistered_key() {
+        let (world, f) = world_with_gasless_key();
+        let unregistered = signers::generate_signer();
+        let remove = messages_factory::keys::create_key_remove_self_revoke(
+            f.fid,
+            &unregistered,
+            2,
+            f.deadline,
+            Some(f.timestamp + 1),
+        );
+        match verify(&world, &remove) {
+            Err(MessageValidationError::MessageValidationError(
+                ValidationError::KeyNotRegistered,
+            )) => {}
+            other => panic!("expected KeyNotRegistered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_message_signer_enforces_gasless_key_scope() {
+        let (world, f) = world_with_gasless_key();
+
+        let cast = messages_factory::casts::create_cast_add(
+            f.fid,
+            "in scope",
+            Some(f.timestamp + 1),
+            Some(&f.envelope_signer),
+        );
+        assert!(verify(&world, &cast).is_ok());
+
+        let reaction = messages_factory::reactions::create_reaction_add(
+            f.fid,
+            proto::ReactionType::Like,
+            proto::reaction_body::Target::TargetUrl("https://example.com".to_string()),
+            Some(f.timestamp + 1),
+            Some(&f.envelope_signer),
+        );
+        match verify(&world, &reaction) {
+            Err(MessageValidationError::GaslessKeyOutOfScope { msg_type }) => {
+                assert_eq!(msg_type, MessageType::ReactionAdd as i32)
+            }
+            other => panic!("expected GaslessKeyOutOfScope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gasless_key_record_without_key_add_body_admits_nothing() {
+        let world = new_world();
+        let fid = 7;
+        let key = signers::generate_signer();
+        let pubkey = key.verifying_key().to_bytes();
+        let mut txn = RocksDbTransactionBatch::new();
+        put_gasless_key_record(
+            &world.db,
+            &mut txn,
+            fid,
+            &pubkey,
+            &GaslessKeyRecord {
+                message: None,
+                request_fid: 99,
+            },
+        )
+        .unwrap();
+        world.db.commit(txn).unwrap();
+
+        let active_key = get_active_key(
+            &world.store,
+            &world.db,
+            &RocksDbTransactionBatch::new(),
+            fid,
+            &pubkey,
+        )
+        .unwrap();
+        assert_eq!(
+            active_key,
+            Some(ActiveKey::Gasless {
+                scopes_mask: 0,
+                ttl_seconds: 0
+            })
+        );
+
+        let cast = messages_factory::casts::create_cast_add(fid, "no scope", None, Some(&key));
+        assert!(matches!(
+            verify(&world, &cast),
+            Err(MessageValidationError::GaslessKeyOutOfScope { .. })
+        ));
     }
 }
