@@ -54,10 +54,20 @@ const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
 
+const GOSSIP_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+const GOSSIP_HISTORY_LENGTH: usize = 10;
+
 /// How long a gossiped mempool message waits for the local mempool's verdict before it is
-/// dropped unrelayed. gossipsub keeps an unvalidated message for `history_length` heartbeats
-/// (5 x 500ms), so the verdict has to arrive inside that window.
+/// dropped unrelayed.
 const MEMPOOL_VERDICT_TIMEOUT: Duration = Duration::from_secs(2);
+
+// gossipsub evicts an unvalidated message after `history_length` heartbeats, which can be one
+// heartbeat short of that after receipt. A verdict reported after eviction is lost, so keep at
+// least a second of margin past the timeout.
+const _: () = assert!(
+    (GOSSIP_HISTORY_LENGTH as u128 - 1) * GOSSIP_HEARTBEAT_INTERVAL.as_millis()
+        >= MEMPOOL_VERDICT_TIMEOUT.as_millis() + 1000
+);
 const MEMPOOL_VERDICT_QUEUE_SIZE: usize = 10_000;
 
 type MempoolVerdict = (gossipsub::MessageId, PeerId, gossipsub::MessageAcceptance);
@@ -363,7 +373,8 @@ impl SnapchainGossip {
 
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the block time
+                    .heartbeat_interval(GOSSIP_HEARTBEAT_INTERVAL) // This might need to be lowered to 1/3 of the block time
+                    .history_length(GOSSIP_HISTORY_LENGTH)
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
                     // Hold every received message until it is reported valid, so mempool
                     // messages are only relayed once the local mempool accepts them.
@@ -1142,8 +1153,15 @@ impl SnapchainGossip {
             ) => {
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let request = MempoolRequest::AddMessage(mempool_message, source, Some(reply_tx));
-                if let Err(e) = system_tx.send(SystemMessage::Mempool(request)).await {
-                    warn!("Failed to send mempool message to the node: {}", e);
+                // Never wait on the node here: a backlog of mempool messages must not stall the
+                // swarm loop, which relays every other topic and reports these verdicts.
+                if let Err(e) = system_tx.try_send(SystemMessage::Mempool(request)) {
+                    debug!("Dropping gossiped mempool message: {}", e);
+                    self.statsd_client.count(
+                        "gossip.mempool_verdict",
+                        1,
+                        vec![("verdict", "dropped")],
+                    );
                     self.report_validation(&message_id, &peer_id, Ignore);
                     return;
                 }
@@ -1168,10 +1186,11 @@ impl SnapchainGossip {
             }
             (true, None) => self.report_validation(&message_id, &peer_id, Ignore),
             (false, Some(system_message)) => {
+                // Report before delivering so relay never waits on the node's channel.
+                self.report_validation(&message_id, &peer_id, Accept);
                 if let Err(e) = system_tx.send(system_message).await {
                     warn!("Failed to send system block message: {}", e);
                 }
-                self.report_validation(&message_id, &peer_id, Accept);
             }
             (false, None) => self.report_validation(&message_id, &peer_id, Accept),
         }

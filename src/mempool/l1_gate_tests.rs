@@ -468,3 +468,19 @@ async fn relay_verdict_rejects_inactive_signer() {
     assert_eq!(verdict.unwrap_err().code, "bad_request.validation_failure");
     assert_eq!(harness.chain.calls(), 0);
 }
+
+#[tokio::test]
+async fn relay_verdict_ignores_messages_beyond_concurrency_cap() {
+    let harness = Harness::new(Config {
+        max_concurrent_checks: 1,
+        ..Config::default()
+    })
+    .await;
+    *harness.chain.delay.lock() = Duration::from_millis(100);
+
+    let first = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 0));
+    let second = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 1));
+
+    assert_eq!(first.await.unwrap(), Ok(()));
+    assert_eq!(second.await.unwrap().unwrap_err().code, "unavailable");
+}

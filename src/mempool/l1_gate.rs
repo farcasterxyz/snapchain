@@ -219,29 +219,35 @@ pub struct GossipL1GateWorker {
 impl GossipL1GateWorker {
     pub async fn run(mut self) {
         while let Some((message, verdict_tx)) = self.checks_rx.recv().await {
-            let precheck = self.precheck(&message);
+            let admitted = self.precheck(&message).and_then(|()| {
+                self.in_flight
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| Refusal::Dropped("at_capacity"))
+            });
             if let Some(verdict_tx) = verdict_tx {
-                // The relay verdict rests on the local checks only. The L1 check can outlast
-                // the time gossip holds a message, and every validator runs its own.
-                let _ = verdict_tx.send(precheck.map_err(|refusal| match refusal {
-                    Refusal::Rejected(reason) => HubError::validation_failure(reason),
-                    Refusal::Dropped(reason) | Refusal::L1Error(reason) => {
-                        HubError::unavailable(reason)
+                // The relay verdict rests on the local checks and on having room to run the
+                // L1 check. The L1 check itself can outlast the time gossip holds a message,
+                // and every validator runs its own.
+                let _ = verdict_tx.send(match &admitted {
+                    Ok(_) => Ok(()),
+                    Err(Refusal::Rejected(reason)) => Err(HubError::validation_failure(reason)),
+                    Err(Refusal::Dropped(reason) | Refusal::L1Error(reason)) => {
+                        Err(HubError::unavailable(reason))
                     }
-                }));
+                });
             }
-            if let Err(refusal) = precheck {
-                debug!(
-                    fid = message.fid(),
-                    ?refusal,
-                    "Gossiped message refused before L1 check"
-                );
-                record(&self.statsd_client, refusal);
-                continue;
-            }
-            let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
-                record(&self.statsd_client, Refusal::Dropped("at_capacity"));
-                continue;
+            let permit = match admitted {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    debug!(
+                        fid = message.fid(),
+                        ?refusal,
+                        "Gossiped message refused before L1 check"
+                    );
+                    record(&self.statsd_client, refusal);
+                    continue;
+                }
             };
 
             let validator = self.validator.clone();
