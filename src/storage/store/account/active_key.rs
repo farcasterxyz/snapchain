@@ -37,10 +37,14 @@
 
 use std::sync::Arc;
 
-use super::{get_gasless_key_record, OnchainEventStore};
+use super::{
+    get_gasless_key_record, verify_key_add_custody, verify_key_remove_authorization,
+    OnchainEventStore,
+};
 use crate::proto::{self, message_data::Body, MessageType};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::onchain_event_store::OnchainEventStorageError;
+use crate::storage::store::engine::MessageValidationError;
 
 /// Result of resolving `(fid, signer)` against the active-key indexes.
 ///
@@ -139,6 +143,51 @@ pub fn get_active_key(
         scopes_mask,
         ttl_seconds,
     }))
+}
+
+/// Checks that `message` was signed with authority over the FID it claims, without merging it.
+///
+/// Most messages need their signer to be an active key for the FID that admits the message
+/// type. KEY_ADD and KEY_REMOVE are signed by the key being added or removed, so they are
+/// checked against the FID's custody signature (or self-revocation) instead. This does not
+/// check signer expiry, nonces or storage; the engine still runs those at merge time.
+pub fn verify_message_signer(
+    onchain_event_store: &OnchainEventStore,
+    db: &Arc<RocksDB>,
+    txn_batch: &RocksDbTransactionBatch,
+    message: &proto::Message,
+) -> Result<(), MessageValidationError> {
+    let data = message
+        .data
+        .as_ref()
+        .ok_or(MessageValidationError::NoMessageData)?;
+    match &data.body {
+        Some(Body::KeyAddBody(body)) => {
+            verify_key_add_custody(onchain_event_store, txn_batch, data.fid, body)
+        }
+        Some(Body::KeyRemoveBody(body)) => {
+            verify_key_remove_authorization(db, onchain_event_store, txn_batch, message, body)
+                .map(|_| ())
+        }
+        _ => {
+            let msg_type = MessageType::try_from(data.r#type).unwrap_or(MessageType::None);
+            let active_key = get_active_key(
+                onchain_event_store,
+                db,
+                txn_batch,
+                data.fid,
+                &message.signer,
+            )
+            .map_err(|_| MessageValidationError::MissingSigner)?
+            .ok_or(MessageValidationError::MissingSigner)?;
+            if !active_key.admits(msg_type) {
+                return Err(MessageValidationError::GaslessKeyOutOfScope {
+                    msg_type: data.r#type,
+                });
+            }
+            Ok(())
+        }
+    }
 }
 
 fn extract_scope_and_ttl(message: &Option<proto::Message>) -> Option<(u64, u32)> {

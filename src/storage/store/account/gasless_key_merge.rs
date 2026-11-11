@@ -135,28 +135,7 @@ pub fn merge_key_add(
 
     // Step 5 (EIP-712 custody recovery for this FID's KeyAdd payload). The recovered
     // address must match the custody address currently on file for `fid`.
-    let payload = KeyAddPayload {
-        fid,
-        key: &key_add_body.key,
-        key_type: key_add_body.key_type,
-        scopes: &key_add_body.scopes,
-        ttl: key_add_body.ttl,
-        nonce: key_add_body.nonce,
-        deadline: key_add_body.deadline,
-    };
-    let recovered =
-        recover_key_add_custody_address(&payload, &key_add_body.custody_signature, chain_id)?;
-    let this_fid_event = onchain_event_store
-        .get_id_register_event_by_fid(fid, Some(txn_batch))
-        .map_err(|_| MessageValidationError::MissingFid)?
-        .ok_or(MessageValidationError::MissingFid)?;
-    let this_fid_custody = match this_fid_event.body {
-        Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
-        _ => return Err(MessageValidationError::MissingFid),
-    };
-    if this_fid_custody.to.as_slice() != recovered.as_slice() {
-        return Err(ValidationError::InvalidSignature.into());
-    }
+    verify_key_add_custody(onchain_event_store, txn_batch, fid, key_add_body)?;
 
     // Step 8 (conflict resolution). On-chain first so a signer that was minted via L2 doesn't
     // silently get shadowed by a gasless registration; this branch also short-circuits before
@@ -321,50 +300,15 @@ pub fn merge_key_remove(
             ))
         }
     };
-    let chain_id = ETH_MAINNET_CHAIN_ID;
-
     // Active-key lookup. Does triple duty: existence check, request_fid source for
     // self-revocation, and prior-message source for the emitted event's deleted_messages.
-    let record = get_gasless_key_record(db, txn_batch, fid, &key_remove_body.key)?
-        .ok_or(ValidationError::KeyNotRegistered)?;
-
-    // `?` here is belt-and-suspenders: `validate_user_message` already ran
-    // `validate_key_remove_body`, which rejects unknown discriminants via the same TryFrom. If
-    // that upstream contract is ever bypassed (e.g. a future internal injection path), this
-    // re-check keeps the function safe in isolation. Exhaustive match below means adding a
-    // future variant forces us to update this site — the constant-based match couldn't.
-    let sig_type = KeyRemoveSignatureType::try_from(key_remove_body.signature_type)?;
+    let (record, sig_type) =
+        verify_key_remove_authorization(db, onchain_event_store, txn_batch, msg, key_remove_body)?;
     match sig_type {
         KeyRemoveSignatureType::Custody => {
-            let payload = KeyRemovePayload {
-                fid,
-                key: &key_remove_body.key,
-                nonce: key_remove_body.nonce,
-                deadline: key_remove_body.deadline,
-            };
-            let recovered =
-                recover_key_remove_custody_address(&payload, &key_remove_body.signature, chain_id)?;
-            let this_fid_event = onchain_event_store
-                .get_id_register_event_by_fid(fid, Some(txn_batch))
-                .map_err(|_| MessageValidationError::MissingFid)?
-                .ok_or(MessageValidationError::MissingFid)?;
-            let this_fid_custody = match this_fid_event.body {
-                Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
-                _ => return Err(MessageValidationError::MissingFid),
-            };
-            if this_fid_custody.to.as_slice() != recovered.as_slice() {
-                return Err(ValidationError::InvalidSignature.into());
-            }
             check_and_set_user_nonce(db, txn_batch, fid, key_remove_body.nonce)?;
         }
         KeyRemoveSignatureType::SelfRevoke => {
-            // Self-revocation. The envelope signer is the key being revoked, and the envelope
-            // Ed25519 signature was already verified upstream. Asserting signer == body.key
-            // is all that's left — any other signer means this message is not authorized by
-            // the key's holder.
-            if msg.signer.as_slice() != key_remove_body.key.as_slice() {
-                return Err(ValidationError::InvalidSignature.into());
-            }
             check_and_set_app_nonce(db, txn_batch, record.request_fid, key_remove_body.nonce)?;
         }
     }
@@ -389,4 +333,105 @@ pub fn merge_key_remove(
             deleted_messages: record.message.into_iter().collect(),
         }),
     ))
+}
+
+fn custody_address_for_fid(
+    onchain_event_store: &OnchainEventStore,
+    txn_batch: &RocksDbTransactionBatch,
+    fid: u64,
+) -> Result<Vec<u8>, MessageValidationError> {
+    let id_register_event = onchain_event_store
+        .get_id_register_event_by_fid(fid, Some(txn_batch))
+        .map_err(|_| MessageValidationError::MissingFid)?
+        .ok_or(MessageValidationError::MissingFid)?;
+    match id_register_event.body {
+        Some(proto::on_chain_event::Body::IdRegisterEventBody(body)) => Ok(body.to),
+        _ => Err(MessageValidationError::MissingFid),
+    }
+}
+
+/// Checks that the KEY_ADD's EIP-712 custody signature was produced by the custody address on
+/// file for `fid`. Read-only, so mempool admission can bind a KEY_ADD to its FID without
+/// running the merge.
+pub fn verify_key_add_custody(
+    onchain_event_store: &OnchainEventStore,
+    txn_batch: &RocksDbTransactionBatch,
+    fid: u64,
+    key_add_body: &proto::KeyAddBody,
+) -> Result<(), MessageValidationError> {
+    let payload = KeyAddPayload {
+        fid,
+        key: &key_add_body.key,
+        key_type: key_add_body.key_type,
+        scopes: &key_add_body.scopes,
+        ttl: key_add_body.ttl,
+        nonce: key_add_body.nonce,
+        deadline: key_add_body.deadline,
+    };
+    let recovered = recover_key_add_custody_address(
+        &payload,
+        &key_add_body.custody_signature,
+        ETH_MAINNET_CHAIN_ID,
+    )?;
+    if custody_address_for_fid(onchain_event_store, txn_batch, fid)?.as_slice()
+        != recovered.as_slice()
+    {
+        return Err(ValidationError::InvalidSignature.into());
+    }
+    Ok(())
+}
+
+/// Checks that a KEY_REMOVE is authorized for its FID: the key must be a registered gasless key
+/// of the FID, and the removal must be signed either by the FID's custody address or, for
+/// self-revocation, by the key being removed. Read-only; nonces are checked by the merge.
+///
+/// Returns the existing gasless record and the signature type so the merge can apply the
+/// matching nonce check without repeating the lookup.
+pub fn verify_key_remove_authorization(
+    db: &Arc<RocksDB>,
+    onchain_event_store: &OnchainEventStore,
+    txn_batch: &RocksDbTransactionBatch,
+    msg: &proto::Message,
+    key_remove_body: &proto::KeyRemoveBody,
+) -> Result<(GaslessKeyRecord, KeyRemoveSignatureType), MessageValidationError> {
+    let fid = msg
+        .data
+        .as_ref()
+        .ok_or(MessageValidationError::NoMessageData)?
+        .fid;
+    let record = get_gasless_key_record(db, txn_batch, fid, &key_remove_body.key)?
+        .ok_or(ValidationError::KeyNotRegistered)?;
+
+    // `validate_key_remove_body` already rejects unknown discriminants upstream; re-checking
+    // keeps this function safe if called without it. The exhaustive match forces new variants
+    // to be handled here.
+    let sig_type = KeyRemoveSignatureType::try_from(key_remove_body.signature_type)?;
+    match sig_type {
+        KeyRemoveSignatureType::Custody => {
+            let payload = KeyRemovePayload {
+                fid,
+                key: &key_remove_body.key,
+                nonce: key_remove_body.nonce,
+                deadline: key_remove_body.deadline,
+            };
+            let recovered = recover_key_remove_custody_address(
+                &payload,
+                &key_remove_body.signature,
+                ETH_MAINNET_CHAIN_ID,
+            )?;
+            if custody_address_for_fid(onchain_event_store, txn_batch, fid)?.as_slice()
+                != recovered.as_slice()
+            {
+                return Err(ValidationError::InvalidSignature.into());
+            }
+        }
+        KeyRemoveSignatureType::SelfRevoke => {
+            // The envelope signer is the key being revoked and its Ed25519 signature was
+            // verified upstream, so the only remaining check is that it names itself.
+            if msg.signer.as_slice() != key_remove_body.key.as_slice() {
+                return Err(ValidationError::InvalidSignature.into());
+            }
+        }
+    }
+    Ok((record, sig_type))
 }

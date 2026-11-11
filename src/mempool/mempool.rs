@@ -26,6 +26,7 @@ use crate::{
         store::{
             account::{
                 get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+                verify_message_signer,
             },
             mempool_poller::MempoolMessage,
             stores::Stores,
@@ -555,6 +556,25 @@ impl ReadNodeMempool {
         }
     }
 
+    /// Checks the message's signer against the FID's home shard. Gossip comes from untrusted
+    /// peers, so without this anyone could claim any FID with a throwaway key, filling the
+    /// mempool and spending that FID's rate limits.
+    fn verify_gossiped_signer(&self, message: &proto::Message) -> Result<(), HubError> {
+        let shard = self
+            .message_router
+            .route_fid(message.fid(), self.num_shards);
+        let stores = self.shard_stores.get(&shard).ok_or_else(|| {
+            HubError::invalid_internal_state(&format!("no stores for shard {}", shard))
+        })?;
+        verify_message_signer(
+            &stores.onchain_event_store,
+            &stores.db,
+            &RocksDbTransactionBatch::new(),
+            message,
+        )
+        .map_err(|err| HubError::validation_failure(&err.to_string()))
+    }
+
     fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
@@ -953,6 +973,11 @@ impl Mempool {
                     .count("mempool.gossip_validation_failure", 1, vec![]);
                 return Err(HubError::validation_failure(&err.to_string()));
             }
+            if let Err(err) = self.read_node_mempool.verify_gossiped_signer(user_message) {
+                self.statsd_client
+                    .count("mempool.gossip_signer_rejected", 1, vec![]);
+                return Err(err);
+            }
         }
 
         let shard_ids = self.read_node_mempool.route_mempool_message(&message);
@@ -994,6 +1019,26 @@ impl Mempool {
                 }
             }
             None => {}
+        }
+
+        // Validator messages (onchain events, fname transfers, block events) are exempt so that
+        // a pool full of user messages can't hold up storage rent or signer changes.
+        if let MempoolMessage::UserMessage(_) = &message {
+            let shard_size = self
+                .messages
+                .get(&shard_id)
+                .map_or(0, |messages| messages.len() as u64);
+            if !self.config.allow_unlimited_mempool_size
+                && shard_size >= self.config.capacity_per_shard
+            {
+                self.statsd_client.count_with_shard(
+                    shard_id,
+                    "mempool.capacity_limited",
+                    1,
+                    vec![],
+                );
+                return Err(HubError::unavailable("mempool is full for this shard"));
+            }
         }
 
         // TODO(topocount): Maybe we don't need to run validations here? Related: rate-limit
@@ -1154,36 +1199,31 @@ impl Mempool {
                     let total_messages: u64 = self.messages.values().map(|m| m.len() as u64).sum();
                     self.statsd_client.gauge("mempool.total_messages", total_messages, vec![]);
                     for _ in 0..256 {
-                        if self.config.allow_unlimited_mempool_size || total_messages < self.config.capacity_per_shard {
-                            match self.read_node_mempool.mempool_rx.try_recv() {
-                                Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
-                                    let result = self.insert(message, source).await;
-                                    if let Some(sender) = reply_to {
-                                        if let Err(_) = sender.send(result) {
-                                            error!("Unable to reply to add message request from mempool");
-                                        }
+                        match self.read_node_mempool.mempool_rx.try_recv() {
+                            Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
+                                let result = self.insert(message, source).await;
+                                if let Some(sender) = reply_to {
+                                    if let Err(_) = sender.send(result) {
+                                        error!("Unable to reply to add message request from mempool");
                                     }
                                 }
-                                Ok(MempoolRequest::GetSize(reply_to)) => {
-                                    let mut sizes = HashMap::new();
-                                    for (shard_id, messages) in &self.messages {
-                                        sizes.insert(*shard_id, messages.len() as u64);
-                                    }
-                                    if let Err(_) = reply_to.send(sizes) {
-                                        error!("Unable to reply to message size request from mempool");
-                                    }
-                                }
-                                Err(mpsc::error::TryRecvError::Disconnected) => {
-                                    panic!("Mempool tx is disconnected")
-                                }
-                                Err(mpsc::error::TryRecvError::Empty) => {
-                                    break;
-                                },
-
                             }
-                        } else {
-                            self.statsd_client.count("mempool.capacity_limited", 1, vec![]);
-                            break;
+                            Ok(MempoolRequest::GetSize(reply_to)) => {
+                                let mut sizes = HashMap::new();
+                                for (shard_id, messages) in &self.messages {
+                                    sizes.insert(*shard_id, messages.len() as u64);
+                                }
+                                if let Err(_) = reply_to.send(sizes) {
+                                    error!("Unable to reply to message size request from mempool");
+                                }
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("Mempool tx is disconnected")
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                break;
+                            },
+
                         }
                     }
                 }
