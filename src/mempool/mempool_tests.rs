@@ -1749,6 +1749,163 @@ mod tests {
             .unwrap();
     }
 
+    struct GaslessKeyFixture {
+        fid: u64,
+        custody: alloy_signer_local::PrivateKeySigner,
+        key: ed25519_dalek::SigningKey,
+        timestamp: u32,
+    }
+
+    /// Registers `fid` with storage, an onchain signer (`default_signer`) and one gasless key
+    /// merged the way a shard replays it from shard 0.
+    async fn register_with_gasless_key(engine: &mut ShardEngine, fid: u64) -> GaslessKeyFixture {
+        use alloy_signer_local::PrivateKeySigner;
+
+        let custody = PrivateKeySigner::random();
+        let app_custody = PrivateKeySigner::random();
+        let request_fid = fid + 1;
+        test_helper::register_user(
+            fid,
+            default_signer(),
+            custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+        test_helper::register_user(
+            request_fid,
+            generate_signer(),
+            app_custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+
+        let key = generate_signer();
+        let timestamp = messages_factory::farcaster_time();
+        let key_add = messages_factory::keys::create_key_add(
+            fid,
+            &custody,
+            request_fid,
+            &app_custody,
+            &key,
+            vec![proto::MessageType::CastAdd],
+            3600,
+            1,
+            timestamp + 1_000_000,
+            Some(timestamp),
+        );
+        test_helper::commit_block_events(
+            engine,
+            vec![&events_factory::create_merge_message_event(key_add, 1)],
+        )
+        .await;
+        GaslessKeyFixture {
+            fid,
+            custody,
+            key,
+            timestamp,
+        }
+    }
+
+    fn custody_key_remove(f: &GaslessKeyFixture, nonce: u32) -> proto::Message {
+        messages_factory::keys::create_key_remove_custody(
+            f.fid,
+            &f.custody,
+            &f.key,
+            &f.key.verifying_key().to_bytes(),
+            nonce,
+            f.timestamp + 1_000_000,
+            Some(f.timestamp + 1),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_key_remove_is_not_blocked_by_an_exhausted_storage_quota() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, true, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let f = register_with_gasless_key(engine, 1234).await;
+        let storage_allowance: u32 = engine
+            .get_stores()
+            .get_storage_limits(f.fid)
+            .unwrap()
+            .limits
+            .iter()
+            .map(|limit| limit.limit as u32)
+            .sum();
+        let hourly_quota = 100.max(storage_allowance / 10);
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        for i in 0..hourly_quota {
+            let cast = create_cast_add(f.fid, &format!("cast {i}"), None, None);
+            add_gossiped_message(&mempool_tx, cast).await.unwrap();
+        }
+        let over_quota = create_cast_add(f.fid, "over quota", None, None);
+        let error = add_gossiped_message(&mempool_tx, over_quota)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        add_gossiped_message(&mempool_tx, custody_key_remove(&f, 2))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_key_remove_limit_is_per_key_and_authorization() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let f = register_with_gasless_key(engines.get_mut(&1).unwrap(), 1234).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let self_revoke = |nonce| {
+            messages_factory::keys::create_key_remove_self_revoke(
+                f.fid,
+                &f.key,
+                nonce,
+                f.timestamp + 1_000_000,
+                Some(f.timestamp + 1),
+            )
+        };
+        for nonce in 1..=mempool::KEY_REMOVE_RATE_LIMIT_PER_MINUTE {
+            add_gossiped_message(&mempool_tx, self_revoke(nonce))
+                .await
+                .unwrap();
+        }
+        let error = add_gossiped_message(
+            &mempool_tx,
+            self_revoke(mempool::KEY_REMOVE_RATE_LIMIT_PER_MINUTE + 1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        add_gossiped_message(&mempool_tx, custody_key_remove(&f, 2))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_full_shard_does_not_block_other_shards_or_onchain_events() {
         let mut mempool_config = mempool::Config::default();

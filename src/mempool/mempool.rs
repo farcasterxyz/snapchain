@@ -131,8 +131,8 @@ impl RateLimits {
 // -------------------------------------------------------------------------------------------
 //
 // Separate from the storage-quota-derived `RateLimits` above: this is a fixed, FIP-required
-// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` is
-// intentionally never rate-limited — revocation of a compromised key must never be blockable.
+// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` has its
+// own limiter (`KeyRemoveRateLimits`) so revoking a key is never blocked by other traffic.
 // Gating in the mempool covers both RPC-submitted and gossip-forwarded KEY_ADD messages: a
 // rejection in `message_is_valid` both keeps the message out of the pool and suppresses
 // downstream gossip (since `insert_into_shard` only gossips on the success branch).
@@ -172,6 +172,50 @@ impl KeyAddRateLimits {
         self.statsd_client.gauge(
             "mempool.key_add_rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
+            vec![],
+        );
+        limiter.check().is_ok()
+    }
+}
+
+/// KEY_REMOVE messages admitted per minute for each (fid, key, authorization type).
+pub const KEY_REMOVE_RATE_LIMIT_PER_MINUTE: u32 = 5;
+
+/// Fixed limit on KEY_REMOVE, kept apart from the storage-quota limiter so a signer that spends
+/// its fid's quota cannot stop the fid from revoking it.
+///
+/// Buckets are keyed by (fid, removed key, authorization type). Admission only accepts a
+/// KEY_REMOVE that is authorized to remove its key, so a bucket can only be filled by messages
+/// that would remove that same key, and a compromised key's self-revocations never touch the
+/// custody bucket.
+pub struct KeyRemoveRateLimits {
+    rate_limits: Cache<(u64, Vec<u8>, u32), Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
+}
+
+impl KeyRemoveRateLimits {
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
+        Self {
+            rate_limits: CacheBuilder::new(1_000_000)
+                .time_to_idle(Duration::from_secs(120))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
+            statsd_client,
+        }
+    }
+
+    /// Returns `true` if the message may proceed, `false` if its bucket is empty.
+    pub fn consume(&self, fid: u64, body: &proto::KeyRemoveBody) -> bool {
+        let limiter =
+            self.rate_limits
+                .get_with((fid, body.key.clone(), body.signature_type), || {
+                    Arc::new(RateLimiter::direct(Quota::per_minute(
+                        NonZeroU32::new(KEY_REMOVE_RATE_LIMIT_PER_MINUTE).unwrap(),
+                    )))
+                });
+        self.statsd_client.gauge(
+            "mempool.key_remove_rate_limiter_entries",
+            self.rate_limits.entry_count(),
             vec![],
         );
         limiter.check().is_ok()
@@ -643,6 +687,13 @@ pub fn validate_gossiped_message(
 /// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
 /// message without `data` cannot be a KEY_ADD and therefore shouldn't trip the KEY_ADD limiter;
 /// it will fail later validation on its own.
+fn key_remove_body(message: &proto::Message) -> Option<&proto::KeyRemoveBody> {
+    match message.data.as_ref()?.body.as_ref()? {
+        proto::message_data::Body::KeyRemoveBody(body) => Some(body),
+        _ => None,
+    }
+}
+
 fn is_key_add(message: &proto::Message) -> bool {
     match &message.data {
         Some(data) => matches!(data.body, Some(proto::message_data::Body::KeyAddBody(_))),
@@ -682,6 +733,7 @@ pub struct Mempool {
     // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
     // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
     key_add_rate_limits: KeyAddRateLimits,
+    key_remove_rate_limits: KeyRemoveRateLimits,
     live_at_rate_limits: LiveAtRateLimits,
     live_at_messages_by_fid: HashMap<(u32, u64), MempoolKey>,
 }
@@ -716,6 +768,7 @@ impl Mempool {
                 None
             },
             key_add_rate_limits: KeyAddRateLimits::new(statsd_client.clone()),
+            key_remove_rate_limits: KeyRemoveRateLimits::new(statsd_client.clone()),
             live_at_rate_limits: LiveAtRateLimits::new(
                 shard_stores.clone(),
                 statsd_client.clone(),
@@ -741,11 +794,21 @@ impl Mempool {
             MempoolMessage::UserMessage(user_msg) => {
                 let fid = user_msg.fid();
 
+                // KEY_REMOVE only counts against its own per-key limit, never the storage quota,
+                // so a compromised signer cannot use up the quota to block its own revocation.
+                if let Some(key_remove) = key_remove_body(user_msg) {
+                    if !self.key_remove_rate_limits.consume(fid, key_remove) {
+                        self.statsd_client
+                            .count("mempool.key_remove_rate_limit_hit", 1, vec![]);
+                        return true;
+                    }
+                    return false;
+                }
+
                 // KEY_ADD-specific 1/min limit (NEYN-10579). Gated in the mempool — not at RPC —
                 // so both RPC-submitted and gossip-forwarded KEY_ADDs are dropped without
-                // re-propagation when over limit. KEY_REMOVE is intentionally NEVER rate-limited:
-                // revocation of a compromised key must not be blockable. Non-key user messages
-                // fall through to the storage-quota limiter below.
+                // re-propagation when over limit. Non-key user messages fall through to the
+                // storage-quota limiter below.
                 // TODO(#10): this is also the hook for lazy `registration_tx_hash` replacement
                 // eviction — wire in once the pending-FID flow lands.
                 if is_key_add(user_msg) {
