@@ -153,7 +153,20 @@ mod tests {
                 round: ROUND_OVERFLOW,
                 ..Default::default()
             }),
-            "Round out of range",
+            "Invalid round",
+        );
+    }
+
+    #[test]
+    fn rejects_vote_with_negative_round() {
+        assert_rejected(
+            decode_vote(proto::Vote {
+                height: Some(height()),
+                voter: addr32(),
+                round: -1,
+                ..Default::default()
+            }),
+            "Invalid round: -1",
         );
     }
 
@@ -192,8 +205,40 @@ mod tests {
                 round: ROUND_OVERFLOW,
                 ..Default::default()
             }),
-            "Round out of range",
+            "Invalid round",
         );
+    }
+
+    #[test]
+    fn rejects_proposal_with_negative_round() {
+        assert_rejected(
+            decode_proposal(proto::Proposal {
+                height: Some(height()),
+                value: Some(shard_hash()),
+                proposer: addr32(),
+                round: -1,
+                ..Default::default()
+            }),
+            "Invalid round: -1",
+        );
+    }
+
+    #[test]
+    fn accepts_proposal_with_nil_pol_round() {
+        match decode_proposal(proto::Proposal {
+            height: Some(height()),
+            value: Some(shard_hash()),
+            proposer: addr32(),
+            round: 1,
+            pol_round: -1,
+        }) {
+            Ok(SignedConsensusMsg::Proposal(proposal)) => {
+                assert_eq!(proposal.message.round.as_i64(), 1);
+                assert_eq!(proposal.message.pol_round.as_i64(), -1);
+            }
+            Ok(SignedConsensusMsg::Vote(_)) => panic!("expected a proposal"),
+            Err(err) => panic!("nil pol_round is valid, got {err}"),
+        }
     }
 
     #[test]

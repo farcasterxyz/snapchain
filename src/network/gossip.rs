@@ -1300,7 +1300,27 @@ impl SnapchainGossip {
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
-                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let signer = match &signed_consensus_msg.consensus_message {
+                        Some(proto::consensus_message::ConsensusMessage::Vote(vote)) => {
+                            vote.voter.as_slice()
+                        }
+                        Some(proto::consensus_message::ConsensusMessage::Proposal(proposal)) => {
+                            proposal.proposer.as_slice()
+                        }
+                        None => {
+                            warn!("Failed to get shard id from consensus message");
+                            return None;
+                        }
+                    };
+                    let publisher = peer_id_from_validator_key(signer);
+                    let Some(author) = source.filter(|author| publisher == Some(*author)) else {
+                        warn!(
+                            peer_id = peer_id.to_string(),
+                            "Dropping consensus message not published by its signer"
+                        );
+                        return None;
+                    };
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&author);
                     let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
                     let event = MalachiteNetworkEvent::Message(
                         Channel::Consensus,

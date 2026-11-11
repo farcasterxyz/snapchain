@@ -541,10 +541,13 @@ impl Vote {
             None => NilOrVal::Nil,
             Some(value) => NilOrVal::Val(value),
         };
+        let round = u32::try_from(proto.round)
+            .map(Round::new)
+            .map_err(|_| format!("Invalid round: {}", proto.round))?;
         Ok(Self {
             vote_type,
             height: proto.height.ok_or("Missing vote height")?,
-            round: round_from_i64(proto.round)?,
+            round,
             voter: Address::try_from_slice(&proto.voter)?,
             shard_hash,
         })
@@ -576,9 +579,12 @@ impl Proposal {
     }
 
     pub fn try_from_proto(proto: proto::Proposal) -> Result<Self, String> {
+        let round = u32::try_from(proto.round)
+            .map(Round::new)
+            .map_err(|_| format!("Invalid round: {}", proto.round))?;
         Ok(Self {
             height: proto.height.ok_or("Missing proposal height")?,
-            round: round_from_i64(proto.round)?,
+            round,
             shard_hash: proto.value.ok_or("Missing proposal value")?,
             pol_round: round_from_i64(proto.pol_round)?,
             proposer: Address::try_from_slice(&proto.proposer)?,

@@ -1102,8 +1102,9 @@ async fn test_full_proposal_must_be_published_by_its_proposer() {
 #[serial]
 async fn test_malformed_gossip_messages_are_dropped() {
     use crate::proto::{
-        full_proposal::ProposedValue, gossip_message, ContactInfo, ContactInfoBody, FullProposal,
-        GossipMessage, Height,
+        consensus_message, full_proposal::ProposedValue, gossip_message, ConsensusMessage,
+        ContactInfo, ContactInfoBody, FullProposal, GossipMessage, Height, Proposal, ShardHash,
+        Vote,
     };
     use crate::utils::factory::shard_chunk_factory;
     use libp2p::PeerId;
@@ -1182,6 +1183,47 @@ async fn test_malformed_gossip_messages_are_dropped() {
             )),
         );
         assert!(forwarded.is_none(), "forwarded {proposal:?}");
+    }
+
+    let signer = proposer.public().to_bytes().to_vec();
+    let consensus = |message| {
+        encode(gossip_message::GossipMessage::Consensus(ConsensusMessage {
+            signature: vec![],
+            consensus_message: Some(message),
+        }))
+    };
+    let vote = consensus(consensus_message::ConsensusMessage::Vote(Vote {
+        height: Some(Height::new(1, 1)),
+        round: 0,
+        voter: signer.clone(),
+        ..Default::default()
+    }));
+    let proposal = consensus(consensus_message::ConsensusMessage::Proposal(Proposal {
+        height: Some(Height::new(1, 1)),
+        round: 0,
+        pol_round: -1,
+        proposer: signer,
+        value: Some(ShardHash {
+            shard_index: 1,
+            hash: vec![1],
+        }),
+    }));
+    let author_id = MalachitePeerId::from_libp2p(&author.unwrap());
+    for message in [vote, proposal] {
+        let forwarded = gossip.map_gossip_bytes_to_system_message(peer, author, message.clone());
+        assert!(matches!(
+            forwarded,
+            Some(SystemMessage::MalachiteNetwork(
+                _,
+                MalachiteNetworkEvent::Message(Channel::Consensus, from, _),
+            )) if from == author_id
+        ));
+        assert!(gossip
+            .map_gossip_bytes_to_system_message(peer, Some(PeerId::random()), message.clone())
+            .is_none());
+        assert!(gossip
+            .map_gossip_bytes_to_system_message(peer, None, message)
+            .is_none());
     }
 
     let contact_info = gossip.map_gossip_bytes_to_system_message(
