@@ -83,6 +83,14 @@ impl ChainAPI for MockChainClient {
     }
 }
 
+/// Waits for the gate's relay verdict, failing the test instead of hanging if none arrives.
+async fn verdict(verdict_rx: oneshot::Receiver<Result<(), HubError>>) -> Result<(), HubError> {
+    tokio::time::timeout(FORWARD_WAIT, verdict_rx)
+        .await
+        .expect("no relay verdict arrived")
+        .expect("verdict channel dropped without an answer")
+}
+
 struct Harness {
     gate: GossipL1Gate,
     mempool_rx: mpsc::Receiver<MempoolRequest>,
@@ -467,7 +475,7 @@ async fn relay_verdict_rejects_a_failed_l1_check() {
     let mut harness = Harness::new(Config::default()).await;
     let forged = harness.ens_proof(vec![0x33; 20], 0);
 
-    let verdict = harness.gossip_with_verdict(&forged).await.unwrap();
+    let verdict = verdict(harness.gossip_with_verdict(&forged)).await;
 
     assert_eq!(verdict.unwrap_err().code, "bad_request.validation_failure");
     harness.assert_nothing_forwarded().await;
@@ -482,7 +490,7 @@ async fn relay_verdict_is_the_mempools_answer() {
 
     let accepted_verdict = harness.gossip_with_verdict(&accepted);
     assert_eq!(harness.answer_forwarded(Ok(())).await, accepted);
-    assert_eq!(accepted_verdict.await.unwrap(), Ok(()));
+    assert_eq!(verdict(accepted_verdict).await, Ok(()));
 
     let merged_verdict = harness.gossip_with_verdict(&merged);
     let duplicate = HubError::duplicate("message has already been merged");
@@ -490,7 +498,7 @@ async fn relay_verdict_is_the_mempools_answer() {
         harness.answer_forwarded(Err(duplicate.clone())).await,
         merged
     );
-    assert_eq!(merged_verdict.await.unwrap(), Err(duplicate));
+    assert_eq!(verdict(merged_verdict).await, Err(duplicate));
 }
 
 #[tokio::test]
@@ -498,7 +506,7 @@ async fn relay_verdict_rejects_inactive_signer() {
     let harness = Harness::new(Config::default()).await;
     let spoofed = ens_proof_signed_by(&signers::generate_signer(), custody_address(), 0);
 
-    let verdict = harness.gossip_with_verdict(&spoofed).await.unwrap();
+    let verdict = verdict(harness.gossip_with_verdict(&spoofed)).await;
 
     assert_eq!(verdict.unwrap_err().code, "bad_request.validation_failure");
     assert_eq!(harness.chain.calls(), 0);
@@ -516,7 +524,7 @@ async fn relay_verdict_ignores_messages_beyond_concurrency_cap() {
     let first = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 0));
     let second = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 1));
 
-    assert_eq!(second.await.unwrap().unwrap_err().code, "unavailable");
+    assert_eq!(verdict(second).await.unwrap_err().code, "unavailable");
     harness.answer_forwarded(Ok(())).await;
-    assert_eq!(first.await.unwrap(), Ok(()));
+    assert_eq!(verdict(first).await, Ok(()));
 }
