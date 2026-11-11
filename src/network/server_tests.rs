@@ -7378,6 +7378,86 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn bulk_response_hash(response: &proto::BulkMessageResponse) -> &[u8] {
+        match response.response.as_ref().unwrap() {
+            proto::bulk_message_response::Response::Message(message) => &message.hash,
+            proto::bulk_message_response::Response::MessageError(error) => &error.hash,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_bulk_messages_answers_in_submission_order_with_rate_limits() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, mut engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server_with_options(None, None, None, true).await;
+
+        // Fids that both `EvenOddRouterForTest` and the limiter's `ShardRouter` place on the
+        // same shard.
+        let fid_on_shard = |shard: u32, parity: u64| {
+            (1u64..)
+                .filter(|fid| fid % 2 == parity)
+                .find(|fid| routing::ShardRouter {}.route_fid(*fid, 2) == shard)
+                .unwrap()
+        };
+        let shard1_fid = fid_on_shard(1, 1);
+        let shard2_fid = fid_on_shard(2, 0);
+        for (fid, engine) in [(shard1_fid, &mut engine1), (shard2_fid, &mut engine2)] {
+            register_user(
+                fid,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                engine,
+            )
+            .await;
+        }
+
+        let attacker_key = generate_signer();
+        let cast = |fid: u64, text: &str, key: Option<&ed25519_dalek::SigningKey>| {
+            messages_factory::casts::create_cast_add(fid, text, None, key)
+        };
+        let messages = vec![
+            cast(shard1_fid, "shard 1 first", None),
+            cast(shard2_fid, "shard 2", None),
+            cast(shard1_fid, "forged", Some(&attacker_key)),
+            cast(shard1_fid, "shard 1 last", None),
+        ];
+        let responses = submit_bulk_messages(&service, messages.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .messages;
+        assert_eq!(responses.len(), messages.len());
+        for (message, response) in messages.iter().zip(&responses) {
+            assert_eq!(bulk_response_hash(response), message.hash.as_slice());
+        }
+        match responses[2].response.as_ref().unwrap() {
+            proto::bulk_message_response::Response::MessageError(error) => {
+                assert_eq!(error.err_code, "bad_request.validation_failure")
+            }
+            other => panic!("forged message was accepted: {other:?}"),
+        }
+
+        let all_forged = vec![
+            cast(shard1_fid, "forged 1", Some(&attacker_key)),
+            cast(shard1_fid, "forged 2", Some(&attacker_key)),
+        ];
+        let responses = submit_bulk_messages(&service, all_forged.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .messages;
+        assert_eq!(responses.len(), all_forged.len());
+        for (message, response) in all_forged.iter().zip(&responses) {
+            assert_eq!(bulk_response_hash(response), message.hash.as_slice());
+        }
+    }
+
     #[tokio::test]
     async fn test_submit_message_checks_rate_limit_before_simulation() {
         let (

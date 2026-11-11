@@ -1411,28 +1411,36 @@ impl HubService for MyHubService {
             message_bytes_decode(msg);
         }
 
-        // 1. Group messages by their destination shard
-        let mut messages_by_shard: HashMap<u32, Vec<proto::Message>> = HashMap::new();
-        for msg in messages {
+        // 1. Group messages by their destination shard, keeping each one's position in the
+        // request so responses can be returned in submission order.
+        let hashes: Vec<Vec<u8>> = messages.iter().map(|msg| msg.hash.clone()).collect();
+        let mut messages_by_shard: HashMap<u32, Vec<(usize, proto::Message)>> = HashMap::new();
+        for (index, msg) in messages.into_iter().enumerate() {
             let shard_id =
                 routing::route_message(&self.message_router, &msg, self.num_shards, version);
-            messages_by_shard.entry(shard_id).or_default().push(msg);
+            messages_by_shard
+                .entry(shard_id)
+                .or_default()
+                .push((index, msg));
         }
 
-        let mut results = Vec::with_capacity(num_messages);
+        let mut results: Vec<Option<proto::BulkMessageResponse>> = vec![None; num_messages];
 
         // 2. Process each shard's batch transactionally for validation
         for (shard_id, batch) in messages_by_shard {
-            let batch: Vec<proto::Message> = batch
+            let (indices, batch): (Vec<usize>, Vec<proto::Message>) = batch
                 .into_iter()
-                .filter_map(|msg| match self.charge_rate_limit(&msg) {
-                    Ok(()) => Some(msg),
+                .filter_map(|(index, msg)| match self.charge_rate_limit(&msg) {
+                    Ok(()) => Some((index, msg)),
                     Err(err) => {
-                        results.push(create_error_response(msg.hash, err));
+                        results[index] = Some(create_error_response(msg.hash, err));
                         None
                     }
                 })
-                .collect();
+                .unzip();
+            if batch.is_empty() {
+                continue;
+            }
             self.statsd_client
                 .count("rpc.submit_message_in_flight", batch.len() as i64, vec![]);
 
@@ -1442,13 +1450,13 @@ impl HubService for MyHubService {
                 .await;
 
             // 4. Process simulation results
-            for (sim_result, msg) in sim_results.into_iter().zip(batch.into_iter()) {
-                match sim_result {
+            for ((sim_result, msg), index) in sim_results.into_iter().zip(batch).zip(indices) {
+                results[index] = Some(match sim_result {
                     Ok(()) => {
                         // 4a. If simulation succeeds, submit the message to the mempool
                         let message_hash_for_error = msg.hash.clone();
                         let result = self.submit_message_to_mempool(msg).await;
-                        results.push(match result {
+                        match result {
                             Ok(message) => {
                                 self.statsd_client
                                     .count("rpc.submit_message.success", 1, vec![]);
@@ -1473,18 +1481,28 @@ impl HubService for MyHubService {
                                 );
                                 create_error_response(message_hash_for_error, err)
                             }
-                        });
+                        }
                     }
-                    Err(hub_error) => {
-                        // 4b. If simulation fails, create an error response for the message
-                        results.push(create_error_response(msg.hash, hub_error));
-                    }
-                }
+                    // 4b. If simulation fails, create an error response for the message
+                    Err(hub_error) => create_error_response(msg.hash, hub_error),
+                });
             }
         }
 
+        let messages = results
+            .into_iter()
+            .zip(hashes)
+            .map(|(response, hash)| {
+                response.unwrap_or_else(|| {
+                    create_error_response(
+                        hash,
+                        HubError::invalid_internal_state("message was not processed"),
+                    )
+                })
+            })
+            .collect();
         Ok(Response::new(proto::SubmitBulkMessagesResponse {
-            messages: results,
+            messages,
         }))
     }
 
