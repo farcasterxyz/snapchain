@@ -532,8 +532,13 @@ mod tests {
         });
         let block_stores = block_engine.stores();
 
+        // The mempool's rate limiter routes fids with `ShardRouter`, which disagrees with this
+        // harness's `EvenOddRouterForTest` and would read storage from the wrong shard.
         let mut mempool = Mempool::new(
-            mempool::Config::default(),
+            mempool::Config {
+                enable_rate_limits: false,
+                ..mempool::Config::default()
+            },
             engine1.network,
             mempool_rx,
             msgs_request_rx,
