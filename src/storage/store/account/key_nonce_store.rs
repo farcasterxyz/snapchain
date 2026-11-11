@@ -92,13 +92,13 @@ pub fn get_app_nonce(
     get_nonce(db, txn, &make_app_nonce_key(app_fid))
 }
 
-fn check_and_set_nonce(
+fn check_nonce_unused(
     db: &RocksDB,
-    txn: &mut RocksDbTransactionBatch,
-    key: Vec<u8>,
+    txn: &RocksDbTransactionBatch,
+    key: &[u8],
     new_nonce: u32,
 ) -> Result<(), HubError> {
-    let stored = get_nonce(db, txn, &key)?.unwrap_or(0);
+    let stored = get_nonce(db, txn, key)?.unwrap_or(0);
     if new_nonce <= stored {
         return Err(HubError {
             code: "bad_request.conflict".to_string(),
@@ -108,8 +108,39 @@ fn check_and_set_nonce(
             ),
         });
     }
+    Ok(())
+}
+
+fn check_and_set_nonce(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    key: Vec<u8>,
+    new_nonce: u32,
+) -> Result<(), HubError> {
+    check_nonce_unused(db, txn, &key, new_nonce)?;
     txn.put(key, new_nonce.to_be_bytes().to_vec());
     Ok(())
+}
+
+/// Read-only form of [`check_and_set_user_nonce`]: errors if `new_nonce` is not greater than
+/// the stored user nonce for `fid`.
+pub fn check_user_nonce_unused(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    fid: u64,
+    new_nonce: u32,
+) -> Result<(), HubError> {
+    check_nonce_unused(db, txn, &make_user_nonce_key(fid), new_nonce)
+}
+
+/// Read-only form of [`check_and_set_app_nonce`].
+pub fn check_app_nonce_unused(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    app_fid: u64,
+    new_nonce: u32,
+) -> Result<(), HubError> {
+    check_nonce_unused(db, txn, &make_app_nonce_key(app_fid), new_nonce)
 }
 
 /// Validates `new_nonce > stored user nonce for fid` and stages the update on `txn`. The caller

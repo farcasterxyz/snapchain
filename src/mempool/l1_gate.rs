@@ -45,7 +45,7 @@ use crate::mempool::l1_validator::{L1CacheConfig, L1ValidationError, L1Validator
 use crate::mempool::mempool::{validate_gossiped_message, MempoolRequest, MempoolSource};
 use crate::proto::{self, FarcasterNetwork};
 use crate::storage::db::RocksDbTransactionBatch;
-use crate::storage::store::account::get_active_key;
+use crate::storage::store::account::verify_message_signer;
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 
@@ -284,17 +284,13 @@ impl GossipL1GateWorker {
             .validator
             .stores_for(fid)
             .ok_or(Refusal::Rejected("shard_not_hosted"))?;
-        let active_key = get_active_key(
+        verify_message_signer(
             &stores.onchain_event_store,
             &stores.db,
             &RocksDbTransactionBatch::new(),
-            fid,
-            &message.signer,
+            message,
         )
-        .map_err(|_| Refusal::Rejected("signer_lookup_failed"))?;
-        if !active_key.is_some_and(|key| key.admits(message.msg_type())) {
-            return Err(Refusal::Rejected("inactive_signer"));
-        }
+        .map_err(|_| Refusal::Rejected("inactive_signer"))?;
 
         if !self.consume_for_fid(fid) {
             return Err(Refusal::Dropped("rate_limited"));

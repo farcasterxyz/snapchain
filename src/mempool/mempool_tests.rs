@@ -37,6 +37,7 @@ mod tests {
 
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
     use crate::mempool::routing::{MessageRouter, ShardRouter};
+    use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::username_factory;
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
@@ -93,6 +94,27 @@ mod tests {
         broadcast::Sender<Block>,
         mpsc::Receiver<SystemMessage>,
     ) {
+        let mut mempool_config = mempool::Config::default();
+        mempool_config.enable_rate_limits = enable_rate_limits;
+        setup_with_mempool_config(config, mempool_config, num_shards, network).await
+    }
+
+    async fn setup_with_mempool_config(
+        config: Option<Config>,
+        mempool_config: mempool::Config,
+        num_shards: u32,
+        network: FarcasterNetwork,
+    ) -> (
+        HashMap<u32, ShardEngine>,
+        BlockEngine,
+        Option<SnapchainGossip>,
+        Mempool,
+        mpsc::Sender<MempoolRequest>,
+        mpsc::Sender<MempoolMessagesRequest>,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+        mpsc::Receiver<SystemMessage>,
+    ) {
         let keypair = Keypair::generate();
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -136,8 +158,6 @@ mod tests {
             None => mpsc::channel(100).0,
         };
 
-        let mut mempool_config = mempool::Config::default();
-        mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
             network,
@@ -1266,7 +1286,7 @@ mod tests {
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
         let (
-            _,
+            mut engines1,
             _,
             gossip1,
             mut mempool1,
@@ -1277,7 +1297,7 @@ mod tests {
             _,
         ) = setup(Some(config1), false, 1).await;
         let (
-            _,
+            mut engines2,
             _,
             gossip2,
             mut mempool2,
@@ -1287,6 +1307,22 @@ mod tests {
             _block_decision_tx1,
             mut system_rx2,
         ) = setup(Some(config2), false, 1).await;
+
+        // Gossiped messages are only admitted from signers registered to their fid.
+        test_helper::register_user(
+            3214,
+            default_signer(),
+            default_custody_address(),
+            engines1.get_mut(&1).unwrap(),
+        )
+        .await;
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            engines2.get_mut(&1).unwrap(),
+        )
+        .await;
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -1500,7 +1536,7 @@ mod tests {
     #[tokio::test]
     async fn test_malformed_gossiped_messages_are_rejected_without_stopping_the_mempool() {
         let (
-            _,
+            mut engines,
             _,
             _,
             mut mempool,
@@ -1510,6 +1546,13 @@ mod tests {
             _block_decision_tx,
             _,
         ) = setup(None, false, 1).await;
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            engines.get_mut(&1).unwrap(),
+        )
+        .await;
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -1542,6 +1585,475 @@ mod tests {
             Some(MempoolMessage::UserMessage(valid)),
         )
         .await;
+    }
+
+    async fn add_message_with_timeout(
+        mempool_tx: &mpsc::Sender<MempoolRequest>,
+        message: MempoolMessage,
+        source: MempoolSource,
+    ) -> Result<(), crate::core::error::HubError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(message, source, Some(reply_tx)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .expect("mempool did not process the message")
+            .expect("mempool dropped the reply; the mempool task has likely panicked")
+    }
+
+    #[tokio::test]
+    async fn test_gossiped_message_signed_by_unregistered_key_is_rejected() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        test_helper::register_user(1234, default_signer(), default_custody_address(), engine).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let forged = create_cast_add(1234, "forged", None, Some(&generate_signer()));
+        let error = add_gossiped_message(&mempool_tx, forged).await.unwrap_err();
+        assert_eq!(error.code, "bad_request.validation_failure");
+
+        let unregistered_fid = create_cast_add(4321, "no such fid", None, None);
+        let error = add_gossiped_message(&mempool_tx, unregistered_fid)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request.validation_failure");
+        pull_message(&messages_request_tx, 1, None).await;
+
+        let genuine = create_cast_add(1234, "genuine", None, None);
+        add_gossiped_message(&mempool_tx, genuine.clone())
+            .await
+            .unwrap();
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(genuine)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_forged_gossip_does_not_consume_the_victims_rate_limit() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, true, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let victim = 1234;
+        test_helper::register_user(victim, default_signer(), default_custody_address(), engine)
+            .await;
+        let storage_allowance: u32 = engine
+            .get_stores()
+            .get_storage_limits(victim)
+            .unwrap()
+            .limits
+            .iter()
+            .map(|limit| limit.limit as u32)
+            .sum();
+        let hourly_quota = 100.max(storage_allowance / 10);
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let attacker_key = generate_signer();
+        for i in 0..=hourly_quota {
+            let forged = create_cast_add(victim, &format!("forged {i}"), None, Some(&attacker_key));
+            let error = add_gossiped_message(&mempool_tx, forged).await.unwrap_err();
+            assert_eq!(error.code, "bad_request.validation_failure");
+        }
+
+        let genuine = create_cast_add(victim, "genuine", None, None);
+        add_gossiped_message(&mempool_tx, genuine).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_forged_key_add_does_not_consume_the_victims_key_add_limit() {
+        use alloy_signer_local::PrivateKeySigner;
+
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let victim = 1234;
+        let request_fid = 1235;
+        let victim_custody = PrivateKeySigner::random();
+        let app_custody = PrivateKeySigner::random();
+        test_helper::register_user(
+            victim,
+            generate_signer(),
+            victim_custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+        test_helper::register_user(
+            request_fid,
+            generate_signer(),
+            app_custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let timestamp = messages_factory::farcaster_time();
+        let key_add = |custody: &PrivateKeySigner| {
+            messages_factory::keys::create_key_add(
+                victim,
+                custody,
+                request_fid,
+                &app_custody,
+                &generate_signer(),
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp + 1_000_000,
+                Some(timestamp),
+            )
+        };
+
+        let forged = key_add(&PrivateKeySigner::random());
+        let error = add_gossiped_message(&mempool_tx, forged).await.unwrap_err();
+        assert_eq!(error.code, "bad_request.validation_failure");
+
+        add_gossiped_message(&mempool_tx, key_add(&victim_custody))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_full_shard_still_accepts_a_live_at_that_replaces_one_in_the_pool() {
+        let mut mempool_config = mempool::Config::default();
+        mempool_config.capacity_per_shard = 1;
+        mempool_config.enable_rate_limits = false;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup_with_mempool_config(None, mempool_config, 1, FarcasterNetwork::Devnet).await;
+        commit_event(
+            engines.get_mut(&1).unwrap(),
+            &default_storage_event(FID_FOR_TEST),
+        )
+        .await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let live_at = |url: &str, timestamp: u32| {
+            MempoolMessage::UserMessage(create_user_data_add(
+                FID_FOR_TEST,
+                proto::UserDataType::LiveAt,
+                &url.to_string(),
+                Some(timestamp),
+                None,
+            ))
+        };
+        add_message_with_timeout(
+            &mempool_tx,
+            live_at("https://example.com/one", 10),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap();
+
+        let newer = live_at("https://example.com/two", 11);
+        add_message_with_timeout(&mempool_tx, newer.clone(), MempoolSource::Local)
+            .await
+            .unwrap();
+
+        let error = add_message_with_timeout(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(FID_FOR_TEST, "over capacity", None, None)),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "unavailable");
+
+        pull_message(&messages_request_tx, 1, Some(newer)).await;
+    }
+
+    struct GaslessKeyFixture {
+        fid: u64,
+        custody: alloy_signer_local::PrivateKeySigner,
+        key: ed25519_dalek::SigningKey,
+        timestamp: u32,
+    }
+
+    /// Registers `fid` with storage, an onchain signer (`default_signer`) and one gasless key
+    /// merged the way a shard replays it from shard 0.
+    async fn register_with_gasless_key(engine: &mut ShardEngine, fid: u64) -> GaslessKeyFixture {
+        use alloy_signer_local::PrivateKeySigner;
+
+        let custody = PrivateKeySigner::random();
+        let app_custody = PrivateKeySigner::random();
+        let request_fid = fid + 1;
+        test_helper::register_user(
+            fid,
+            default_signer(),
+            custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+        test_helper::register_user(
+            request_fid,
+            generate_signer(),
+            app_custody.address().as_slice().to_vec(),
+            engine,
+        )
+        .await;
+
+        let key = generate_signer();
+        let timestamp = messages_factory::farcaster_time();
+        let key_add = messages_factory::keys::create_key_add(
+            fid,
+            &custody,
+            request_fid,
+            &app_custody,
+            &key,
+            vec![proto::MessageType::CastAdd],
+            3600,
+            1,
+            timestamp + 1_000_000,
+            Some(timestamp),
+        );
+        test_helper::commit_block_events(
+            engine,
+            vec![&events_factory::create_merge_message_event(key_add, 1)],
+        )
+        .await;
+        GaslessKeyFixture {
+            fid,
+            custody,
+            key,
+            timestamp,
+        }
+    }
+
+    fn custody_key_remove(f: &GaslessKeyFixture, nonce: u32) -> proto::Message {
+        messages_factory::keys::create_key_remove_custody(
+            f.fid,
+            &f.custody,
+            &f.key,
+            &f.key.verifying_key().to_bytes(),
+            nonce,
+            f.timestamp + 1_000_000,
+            Some(f.timestamp + 1),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_key_remove_is_not_blocked_by_an_exhausted_storage_quota() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, true, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let f = register_with_gasless_key(engine, 1234).await;
+        let storage_allowance: u32 = engine
+            .get_stores()
+            .get_storage_limits(f.fid)
+            .unwrap()
+            .limits
+            .iter()
+            .map(|limit| limit.limit as u32)
+            .sum();
+        let hourly_quota = 100.max(storage_allowance / 10);
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        for i in 0..hourly_quota {
+            let cast = create_cast_add(f.fid, &format!("cast {i}"), None, None);
+            add_gossiped_message(&mempool_tx, cast).await.unwrap();
+        }
+        let over_quota = create_cast_add(f.fid, "over quota", None, None);
+        let error = add_gossiped_message(&mempool_tx, over_quota)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        add_gossiped_message(&mempool_tx, custody_key_remove(&f, 2))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rpc_precheck_does_not_charge_key_remove_to_the_storage_quota() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, true, 1).await;
+        let f = register_with_gasless_key(engines.get_mut(&1).unwrap(), 1234).await;
+        let rate_limits = mempool.rate_limits_for_rpc().unwrap();
+
+        while rate_limits.consume_for_fid(f.fid) {}
+        let cast = create_cast_add(f.fid, "over quota", None, None);
+        let error = rate_limits
+            .charge_rpc_message(&cast, FarcasterNetwork::Devnet)
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        rate_limits
+            .charge_rpc_message(&custody_key_remove(&f, 2), FarcasterNetwork::Devnet)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_key_remove_limit_is_per_key_and_authorization() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let f = register_with_gasless_key(engines.get_mut(&1).unwrap(), 1234).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let self_revoke = |nonce| {
+            messages_factory::keys::create_key_remove_self_revoke(
+                f.fid,
+                &f.key,
+                nonce,
+                f.timestamp + 1_000_000,
+                Some(f.timestamp + 1),
+            )
+        };
+        for nonce in 1..=mempool::KEY_REMOVE_RATE_LIMIT_PER_MINUTE {
+            add_gossiped_message(&mempool_tx, self_revoke(nonce))
+                .await
+                .unwrap();
+        }
+        let error = add_gossiped_message(
+            &mempool_tx,
+            self_revoke(mempool::KEY_REMOVE_RATE_LIMIT_PER_MINUTE + 1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        add_gossiped_message(&mempool_tx, custody_key_remove(&f, 2))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_full_shard_does_not_block_other_shards_or_onchain_events() {
+        let mut mempool_config = mempool::Config::default();
+        mempool_config.capacity_per_shard = 1;
+        mempool_config.enable_rate_limits = false;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup_with_mempool_config(None, mempool_config, 2, FarcasterNetwork::Devnet).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let router = ShardRouter {};
+        let fid_on_shard = |shard: u32| {
+            (1..)
+                .find(|fid| router.route_fid(*fid, 2) == shard)
+                .unwrap()
+        };
+        let shard1_fid = fid_on_shard(1);
+        let shard2_fid = fid_on_shard(2);
+
+        let user_message = |fid: u64, text: &str| {
+            MempoolMessage::UserMessage(create_cast_add(fid, text, None, None))
+        };
+        add_message_with_timeout(
+            &mempool_tx,
+            user_message(shard1_fid, "fills shard 1"),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap();
+
+        add_message_with_timeout(
+            &mempool_tx,
+            user_message(shard2_fid, "shard 2"),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap();
+
+        let error = add_message_with_timeout(
+            &mempool_tx,
+            user_message(shard1_fid, "over capacity"),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "unavailable");
+
+        let rent = events_factory::create_rent_event(
+            shard1_fid,
+            10,
+            StorageUnitType::UnitType2025,
+            false,
+            FarcasterNetwork::Devnet,
+        );
+        add_message_with_timeout(
+            &mempool_tx,
+            MempoolMessage::OnchainEvent(rent),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
