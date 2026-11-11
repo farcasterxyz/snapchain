@@ -40,9 +40,13 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::{
+    check_app_nonce_unused, check_last_used_at_not_expired, check_user_nonce_unused,
     get_gasless_key_record, verify_key_add_custody, verify_key_remove_authorization,
     OnchainEventStore,
 };
+use crate::core::util::FarcasterTime;
+use crate::core::validations::error::ValidationError;
+use crate::core::validations::key::KeyRemoveSignatureType;
 use crate::proto::{self, message_data::Body, MessageType};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::onchain_event_store::OnchainEventStorageError;
@@ -154,17 +158,40 @@ pub fn get_active_key(
     }))
 }
 
+/// How long past a gasless key's expiry admission still accepts its messages. `last_used_at` is
+/// only bumped when a message merges, so messages already in flight can extend the key after
+/// admission reads it; rejecting at the exact boundary would drop messages merge would accept.
+pub const GASLESS_KEY_ADMISSION_GRACE_SECONDS: u64 = 60;
+
 /// Checks that `message` was signed with authority over the FID it claims, without merging it.
 ///
 /// Most messages need their signer to be an active key for the FID that admits the message
-/// type. KEY_ADD and KEY_REMOVE are signed by the key being added or removed, so they are
-/// checked against the FID's custody signature (or self-revocation) instead. This does not
-/// check signer expiry, nonces or storage; the engine still runs those at merge time.
+/// type, and a gasless key must not be expired. KEY_ADD must be signed by the key it adds and
+/// carry the FID's custody signature; KEY_REMOVE needs the custody signature or a
+/// self-revocation by the key it removes. Both must use an unconsumed nonce. Storage and the
+/// remaining merge rules are still checked by the engine.
 pub fn verify_message_signer(
     onchain_event_store: &OnchainEventStore,
     db: &Arc<RocksDB>,
     txn_batch: &RocksDbTransactionBatch,
     message: &proto::Message,
+) -> Result<(), MessageValidationError> {
+    verify_message_signer_at(
+        onchain_event_store,
+        db,
+        txn_batch,
+        message,
+        FarcasterTime::current().to_u64(),
+    )
+}
+
+/// [`verify_message_signer`] at a given farcaster-epoch time in seconds.
+pub fn verify_message_signer_at(
+    onchain_event_store: &OnchainEventStore,
+    db: &Arc<RocksDB>,
+    txn_batch: &RocksDbTransactionBatch,
+    message: &proto::Message,
+    now: u64,
 ) -> Result<(), MessageValidationError> {
     let data = message
         .data
@@ -172,11 +199,25 @@ pub fn verify_message_signer(
         .ok_or(MessageValidationError::NoMessageData)?;
     match &data.body {
         Some(Body::KeyAddBody(body)) => {
-            verify_key_add_custody(onchain_event_store, txn_batch, data.fid, body)
+            if message.signer != body.key {
+                return Err(ValidationError::InvalidSignature.into());
+            }
+            verify_key_add_custody(onchain_event_store, txn_batch, data.fid, body)?;
+            check_user_nonce_unused(db, txn_batch, data.fid, body.nonce)?;
+            Ok(())
         }
         Some(Body::KeyRemoveBody(body)) => {
-            verify_key_remove_authorization(db, onchain_event_store, txn_batch, message, body)
-                .map(|_| ())
+            let (record, signature_type) =
+                verify_key_remove_authorization(db, onchain_event_store, txn_batch, message, body)?;
+            match signature_type {
+                KeyRemoveSignatureType::Custody => {
+                    check_user_nonce_unused(db, txn_batch, data.fid, body.nonce)?
+                }
+                KeyRemoveSignatureType::SelfRevoke => {
+                    check_app_nonce_unused(db, txn_batch, record.request_fid, body.nonce)?
+                }
+            }
+            Ok(())
         }
         _ => {
             let msg_type = MessageType::try_from(data.r#type).unwrap_or(MessageType::None);
@@ -193,6 +234,18 @@ pub fn verify_message_signer(
                 return Err(MessageValidationError::GaslessKeyOutOfScope {
                     msg_type: data.r#type,
                 });
+            }
+            if let ActiveKey::Gasless { ttl_seconds, .. } = active_key {
+                if ttl_seconds > 0 {
+                    check_last_used_at_not_expired(
+                        db,
+                        txn_batch,
+                        data.fid,
+                        &message.signer,
+                        ttl_seconds,
+                        now.saturating_sub(GASLESS_KEY_ADMISSION_GRACE_SECONDS),
+                    )?;
+                }
             }
             Ok(())
         }
