@@ -93,8 +93,8 @@ impl Config {
     }
 }
 
-/// Where the gate sends its relay verdict on a gossiped message: `Ok` once the local checks
-/// pass, before the L1 check runs.
+/// Where the relay verdict on a gossiped message goes: the mempool's answer once the L1 check
+/// passes, or the gate's own refusal.
 type VerdictTx = oneshot::Sender<Result<(), HubError>>;
 
 /// Why the gate refused a message, as reported in metrics.
@@ -225,21 +225,10 @@ impl GossipL1GateWorker {
                     .try_acquire_owned()
                     .map_err(|_| Refusal::Dropped("at_capacity"))
             });
-            if let Some(verdict_tx) = verdict_tx {
-                // The relay verdict rests on the local checks and on having room to run the
-                // L1 check. The L1 check itself can outlast the time gossip holds a message,
-                // and every validator runs its own.
-                let _ = verdict_tx.send(match &admitted {
-                    Ok(_) => Ok(()),
-                    Err(Refusal::Rejected(reason)) => Err(HubError::validation_failure(reason)),
-                    Err(Refusal::Dropped(reason) | Refusal::L1Error(reason)) => {
-                        Err(HubError::unavailable(reason))
-                    }
-                });
-            }
             let permit = match admitted {
                 Ok(permit) => permit,
                 Err(refusal) => {
+                    send_verdict(verdict_tx, Err(refusal));
                     debug!(
                         fid = message.fid(),
                         ?refusal,
@@ -261,10 +250,13 @@ impl GossipL1GateWorker {
                 match outcome {
                     L1Outcome::Admitted => {
                         statsd_client.count("l1_gate.accepted", 1, vec![]);
+                        // The mempool answers the relay verdict, so a duplicate or a full shard
+                        // isn't relayed. If it can't take the request, the verdict channel is
+                        // dropped with it and gossip treats that as no answer.
                         if let Err(e) = mempool_tx.try_send(MempoolRequest::AddMessage(
                             MempoolMessage::UserMessage(message),
                             MempoolSource::Gossip,
-                            None,
+                            verdict_tx,
                         )) {
                             warn!("Failed to add to local mempool: {:?}", e);
                         }
@@ -282,14 +274,17 @@ impl GossipL1GateWorker {
                         );
                         record(&statsd_client, Refusal::Rejected("l1_check_failed"));
                         l1_rejection_count.fetch_add(1, Ordering::Relaxed);
+                        send_verdict(verdict_tx, Err(Refusal::Rejected("l1_check_failed")));
                     }
                     L1Outcome::Unavailable(err) => {
                         debug!(fid = message.fid(), error = %err, "L1 check unavailable");
                         record(&statsd_client, Refusal::L1Error("unavailable"));
+                        send_verdict(verdict_tx, Err(Refusal::L1Error("unavailable")));
                     }
                     L1Outcome::TimedOut => {
                         debug!(fid = message.fid(), "L1 check timed out");
                         record(&statsd_client, Refusal::L1Error("timeout"));
+                        send_verdict(verdict_tx, Err(Refusal::L1Error("timeout")));
                     }
                 }
             });
@@ -351,6 +346,16 @@ async fn check_l1(
         Ok(Err(L1ValidationError::Unavailable(err))) => L1Outcome::Unavailable(err),
         Err(_) => L1Outcome::TimedOut,
     }
+}
+
+fn send_verdict(verdict_tx: Option<VerdictTx>, verdict: Result<(), Refusal>) {
+    let Some(verdict_tx) = verdict_tx else {
+        return;
+    };
+    let _ = verdict_tx.send(verdict.map_err(|refusal| match refusal {
+        Refusal::Rejected(reason) => HubError::validation_failure(reason),
+        Refusal::Dropped(reason) | Refusal::L1Error(reason) => HubError::unavailable(reason),
+    }));
 }
 
 fn record(statsd_client: &StatsdClientWrapper, refusal: Refusal) {

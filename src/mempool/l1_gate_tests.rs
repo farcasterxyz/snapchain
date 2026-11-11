@@ -172,6 +172,22 @@ impl Harness {
         verdict_rx
     }
 
+    /// Stands in for the mempool: takes the next forwarded message and answers it with
+    /// `answer`, returning the message.
+    async fn answer_forwarded(&mut self, answer: Result<(), HubError>) -> proto::Message {
+        match tokio::time::timeout(FORWARD_WAIT, self.mempool_rx.recv()).await {
+            Ok(Some(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                _,
+                Some(answer_tx),
+            ))) => {
+                answer_tx.send(answer).unwrap();
+                message
+            }
+            _ => panic!("expected a forwarded message with an answer channel"),
+        }
+    }
+
     /// The next message forwarded to the mempool, or `None` if nothing arrives
     /// within `wait`.
     async fn next_forwarded(&mut self, wait: Duration) -> Option<proto::Message> {
@@ -447,15 +463,34 @@ fn requires_l1_validation_only_for_affected_types() {
 }
 
 #[tokio::test]
-async fn relay_verdict_rests_on_local_checks_not_the_l1_check() {
+async fn relay_verdict_rejects_a_failed_l1_check() {
     let mut harness = Harness::new(Config::default()).await;
     let forged = harness.ens_proof(vec![0x33; 20], 0);
 
     let verdict = harness.gossip_with_verdict(&forged).await.unwrap();
 
-    assert_eq!(verdict, Ok(()));
+    assert_eq!(verdict.unwrap_err().code, "bad_request.validation_failure");
     harness.assert_nothing_forwarded().await;
     assert_eq!(harness.l1_rejections(), 1);
+}
+
+#[tokio::test]
+async fn relay_verdict_is_the_mempools_answer() {
+    let mut harness = Harness::new(Config::default()).await;
+    let accepted = harness.ens_proof(custody_address(), 0);
+    let merged = harness.ens_proof(custody_address(), 1);
+
+    let accepted_verdict = harness.gossip_with_verdict(&accepted);
+    assert_eq!(harness.answer_forwarded(Ok(())).await, accepted);
+    assert_eq!(accepted_verdict.await.unwrap(), Ok(()));
+
+    let merged_verdict = harness.gossip_with_verdict(&merged);
+    let duplicate = HubError::duplicate("message has already been merged");
+    assert_eq!(
+        harness.answer_forwarded(Err(duplicate.clone())).await,
+        merged
+    );
+    assert_eq!(merged_verdict.await.unwrap(), Err(duplicate));
 }
 
 #[tokio::test]
@@ -471,7 +506,7 @@ async fn relay_verdict_rejects_inactive_signer() {
 
 #[tokio::test]
 async fn relay_verdict_ignores_messages_beyond_concurrency_cap() {
-    let harness = Harness::new(Config {
+    let mut harness = Harness::new(Config {
         max_concurrent_checks: 1,
         ..Config::default()
     })
@@ -481,6 +516,7 @@ async fn relay_verdict_ignores_messages_beyond_concurrency_cap() {
     let first = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 0));
     let second = harness.gossip_with_verdict(&harness.ens_proof(custody_address(), 1));
 
-    assert_eq!(first.await.unwrap(), Ok(()));
     assert_eq!(second.await.unwrap().unwrap_err().code, "unavailable");
+    harness.answer_forwarded(Ok(())).await;
+    assert_eq!(first.await.unwrap(), Ok(()));
 }
