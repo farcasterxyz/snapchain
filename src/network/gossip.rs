@@ -54,6 +54,14 @@ const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
 
+/// How long a gossiped mempool message waits for the local mempool's verdict before it is
+/// dropped unrelayed. gossipsub keeps an unvalidated message for `history_length` heartbeats
+/// (5 x 500ms), so the verdict has to arrive inside that window.
+const MEMPOOL_VERDICT_TIMEOUT: Duration = Duration::from_secs(2);
+const MEMPOOL_VERDICT_QUEUE_SIZE: usize = 10_000;
+
+type MempoolVerdict = (gossipsub::MessageId, PeerId, gossipsub::MessageAcceptance);
+
 /// All gossip topics this node may participate in. The single source of truth
 /// for valid topic names — used to bound the per-peer gossip-metrics
 /// sampler/eviction and to validate the mesh view's `?topics=` selection.
@@ -298,6 +306,10 @@ pub struct SnapchainGossip {
     /// behaviour.
     diagnostics_requests:
         HashMap<OutboundRequestId, oneshot::Sender<Result<proto::MeshView, String>>>,
+    /// Verdicts on received mempool messages, reported to gossipsub to relay or drop each one.
+    /// Fed by one task per message waiting on the mempool's reply.
+    mempool_verdicts_tx: mpsc::Sender<MempoolVerdict>,
+    mempool_verdicts_rx: mpsc::Receiver<MempoolVerdict>,
     /// Validator `PeerId`s permitted to query the mesh-diagnostics behaviour.
     /// The responder answers a diagnostics request only if the requesting peer is
     /// in this set — for now we only serve other validators. Set once at startup
@@ -353,6 +365,9 @@ impl SnapchainGossip {
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the block time
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
+                    // Hold every received message until it is reported valid, so mempool
+                    // messages are only relayed once the local mempool accepts them.
+                    .validate_messages()
                     .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
                     .mesh_n(10) // Try setting D to a higher value to see if it helps with slow sync (nodes will consume more bandwidth)
@@ -465,6 +480,7 @@ impl SnapchainGossip {
 
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
+        let (mempool_verdicts_tx, mempool_verdicts_rx) = mpsc::channel(MEMPOOL_VERDICT_QUEUE_SIZE);
 
         // Mirror the topic-subscription branches above. Used by the boot
         // one-shot in `start()` to issue a paired unsubscribe+subscribe cycle
@@ -511,6 +527,8 @@ impl SnapchainGossip {
             observed_addrs: HashMap::new(),
             diagnostics_requests: HashMap::new(),
             validator_peers: HashSet::new(),
+            mempool_verdicts_tx,
+            mempool_verdicts_rx,
         })
     }
 
@@ -915,7 +933,7 @@ impl SnapchainGossip {
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
                             propagation_source: peer_id,
-                            message_id: _id,
+                            message_id,
                             message,
                         })) => {
                             // Test-only partition simulation: drop messages whose
@@ -924,6 +942,7 @@ impl SnapchainGossip {
                             // under an uncontended `parking_lot::Mutex` (no poisoning,
                             // no thread parking, won't block the tokio executor).
                             if self.peer_blocklist.lock().contains(&peer_id) {
+                                self.report_validation(&message_id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                 continue;
                             }
                             // Per-peer/per-topic gossip volume. `IdentTopic` uses
@@ -935,16 +954,8 @@ impl SnapchainGossip {
                                 message.topic.as_str(),
                                 message.data.len() as u64,
                             );
-                            // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
-                            let maybe_sender = self.system_tx.as_ref().cloned();
-                            if let Some(system_tx) = maybe_sender {
-                                let data = message.data.clone();
-                                if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, message.source, data) {
-                                    if let Err(e) = system_tx.send(system_message).await {
-                                        warn!("Failed to send system block message: {}", e);
-                                    }
-                                }
-                            }
+                            let is_mempool_topic = message.topic == gossipsub::IdentTopic::new(MEMPOOL_TOPIC).hash();
+                            self.dispatch_gossip_message(message_id, peer_id, is_mempool_topic, message).await;
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Rpc(sync_event)) => {
                             match sync_event {
@@ -1047,6 +1058,15 @@ impl SnapchainGossip {
                         _ => {}
                     }
                 }
+                Some((message_id, peer_id, acceptance)) = self.mempool_verdicts_rx.recv() => {
+                    let label = match acceptance {
+                        gossipsub::MessageAcceptance::Accept => "accept",
+                        gossipsub::MessageAcceptance::Reject => "reject",
+                        gossipsub::MessageAcceptance::Ignore => "ignore",
+                    };
+                    self.statsd_client.count("gossip.mempool_verdict", 1, vec![("verdict", label)]);
+                    self.report_validation(&message_id, &peer_id, acceptance);
+                }
                 event = self.rx.recv() => {
                     if let Some((gossip_topics, encoded_message)) = self.process_gossip_event(event) {
                         for gossip_topic in gossip_topics {
@@ -1078,6 +1098,82 @@ impl SnapchainGossip {
                     }
                 }
             }
+        }
+    }
+
+    fn report_validation(
+        &mut self,
+        message_id: &gossipsub::MessageId,
+        peer_id: &PeerId,
+        acceptance: gossipsub::MessageAcceptance,
+    ) {
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .report_message_validation_result(message_id, peer_id, acceptance);
+    }
+
+    /// Hands a received gossip message to the node and tells gossipsub whether to relay it.
+    /// Mempool messages are relayed only once the local mempool accepts them; everything else
+    /// is relayed straight away.
+    async fn dispatch_gossip_message(
+        &mut self,
+        message_id: gossipsub::MessageId,
+        peer_id: PeerId,
+        is_mempool_topic: bool,
+        message: gossipsub::Message,
+    ) {
+        use gossipsub::MessageAcceptance::{Accept, Ignore, Reject};
+
+        let Some(system_tx) = self.system_tx.clone() else {
+            self.report_validation(&message_id, &peer_id, Accept);
+            return;
+        };
+        let system_message =
+            self.map_gossip_bytes_to_system_message(peer_id, message.source, message.data);
+        match (is_mempool_topic, system_message) {
+            (
+                true,
+                Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
+                    mempool_message,
+                    source,
+                    _,
+                ))),
+            ) => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let request = MempoolRequest::AddMessage(mempool_message, source, Some(reply_tx));
+                if let Err(e) = system_tx.send(SystemMessage::Mempool(request)).await {
+                    warn!("Failed to send mempool message to the node: {}", e);
+                    self.report_validation(&message_id, &peer_id, Ignore);
+                    return;
+                }
+                let verdicts_tx = self.mempool_verdicts_tx.clone();
+                tokio::spawn(async move {
+                    let acceptance = match tokio::time::timeout(MEMPOOL_VERDICT_TIMEOUT, reply_rx)
+                        .await
+                    {
+                        Ok(Ok(Ok(()))) => Accept,
+                        Ok(Ok(Err(err))) if err.code == "bad_request.validation_failure" => Reject,
+                        // Duplicates, rate limits, a full mempool, no answer in time.
+                        _ => Ignore,
+                    };
+                    let _ = verdicts_tx.send((message_id, peer_id, acceptance)).await;
+                });
+            }
+            // The node routes by message content, not topic. Without these arms a mempool
+            // message published on another topic would reach the mempool and be relayed without
+            // waiting for its verdict.
+            (true, Some(_)) | (false, Some(SystemMessage::Mempool(_))) => {
+                self.report_validation(&message_id, &peer_id, Reject);
+            }
+            (true, None) => self.report_validation(&message_id, &peer_id, Ignore),
+            (false, Some(system_message)) => {
+                if let Err(e) = system_tx.send(system_message).await {
+                    warn!("Failed to send system block message: {}", e);
+                }
+                self.report_validation(&message_id, &peer_id, Accept);
+            }
+            (false, None) => self.report_validation(&message_id, &peer_id, Accept),
         }
     }
 

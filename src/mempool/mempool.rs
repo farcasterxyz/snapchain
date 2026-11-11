@@ -637,6 +637,22 @@ impl ReadNodeMempool {
         )
     }
 
+    /// The checks a read node runs on a gossiped user message before gossip relays it: the
+    /// same stateless and signer checks validators run at admission.
+    fn gossip_checks(
+        &self,
+        message: &MempoolMessage,
+        source: &MempoolSource,
+    ) -> Result<(), HubError> {
+        let (MempoolMessage::UserMessage(user_message), MempoolSource::Gossip) = (message, source)
+        else {
+            return Ok(());
+        };
+        validate_gossiped_message(user_message, self.network)
+            .map_err(|err| HubError::validation_failure(&err.to_string()))?;
+        self.verify_gossiped_signer(user_message)
+    }
+
     fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
@@ -650,17 +666,19 @@ impl ReadNodeMempool {
                 MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
                         .count("read_mempool.messages_received", 1, vec![]);
-                    let results: Vec<Result<(), HubError>> = self
-                        .route_mempool_message(&message)
-                        .iter()
-                        .map(|shard| self.message_is_valid(*shard, &message))
-                        .collect();
-                    // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
-                    let result = if results.iter().any(|res| res.is_ok()) {
-                        Ok(())
-                    } else {
-                        results[0].clone()
-                    };
+                    let result = self.gossip_checks(&message, &source).and_then(|()| {
+                        let results: Vec<Result<(), HubError>> = self
+                            .route_mempool_message(&message)
+                            .iter()
+                            .map(|shard| self.message_is_valid(*shard, &message))
+                            .collect();
+                        // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
+                        if results.iter().any(|res| res.is_ok()) {
+                            Ok(())
+                        } else {
+                            results[0].clone()
+                        }
+                    });
                     if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client

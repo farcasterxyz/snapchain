@@ -1,5 +1,6 @@
 use crate::consensus::consensus::SystemMessage;
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::core::error::HubError;
 use crate::core::types::{Height, SnapchainValidatorContext};
 use crate::core::util::shard_chunk_hash;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -75,6 +76,28 @@ async fn publish_until_received(
     received
 }
 
+/// Stands in for a node's mempool: answers every gossiped mempool message, failing the ones
+/// whose hash is in `rejected` as invalid and accepting the rest.
+fn spawn_mempool_verdicts(mut system_rx: mpsc::Receiver<SystemMessage>, rejected: Vec<Vec<u8>>) {
+    tokio::spawn(async move {
+        while let Some(message) = system_rx.recv().await {
+            if let SystemMessage::Mempool(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                _,
+                Some(reply),
+            )) = message
+            {
+                let verdict = if rejected.contains(&message.hash) {
+                    Err(HubError::validation_failure("rejected by test"))
+                } else {
+                    Ok(())
+                };
+                let _ = reply.send(verdict);
+            }
+        }
+    });
+}
+
 async fn wait_for_message(
     system_rx: &mut mpsc::Receiver<SystemMessage>,
     expected_message: Message,
@@ -146,8 +169,10 @@ async fn test_gossip_communication() {
 
     // Create channels for system messages
     let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);
-    let (system_tx2, _) = mpsc::channel::<SystemMessage>(100);
+    let (system_tx2, system_rx2) = mpsc::channel::<SystemMessage>(100);
     let (system_tx3, mut system_rx3) = mpsc::channel::<SystemMessage>(100);
+    // node2 relays to node3 only once its mempool accepts the message.
+    spawn_mempool_verdicts(system_rx2, vec![]);
 
     // Create gossip instances
     let mut gossip1 = SnapchainGossip::create(
@@ -751,7 +776,8 @@ async fn test_read_node_relays_mempool_gossip() {
         .with_contact_info_interval(Duration::from_millis(100));
 
     let (read_node_1_system_tx, _) = mpsc::channel::<SystemMessage>(100);
-    let (read_node_2_system_tx, _) = mpsc::channel::<SystemMessage>(100);
+    let (read_node_2_system_tx, read_node_2_system_rx) = mpsc::channel::<SystemMessage>(100);
+    spawn_mempool_verdicts(read_node_2_system_rx, vec![]);
     let (validator_system_tx, mut validator_system_rx) = mpsc::channel::<SystemMessage>(100);
 
     let mut read_node_1_gossip = SnapchainGossip::create(
@@ -804,6 +830,69 @@ async fn test_read_node_relays_mempool_gossip() {
     assert!(
         received,
         "validator did not receive mempool gossip relayed through read_node_2 within deadline"
+    );
+}
+
+/// A node relays a mempool message only after its own mempool accepts it. `a` and `c` only
+/// bootstrap to `b`, so anything `c` receives was relayed by `b`.
+#[tokio::test]
+#[serial]
+async fn test_mempool_gossip_is_relayed_only_once_accepted() {
+    let addr = |offset: u32| {
+        let port = BASE_PORT_FOR_TEST + offset;
+        format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1")
+    };
+    let (a_addr, b_addr, c_addr) = (addr(50), addr(51), addr(52));
+    let config = |address: &String, bootstrap: &String| {
+        Config::new(address.clone(), bootstrap.clone())
+            .with_contact_info_interval(Duration::from_millis(100))
+    };
+
+    let (a_system_tx, a_system_rx) = mpsc::channel::<SystemMessage>(100);
+    let (b_system_tx, b_system_rx) = mpsc::channel::<SystemMessage>(100);
+    let (c_system_tx, mut c_system_rx) = mpsc::channel::<SystemMessage>(100);
+    let mut nodes = vec![];
+    for (address, bootstrap, system_tx) in [
+        (&a_addr, &b_addr, a_system_tx),
+        (&b_addr, &"".to_string(), b_system_tx),
+        (&c_addr, &b_addr, c_system_tx),
+    ] {
+        nodes.push(
+            SnapchainGossip::create(
+                Keypair::generate(),
+                &config(address, bootstrap),
+                Some(system_tx),
+                false,
+                FarcasterNetwork::Devnet,
+                statsd_client(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let a_tx = nodes[0].tx.clone();
+    for mut node in nodes {
+        tokio::spawn(async move { node.start().await });
+    }
+
+    let genuine = messages_factory::casts::create_cast_add(789, "genuine", None, None);
+    let forged = messages_factory::casts::create_cast_add(789, "forged", None, None);
+    spawn_mempool_verdicts(a_system_rx, vec![]);
+    spawn_mempool_verdicts(b_system_rx, vec![forged.hash.clone()]);
+
+    assert!(
+        publish_until_received(
+            a_tx.clone(),
+            &mut c_system_rx,
+            genuine,
+            Duration::from_secs(15)
+        )
+        .await,
+        "c did not receive a message b accepted"
+    );
+    assert!(
+        !publish_until_received(a_tx, &mut c_system_rx, forged, Duration::from_secs(5)).await,
+        "c received a message b rejected"
     );
 }
 

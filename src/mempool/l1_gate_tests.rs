@@ -6,9 +6,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients, EnsError};
+use crate::core::error::HubError;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::l1_gate::{Config, GossipL1Gate};
@@ -155,6 +156,20 @@ impl Harness {
             MempoolSource::Gossip,
             None,
         ));
+    }
+
+    /// Gossips `message` and returns the channel the gate sends its relay verdict on.
+    fn gossip_with_verdict(
+        &self,
+        message: &proto::Message,
+    ) -> oneshot::Receiver<Result<(), HubError>> {
+        let (verdict_tx, verdict_rx) = oneshot::channel();
+        self.gate.admit(MempoolRequest::AddMessage(
+            MempoolMessage::UserMessage(message.clone()),
+            MempoolSource::Gossip,
+            Some(verdict_tx),
+        ));
+        verdict_rx
     }
 
     /// The next message forwarded to the mempool, or `None` if nothing arrives
@@ -429,4 +444,27 @@ fn requires_l1_validation_only_for_affected_types() {
     assert!(!L1Validator::requires_l1_validation(
         &messages_factory::casts::create_cast_add(FID, "x.eth", None, Some(&signer))
     ));
+}
+
+#[tokio::test]
+async fn relay_verdict_rests_on_local_checks_not_the_l1_check() {
+    let mut harness = Harness::new(Config::default()).await;
+    let forged = harness.ens_proof(vec![0x33; 20], 0);
+
+    let verdict = harness.gossip_with_verdict(&forged).await.unwrap();
+
+    assert_eq!(verdict, Ok(()));
+    harness.assert_nothing_forwarded().await;
+    assert_eq!(harness.l1_rejections(), 1);
+}
+
+#[tokio::test]
+async fn relay_verdict_rejects_inactive_signer() {
+    let harness = Harness::new(Config::default()).await;
+    let spoofed = ens_proof_signed_by(&signers::generate_signer(), custody_address(), 0);
+
+    let verdict = harness.gossip_with_verdict(&spoofed).await.unwrap();
+
+    assert_eq!(verdict.unwrap_err().code, "bad_request.validation_failure");
+    assert_eq!(harness.chain.calls(), 0);
 }

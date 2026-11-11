@@ -36,7 +36,7 @@ use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error, warn};
 
 use crate::connectors::onchain_events::Chain;
@@ -93,6 +93,10 @@ impl Config {
     }
 }
 
+/// Where the gate sends its relay verdict on a gossiped message: `Ok` once the local checks
+/// pass, before the L1 check runs.
+type VerdictTx = oneshot::Sender<Result<(), HubError>>;
+
 /// Why the gate refused a message, as reported in metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
@@ -107,7 +111,7 @@ enum Refusal {
 /// Entry point for mempool requests that arrived over gossip. Cheap to call
 /// from an event loop: it never awaits.
 pub struct GossipL1Gate {
-    checks_tx: mpsc::Sender<proto::Message>,
+    checks_tx: mpsc::Sender<(proto::Message, Option<VerdictTx>)>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     statsd_client: StatsdClientWrapper,
     l1_rejection_count: Arc<AtomicU64>,
@@ -178,9 +182,9 @@ impl GossipL1Gate {
             MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(message),
                 MempoolSource::Gossip,
-                _,
+                verdict_tx,
             ) if L1Validator::requires_l1_validation(&message) => {
-                match self.checks_tx.try_send(message) {
+                match self.checks_tx.try_send((message, verdict_tx)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         record(&self.statsd_client, Refusal::Dropped("queue_full"));
@@ -201,7 +205,7 @@ impl GossipL1Gate {
 }
 
 pub struct GossipL1GateWorker {
-    checks_rx: mpsc::Receiver<proto::Message>,
+    checks_rx: mpsc::Receiver<(proto::Message, Option<VerdictTx>)>,
     validator: Arc<L1Validator>,
     network: FarcasterNetwork,
     mempool_tx: mpsc::Sender<MempoolRequest>,
@@ -214,8 +218,19 @@ pub struct GossipL1GateWorker {
 
 impl GossipL1GateWorker {
     pub async fn run(mut self) {
-        while let Some(message) = self.checks_rx.recv().await {
-            if let Err(refusal) = self.precheck(&message) {
+        while let Some((message, verdict_tx)) = self.checks_rx.recv().await {
+            let precheck = self.precheck(&message);
+            if let Some(verdict_tx) = verdict_tx {
+                // The relay verdict rests on the local checks only. The L1 check can outlast
+                // the time gossip holds a message, and every validator runs its own.
+                let _ = verdict_tx.send(precheck.map_err(|refusal| match refusal {
+                    Refusal::Rejected(reason) => HubError::validation_failure(reason),
+                    Refusal::Dropped(reason) | Refusal::L1Error(reason) => {
+                        HubError::unavailable(reason)
+                    }
+                }));
+            }
+            if let Err(refusal) = precheck {
                 debug!(
                     fid = message.fid(),
                     ?refusal,

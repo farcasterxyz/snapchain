@@ -38,7 +38,7 @@ use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_cron_scheduler::JobScheduler;
 use tonic::transport::Server;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
@@ -633,6 +633,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.l1_gate.cache_config(),
         ));
 
+        let gossip_mempool_tx = mempool_tx.clone();
         start_servers(
             &app_config,
             local_peer_id_str.clone(),
@@ -691,7 +692,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Forward to appropriate consensus actors
                             node.dispatch_network_event(shard, event);
                         },
-                        SystemMessage::Mempool(_) => {},// No need to store mempool messages from other nodes in read nodes
+                        // Read nodes keep no mempool, but check gossiped messages so gossip only
+                        // relays the ones that pass.
+                        SystemMessage::Mempool(request) => {
+                            if let Err(e) = gossip_mempool_tx.try_send(request) {
+                                debug!("Failed to check gossiped mempool message: {:?}", e);
+                            }
+                        },
                         SystemMessage::DecidedValueForReadNode(decided_value) => {
                             node.dispatch_decided_value(decided_value);
                         }
