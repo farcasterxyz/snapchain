@@ -1749,6 +1749,65 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn test_full_shard_still_accepts_a_live_at_that_replaces_one_in_the_pool() {
+        let mut mempool_config = mempool::Config::default();
+        mempool_config.capacity_per_shard = 1;
+        mempool_config.enable_rate_limits = false;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup_with_mempool_config(None, mempool_config, 1, FarcasterNetwork::Devnet).await;
+        commit_event(
+            engines.get_mut(&1).unwrap(),
+            &default_storage_event(FID_FOR_TEST),
+        )
+        .await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let live_at = |url: &str, timestamp: u32| {
+            MempoolMessage::UserMessage(create_user_data_add(
+                FID_FOR_TEST,
+                proto::UserDataType::LiveAt,
+                &url.to_string(),
+                Some(timestamp),
+                None,
+            ))
+        };
+        add_message_with_timeout(
+            &mempool_tx,
+            live_at("https://example.com/one", 10),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap();
+
+        let newer = live_at("https://example.com/two", 11);
+        add_message_with_timeout(&mempool_tx, newer.clone(), MempoolSource::Local)
+            .await
+            .unwrap();
+
+        let error = add_message_with_timeout(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(FID_FOR_TEST, "over capacity", None, None)),
+            MempoolSource::Local,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "unavailable");
+
+        pull_message(&messages_request_tx, 1, Some(newer)).await;
+    }
+
     struct GaslessKeyFixture {
         fid: u64,
         custody: alloy_signer_local::PrivateKeySigner,

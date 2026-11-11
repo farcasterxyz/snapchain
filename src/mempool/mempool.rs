@@ -1166,9 +1166,12 @@ impl Mempool {
             None => {}
         }
 
+        let live_at_to_replace = self.prepare_live_at_insert(shard_id, &message)?;
+
         // Validator messages (onchain events, fname transfers, block events) are exempt so that
-        // a pool full of user messages can't hold up storage rent or signer changes.
-        if let MempoolMessage::UserMessage(_) = &message {
+        // a pool full of user messages can't hold up storage rent or signer changes. A LIVE_AT
+        // that replaces the fid's pending one doesn't grow the shard, so it is exempt too.
+        if let (MempoolMessage::UserMessage(_), None) = (&message, &live_at_to_replace) {
             let shard_size = self
                 .messages
                 .get(&shard_id)
@@ -1193,7 +1196,6 @@ impl Mempool {
         // a pure idempotent `message_is_valid` with no risk of accidentally re-charging the
         // limiter. The flag exists today as the minimal-surgery fix; the cleaner split is
         // deferred until the surrounding admission validations are reworked.
-        let live_at_to_replace = self.prepare_live_at_insert(shard_id, &message)?;
         let result = self.message_is_valid_from(shard_id, &message, Some(&source));
         if result.is_ok() {
             if let Some(old_key) = live_at_to_replace {
