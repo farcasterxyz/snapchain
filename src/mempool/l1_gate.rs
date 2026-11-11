@@ -36,7 +36,7 @@ use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error, warn};
 
 use crate::connectors::onchain_events::Chain;
@@ -93,6 +93,10 @@ impl Config {
     }
 }
 
+/// Where the relay verdict on a gossiped message goes: the mempool's answer once the L1 check
+/// passes, or the gate's own refusal.
+type VerdictTx = oneshot::Sender<Result<(), HubError>>;
+
 /// Why the gate refused a message, as reported in metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
@@ -107,7 +111,7 @@ enum Refusal {
 /// Entry point for mempool requests that arrived over gossip. Cheap to call
 /// from an event loop: it never awaits.
 pub struct GossipL1Gate {
-    checks_tx: mpsc::Sender<proto::Message>,
+    checks_tx: mpsc::Sender<(proto::Message, Option<VerdictTx>)>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     statsd_client: StatsdClientWrapper,
     l1_rejection_count: Arc<AtomicU64>,
@@ -178,9 +182,9 @@ impl GossipL1Gate {
             MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(message),
                 MempoolSource::Gossip,
-                _,
+                verdict_tx,
             ) if L1Validator::requires_l1_validation(&message) => {
-                match self.checks_tx.try_send(message) {
+                match self.checks_tx.try_send((message, verdict_tx)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         record(&self.statsd_client, Refusal::Dropped("queue_full"));
@@ -201,7 +205,7 @@ impl GossipL1Gate {
 }
 
 pub struct GossipL1GateWorker {
-    checks_rx: mpsc::Receiver<proto::Message>,
+    checks_rx: mpsc::Receiver<(proto::Message, Option<VerdictTx>)>,
     validator: Arc<L1Validator>,
     network: FarcasterNetwork,
     mempool_tx: mpsc::Sender<MempoolRequest>,
@@ -214,19 +218,25 @@ pub struct GossipL1GateWorker {
 
 impl GossipL1GateWorker {
     pub async fn run(mut self) {
-        while let Some(message) = self.checks_rx.recv().await {
-            if let Err(refusal) = self.precheck(&message) {
-                debug!(
-                    fid = message.fid(),
-                    ?refusal,
-                    "Gossiped message refused before L1 check"
-                );
-                record(&self.statsd_client, refusal);
-                continue;
-            }
-            let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
-                record(&self.statsd_client, Refusal::Dropped("at_capacity"));
-                continue;
+        while let Some((message, verdict_tx)) = self.checks_rx.recv().await {
+            let admitted = self.precheck(&message).and_then(|()| {
+                self.in_flight
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| Refusal::Dropped("at_capacity"))
+            });
+            let permit = match admitted {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    send_verdict(verdict_tx, Err(refusal));
+                    debug!(
+                        fid = message.fid(),
+                        ?refusal,
+                        "Gossiped message refused before L1 check"
+                    );
+                    record(&self.statsd_client, refusal);
+                    continue;
+                }
             };
 
             let validator = self.validator.clone();
@@ -240,10 +250,13 @@ impl GossipL1GateWorker {
                 match outcome {
                     L1Outcome::Admitted => {
                         statsd_client.count("l1_gate.accepted", 1, vec![]);
+                        // The mempool answers the relay verdict, so a duplicate or a full shard
+                        // isn't relayed. If it can't take the request, the verdict channel is
+                        // dropped with it and gossip treats that as no answer.
                         if let Err(e) = mempool_tx.try_send(MempoolRequest::AddMessage(
                             MempoolMessage::UserMessage(message),
                             MempoolSource::Gossip,
-                            None,
+                            verdict_tx,
                         )) {
                             warn!("Failed to add to local mempool: {:?}", e);
                         }
@@ -261,14 +274,17 @@ impl GossipL1GateWorker {
                         );
                         record(&statsd_client, Refusal::Rejected("l1_check_failed"));
                         l1_rejection_count.fetch_add(1, Ordering::Relaxed);
+                        send_verdict(verdict_tx, Err(Refusal::Rejected("l1_check_failed")));
                     }
                     L1Outcome::Unavailable(err) => {
                         debug!(fid = message.fid(), error = %err, "L1 check unavailable");
                         record(&statsd_client, Refusal::L1Error("unavailable"));
+                        send_verdict(verdict_tx, Err(Refusal::L1Error("unavailable")));
                     }
                     L1Outcome::TimedOut => {
                         debug!(fid = message.fid(), "L1 check timed out");
                         record(&statsd_client, Refusal::L1Error("timeout"));
+                        send_verdict(verdict_tx, Err(Refusal::L1Error("timeout")));
                     }
                 }
             });
@@ -330,6 +346,16 @@ async fn check_l1(
         Ok(Err(L1ValidationError::Unavailable(err))) => L1Outcome::Unavailable(err),
         Err(_) => L1Outcome::TimedOut,
     }
+}
+
+fn send_verdict(verdict_tx: Option<VerdictTx>, verdict: Result<(), Refusal>) {
+    let Some(verdict_tx) = verdict_tx else {
+        return;
+    };
+    let _ = verdict_tx.send(verdict.map_err(|refusal| match refusal {
+        Refusal::Rejected(reason) => HubError::validation_failure(reason),
+        Refusal::Dropped(reason) | Refusal::L1Error(reason) => HubError::unavailable(reason),
+    }));
 }
 
 fn record(statsd_client: &StatsdClientWrapper, refusal: Refusal) {

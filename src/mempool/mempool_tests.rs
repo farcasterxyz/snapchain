@@ -2056,6 +2056,55 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn test_read_node_checks_gossiped_signers() {
+        let (mut engine, _dir) = test_helper::new_engine().await;
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let (block_engine, _) = block_engine_test_helpers::setup();
+        let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let mut read_node_mempool = mempool::ReadNodeMempool::new(
+            mempool_rx,
+            1,
+            HashMap::from([(1, engine.get_stores())]),
+            block_engine.stores(),
+            mpsc::channel(100).0,
+            test_helper::statsd_client(),
+            FarcasterNetwork::Devnet,
+        );
+        tokio::spawn(async move { read_node_mempool.run().await });
+
+        let forged = create_cast_add(1234, "forged", None, Some(&generate_signer()));
+        let error = add_gossiped_message(&mempool_tx, forged).await.unwrap_err();
+        assert_eq!(error.code, "bad_request.validation_failure");
+
+        let genuine = create_cast_add(1234, "genuine", None, None);
+        add_gossiped_message(&mempool_tx, genuine).await.unwrap();
+
+        let merged = create_cast_add(1234, "merged", None, None);
+        test_helper::commit_message(&mut engine, &merged).await;
+        let error = add_gossiped_message(&mempool_tx, merged).await.unwrap_err();
+        assert_eq!(error.code, "bad_request.duplicate");
+
+        // Only gossip is checked here; RPC submissions were already simulated by the server.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let forged = create_cast_add(1234, "forged over rpc", None, Some(&generate_signer()));
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(forged),
+                MempoolSource::RPC,
+                Some(reply_tx),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_rx.await.unwrap(), Ok(()));
+    }
+
     #[test]
     fn test_mempool_key_does_not_panic_without_data() {
         use crate::mempool::mempool::MessageMempoolExt;
