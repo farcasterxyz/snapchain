@@ -20,8 +20,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
+use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
-use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
 use informalsystems_malachitebft_sync::{self as sync};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::request_response::{self, InboundRequestId, OutboundRequestId};
@@ -53,7 +53,7 @@ pub(crate) const CONSENSUS_TOPIC: &str = "consensus";
 pub(crate) const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
-const CONTACT_INFO: &str = "contact-info";
+pub(crate) const CONTACT_INFO: &str = "contact-info";
 
 const GOSSIP_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const GOSSIP_HISTORY_LENGTH: usize = 10;
@@ -347,31 +347,6 @@ impl SnapchainGossip {
             )?
             .with_quic()
             .with_behaviour(|key| {
-                let message_id_fn = |message: &gossipsub::Message| {
-                    // This is the default implementation inside libp2p
-                    let default_message_id_fn = |message: &gossipsub::Message| {
-                        let mut source_string = if let Some(peer_id) = message.source.as_ref() {
-                            peer_id.to_base58()
-                        } else {
-                            PeerId::from_bytes(&[0, 1, 0])
-                                .expect("Valid peer id")
-                                .to_base58()
-                        };
-                        source_string
-                            .push_str(&message.sequence_number.unwrap_or_default().to_string());
-                        MessageId::from(source_string)
-                    };
-
-                    match message.topic.as_str() {
-                        MEMPOOL_TOPIC | CONTACT_INFO => {
-                            let mut s = DefaultHasher::new();
-                            message.data.hash(&mut s);
-                            gossipsub::MessageId::from(s.finish().to_string())
-                        }
-                        _ => default_message_id_fn(message),
-                    }
-                };
-
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(GOSSIP_HEARTBEAT_INTERVAL) // This might need to be lowered to 1/3 of the block time
@@ -380,7 +355,7 @@ impl SnapchainGossip {
                     // Hold every received message until it is reported valid, so mempool
                     // messages are only relayed once the local mempool accepts them.
                     .validate_messages()
-                    .message_id_fn(message_id_fn) // content-address mempool messages
+                    .message_id_fn(gossip_message_id) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
                     .mesh_n(10) // Try setting D to a higher value to see if it helps with slow sync (nodes will consume more bandwidth)
                     .mesh_n_high(20) // 2x D, which is the recommended value
@@ -1806,4 +1781,31 @@ pub(crate) fn submit_gossiped_mempool_message(
         Some(answer_tx),
     )))?;
     Ok(answer_rx)
+}
+
+/// gossipsub's id for `message`. Mempool and contact-info messages are content-addressed so the
+/// same message from different publishers is seen once. The topic is part of the id: a copy of
+/// a mempool message sent on another topic is rejected, and without the topic its id would put
+/// the genuine copy in gossipsub's duplicate cache before it is validated.
+pub(crate) fn gossip_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
+    match message.topic.as_str() {
+        MEMPOOL_TOPIC | CONTACT_INFO => {
+            let mut s = DefaultHasher::new();
+            message.topic.as_str().hash(&mut s);
+            message.data.hash(&mut s);
+            gossipsub::MessageId::from(s.finish().to_string())
+        }
+        // This is the default implementation inside libp2p
+        _ => {
+            let mut source_string = if let Some(peer_id) = message.source.as_ref() {
+                peer_id.to_base58()
+            } else {
+                PeerId::from_bytes(&[0, 1, 0])
+                    .expect("Valid peer id")
+                    .to_base58()
+            };
+            source_string.push_str(&message.sequence_number.unwrap_or_default().to_string());
+            gossipsub::MessageId::from(source_string)
+        }
+    }
 }

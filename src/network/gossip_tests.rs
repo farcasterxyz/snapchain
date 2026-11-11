@@ -5,8 +5,8 @@ use crate::core::types::{Height, SnapchainValidatorContext};
 use crate::core::util::shard_chunk_hash;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::gossip::{
-    mempool_verdict, route_gossip_message, submit_gossiped_mempool_message, Config, GossipEvent,
-    GossipRoute, SnapchainGossip,
+    gossip_message_id, mempool_verdict, route_gossip_message, submit_gossiped_mempool_message,
+    Config, GossipEvent, GossipRoute, SnapchainGossip, CONTACT_INFO, MEMPOOL_TOPIC,
 };
 use crate::proto::{
     full_proposal, FarcasterNetwork, FullProposal, Message, MessageData, ShardChunk, ShardHeader,
@@ -1296,4 +1296,26 @@ async fn test_gossiped_mempool_message_is_not_queued_behind_a_full_node_channel(
         _ => panic!("expected a mempool request with an answer channel"),
     }
     assert_eq!(answer_rx.await.unwrap(), Ok(()));
+}
+
+/// Identical bytes on different topics must get different ids. Otherwise a copy sent on the
+/// wrong topic, which is rejected, would put the id in gossipsub's duplicate cache and the
+/// genuine copy on the right topic would be dropped unseen.
+#[test]
+fn test_message_ids_are_unique_per_topic() {
+    let message_on = |topic: &str| libp2p::gossipsub::Message {
+        source: None,
+        data: vec![1, 2, 3],
+        sequence_number: None,
+        topic: libp2p::gossipsub::IdentTopic::new(topic).hash(),
+    };
+
+    assert_eq!(
+        gossip_message_id(&message_on(MEMPOOL_TOPIC)),
+        gossip_message_id(&message_on(MEMPOOL_TOPIC))
+    );
+    assert_ne!(
+        gossip_message_id(&message_on(MEMPOOL_TOPIC)),
+        gossip_message_id(&message_on(CONTACT_INFO))
+    );
 }
