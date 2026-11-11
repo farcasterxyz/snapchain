@@ -1862,6 +1862,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rpc_precheck_does_not_charge_key_remove_to_the_storage_quota() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, true, 1).await;
+        let f = register_with_gasless_key(engines.get_mut(&1).unwrap(), 1234).await;
+        let rate_limits = mempool.rate_limits_for_rpc().unwrap();
+
+        while rate_limits.consume_for_fid(f.fid) {}
+        let cast = create_cast_add(f.fid, "over quota", None, None);
+        let error = rate_limits
+            .charge_rpc_message(&cast, FarcasterNetwork::Devnet)
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request.rate_limited");
+
+        rate_limits
+            .charge_rpc_message(&custody_key_remove(&f, 2), FarcasterNetwork::Devnet)
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_key_remove_limit_is_per_key_and_authorization() {
         let (
             mut engines,

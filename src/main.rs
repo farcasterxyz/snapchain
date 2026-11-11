@@ -6,7 +6,7 @@ use snapchain::core::types::SnapchainValidatorContext;
 use snapchain::mempool::block_receiver::BlockReceiver;
 use snapchain::mempool::l1_gate::GossipL1Gate;
 use snapchain::mempool::l1_validator::L1Validator;
-use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
+use snapchain::mempool::mempool::{Mempool, MempoolRequest, RateLimits, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
@@ -58,6 +58,7 @@ async fn start_servers(
     l1_validator: Arc<L1Validator>,
     replicator: Option<Arc<replication::replicator::Replicator>>,
     local_state_store: LocalStateStore,
+    rate_limits: Option<Arc<RateLimits>>,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -91,25 +92,28 @@ async fn start_servers(
     // (same source as the diagnostics gate, so the two stay consistent).
     let validator_hex_keys: Vec<String> = app_config.consensus.latest_validator_public_keys();
 
-    let service = Arc::new(MyHubService::new(
-        app_config.rpc_auth.clone(),
-        app_config.admin_rpc_auth.clone(),
-        validator_hex_keys,
-        block_stores.clone(),
-        shard_stores.clone(),
-        shard_senders,
-        statsd_client.clone(),
-        app_config.consensus.num_shards,
-        app_config.fc_network,
-        Box::new(routing::ShardRouter {}),
-        mempool_tx.clone(),
-        gossip_tx,
-        l1_validator,
-        VERSION.unwrap_or("unknown").to_string(),
-        local_peer_id_str,
-        fname_lookup,
-        app_config.mesh.clone(),
-    ));
+    let service = Arc::new(
+        MyHubService::new(
+            app_config.rpc_auth.clone(),
+            app_config.admin_rpc_auth.clone(),
+            validator_hex_keys,
+            block_stores.clone(),
+            shard_stores.clone(),
+            shard_senders,
+            statsd_client.clone(),
+            app_config.consensus.num_shards,
+            app_config.fc_network,
+            Box::new(routing::ShardRouter {}),
+            mempool_tx.clone(),
+            gossip_tx,
+            l1_validator,
+            VERSION.unwrap_or("unknown").to_string(),
+            local_peer_id_str,
+            fname_lookup,
+            app_config.mesh.clone(),
+        )
+        .with_rate_limits(rate_limits),
+    );
 
     let replication_service = if let Some(replicator) = replicator {
         let service = ReplicationServiceServer::new(ReplicationServer::new(
@@ -644,6 +648,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             l1_validator,
             replicator,
             local_state_store.clone(),
+            None,
         )
         .await;
 
@@ -753,6 +758,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_rx,
             statsd_client.clone(),
         );
+        let rpc_rate_limits = mempool.rate_limits_for_rpc();
         spawn_critical(
             "Mempool",
             async move { mempool.run().await },
@@ -896,6 +902,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             l1_validator,
             replicator,
             local_state_store.clone(),
+            rpc_rate_limits,
         )
         .await;
 

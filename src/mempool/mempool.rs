@@ -87,11 +87,11 @@ impl RateLimits {
         }
     }
 
-    fn invalidate_rate_limiter_for_fid(&mut self, fid: u64) {
+    fn invalidate_rate_limiter_for_fid(&self, fid: u64) {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(&mut self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
+    fn get_rate_limiter_for_fid(&self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
             let shard_id = self.message_router.route_fid(fid, self.num_shards);
             let stores = self.shard_stores.get(&shard_id).unwrap();
@@ -112,7 +112,32 @@ impl RateLimits {
         })
     }
 
-    pub fn consume_for_fid(&mut self, fid: u64) -> bool {
+    /// Charges an RPC-submitted message against its fid's quota before the server simulates
+    /// it, so a fid over its limit costs no simulation work. The signature and signer are
+    /// checked first so a message can only spend the quota of the fid that signed it.
+    pub fn charge_rpc_message(
+        &self,
+        message: &proto::Message,
+        network: FarcasterNetwork,
+    ) -> Result<(), HubError> {
+        validate_gossiped_message(message, network)
+            .map_err(|err| HubError::validation_failure(&err.to_string()))?;
+        verify_signer_on_home_shard(
+            self.message_router.as_ref(),
+            self.num_shards,
+            &self.shard_stores,
+            message,
+        )?;
+        if charges_storage_quota(message) && !self.consume_for_fid(message.fid()) {
+            return Err(HubError::rate_limited(&format!(
+                "rate limit exceeded for FID {}",
+                message.fid()
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn consume_for_fid(&self, fid: u64) -> bool {
         let rate_limiter = self.get_rate_limiter_for_fid(fid);
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
@@ -604,19 +629,12 @@ impl ReadNodeMempool {
     /// peers, so without this anyone could claim any FID with a throwaway key, filling the
     /// mempool and spending that FID's rate limits.
     fn verify_gossiped_signer(&self, message: &proto::Message) -> Result<(), HubError> {
-        let shard = self
-            .message_router
-            .route_fid(message.fid(), self.num_shards);
-        let stores = self.shard_stores.get(&shard).ok_or_else(|| {
-            HubError::invalid_internal_state(&format!("no stores for shard {}", shard))
-        })?;
-        verify_message_signer(
-            &stores.onchain_event_store,
-            &stores.db,
-            &RocksDbTransactionBatch::new(),
+        verify_signer_on_home_shard(
+            self.message_router.as_ref(),
+            self.num_shards,
+            &self.shard_stores,
             message,
         )
-        .map_err(|err| HubError::validation_failure(&err.to_string()))
     }
 
     fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
@@ -664,6 +682,32 @@ impl ReadNodeMempool {
         }
         panic!("Mempool has exited");
     }
+}
+
+fn verify_signer_on_home_shard(
+    message_router: &dyn MessageRouter,
+    num_shards: u32,
+    shard_stores: &HashMap<u32, Stores>,
+    message: &proto::Message,
+) -> Result<(), HubError> {
+    let shard = message_router.route_fid(message.fid(), num_shards);
+    let stores = shard_stores.get(&shard).ok_or_else(|| {
+        HubError::invalid_internal_state(&format!("no stores for shard {}", shard))
+    })?;
+    verify_message_signer(
+        &stores.onchain_event_store,
+        &stores.db,
+        &RocksDbTransactionBatch::new(),
+        message,
+    )
+    .map_err(|err| HubError::validation_failure(&err.to_string()))
+}
+
+/// Whether `message` counts against its fid's storage-derived rate limit. LIVE_AT heartbeats
+/// and KEY_REMOVE have their own limiters instead; KEY_REMOVE is kept off the quota so traffic
+/// from a signer can't block that signer's revocation.
+fn charges_storage_quota(message: &proto::Message) -> bool {
+    !is_live_at(message) && key_remove_body(message).is_none()
 }
 
 /// Stateless checks for a user message received over gossip: data present and decodable,
@@ -729,7 +773,10 @@ pub struct Mempool {
     block_decision_rx: broadcast::Receiver<Block>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
-    rate_limits: Option<RateLimits>,
+    rate_limits: Option<Arc<RateLimits>>,
+    // Set once the RPC server has taken the storage-quota limiter and charges RPC submissions
+    // itself, so the mempool must not charge them a second time.
+    storage_quota_charged_at_rpc: bool,
     // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
     // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
     key_add_rate_limits: KeyAddRateLimits,
@@ -757,13 +804,14 @@ impl Mempool {
             messages_request_rx,
             shard_decision_rx,
             block_decision_rx,
+            storage_quota_charged_at_rpc: false,
             rate_limits: if config.enable_rate_limits {
-                Some(RateLimits::new(
+                Some(Arc::new(RateLimits::new(
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
                     num_shards,
-                ))
+                )))
             } else {
                 None
             },
@@ -789,7 +837,20 @@ impl Mempool {
         }
     }
 
-    fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
+    /// Hands the storage-quota limiter to the RPC server, which then charges RPC submissions
+    /// before simulating them. From then on the mempool stops charging RPC-sourced messages
+    /// against it so they aren't counted twice. Returns `None` when rate limits are disabled.
+    pub fn rate_limits_for_rpc(&mut self) -> Option<Arc<RateLimits>> {
+        let rate_limits = self.rate_limits.clone()?;
+        self.storage_quota_charged_at_rpc = true;
+        Some(rate_limits)
+    }
+
+    fn message_exceeds_rate_limits(
+        &mut self,
+        message: &MempoolMessage,
+        source: &MempoolSource,
+    ) -> bool {
         match message {
             MempoolMessage::UserMessage(user_msg) => {
                 let fid = user_msg.fid();
@@ -825,13 +886,16 @@ impl Mempool {
                             .count("mempool.live_at_rate_limit_hit", 1, vec![]);
                         return true;
                     }
-                    return false;
                 }
 
-                if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(fid)
-                } else {
-                    false
+                if !charges_storage_quota(user_msg)
+                    || (*source == MempoolSource::RPC && self.storage_quota_charged_at_rpc)
+                {
+                    return false;
+                }
+                match &self.rate_limits {
+                    Some(rate_limits) => !rate_limits.consume_for_fid(fid),
+                    None => false,
                 }
             }
             MempoolMessage::OnchainEvent(_)
@@ -887,6 +951,20 @@ impl Mempool {
         message: &MempoolMessage,
         at_admission: bool,
     ) -> Result<(), HubError> {
+        self.message_is_valid_from(
+            shard,
+            message,
+            at_admission.then_some(&MempoolSource::Local),
+        )
+    }
+
+    /// `admission_source` is `None` at pull time, which skips the token-consuming rate limits.
+    fn message_is_valid_from(
+        &mut self,
+        shard: u32,
+        message: &MempoolMessage,
+        admission_source: Option<&MempoolSource>,
+    ) -> Result<(), HubError> {
         // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
         // NEYN-10619 consolidates feature-gating into a single validate_user_message
         // hook at mempool admission.
@@ -939,7 +1017,11 @@ impl Mempool {
         // exactly once, at admission. Re-running them at pull time would double-charge
         // the 1/min KEY_ADD quota and silently drop every accepted message before it
         // ever reached the engine.
-        if at_admission && self.message_exceeds_rate_limits(message) {
+        let exceeds_rate_limits = match admission_source {
+            Some(source) => self.message_exceeds_rate_limits(message, source),
+            None => false,
+        };
+        if exceeds_rate_limits {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
@@ -1112,7 +1194,7 @@ impl Mempool {
         // limiter. The flag exists today as the minimal-surgery fix; the cleaner split is
         // deferred until the surrounding admission validations are reworked.
         let live_at_to_replace = self.prepare_live_at_insert(shard_id, &message)?;
-        let result = self.message_is_valid(shard_id, &message, true);
+        let result = self.message_is_valid_from(shard_id, &message, Some(&source));
         if result.is_ok() {
             if let Some(old_key) = live_at_to_replace {
                 if let Some(shard_messages) = self.messages.get_mut(&shard_id) {
@@ -1164,7 +1246,7 @@ impl Mempool {
                                 .invalidate_rate_limiter_for_fid(data.fid);
                             self.live_at_rate_limits
                                 .invalidate_rate_limiter_for_fid(lend_storage.to_fid);
-                            if let Some(rate_limits) = &mut self.rate_limits {
+                            if let Some(rate_limits) = &self.rate_limits {
                                 rate_limits.invalidate_rate_limiter_for_fid(data.fid);
                                 rate_limits.invalidate_rate_limiter_for_fid(lend_storage.to_fid);
                             }
@@ -1192,7 +1274,7 @@ impl Mempool {
                     if let Some(onchain_event) = &system_message.on_chain_event {
                         if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent {
                             // If the user buys more storage, we should bump their rate limit
-                            if let Some(rate_limits) = &mut self.rate_limits {
+                            if let Some(rate_limits) = &self.rate_limits {
                                 rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
                             }
                             self.live_at_rate_limits

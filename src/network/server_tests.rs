@@ -466,6 +466,26 @@ mod tests {
         broadcast::Sender<ShardChunk>,
         broadcast::Sender<Block>,
     ) {
+        make_server_with_options(rpc_auth, admin_rpc_auth, channel_slot_cap_override, false).await
+    }
+
+    // `enable_rate_limits` turns on the mempool's per-fid limiter. The limiter routes fids with
+    // `ShardRouter`, which disagrees with this harness's `EvenOddRouterForTest`, so tests that
+    // enable it must use fids both routers place on the same shard.
+    async fn make_server_with_options(
+        rpc_auth: Option<String>,
+        admin_rpc_auth: Option<String>,
+        channel_slot_cap_override: Option<u32>,
+        enable_rate_limits: bool,
+    ) -> (
+        HashMap<u32, Stores>,
+        HashMap<u32, Senders>,
+        [ShardEngine; 2],
+        BlockEngine,
+        MyHubService,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+    ) {
         let (msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
         let statsd_client = StatsdClientWrapper::new(
@@ -532,11 +552,9 @@ mod tests {
         });
         let block_stores = block_engine.stores();
 
-        // The mempool's rate limiter routes fids with `ShardRouter`, which disagrees with this
-        // harness's `EvenOddRouterForTest` and would read storage from the wrong shard.
         let mut mempool = Mempool::new(
             mempool::Config {
-                enable_rate_limits: false,
+                enable_rate_limits,
                 ..mempool::Config::default()
             },
             engine1.network,
@@ -550,6 +568,7 @@ mod tests {
             block_decision_rx,
             statsd_client.clone(),
         );
+        let rpc_rate_limits = mempool.rate_limits_for_rpc();
         tokio::spawn(async move { mempool.run().await });
 
         let mut chain_clients = ChainClients {
@@ -594,7 +613,8 @@ mod tests {
                 "asddef".to_string(),
                 None,
                 Default::default(),
-            ),
+            )
+            .with_rate_limits(rpc_rate_limits),
             shard_decision_tx,
             block_decision_tx,
         )
@@ -7348,6 +7368,73 @@ mod tests {
         assert_eq!(body.requester_fid_nonces.len(), 2);
         assert_eq!(body.requester_fid_nonces.get(&requester_fid), Some(&9));
         assert_eq!(body.requester_fid_nonces.get(&other_requester), Some(&0));
+    }
+
+    fn err_code(status: &tonic::Status) -> &str {
+        status
+            .metadata()
+            .get("x-err-code")
+            .and_then(|code| code.to_str().ok())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn test_submit_message_checks_rate_limit_before_simulation() {
+        let (
+            stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server_with_options(None, None, None, true).await;
+
+        let fid = (1..)
+            .step_by(2)
+            .find(|fid| routing::ShardRouter {}.route_fid(*fid, 2) == 1)
+            .unwrap();
+        register_user(
+            fid,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        let merged = messages_factory::casts::create_cast_add(fid, "merged", None, None);
+        test_helper::commit_message(&mut engine1, &merged).await;
+
+        let storage_allowance: u32 = stores[&1]
+            .get_storage_limits(fid)
+            .unwrap()
+            .limits
+            .iter()
+            .map(|limit| limit.limit as u32)
+            .sum();
+        let hourly_quota = 100.max(storage_allowance / 10);
+
+        let attacker_key = generate_signer();
+        for i in 0..5 {
+            let forged = messages_factory::casts::create_cast_add(
+                fid,
+                &format!("forged {i}"),
+                None,
+                Some(&attacker_key),
+            );
+            let status = submit_message(&service, forged).await.unwrap_err();
+            assert_eq!(err_code(&status), "bad_request.validation_failure");
+        }
+
+        for i in 0..hourly_quota {
+            let cast =
+                messages_factory::casts::create_cast_add(fid, &format!("cast {i}"), None, None);
+            submit_message(&service, cast).await.unwrap();
+        }
+
+        // Once the fid is over its quota it is refused before simulation, so even a message
+        // simulation would reject as a duplicate reports the rate limit.
+        let status = submit_message(&service, merged).await.unwrap_err();
+        assert_eq!(err_code(&status), "bad_request.rate_limited");
     }
 
     #[tokio::test]

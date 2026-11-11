@@ -8,7 +8,7 @@ use crate::core::types::SnapchainValidatorContext;
 use crate::core::util::{get_farcaster_time, FarcasterTime};
 use crate::core::validations;
 use crate::mempool::l1_validator::L1Validator;
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{MempoolRequest, MempoolSource, RateLimits};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
 use crate::network::mesh::cache::MeshCache;
@@ -653,6 +653,9 @@ pub struct MyHubService {
     // the background fname connector has polled the corresponding transfer. None
     // disables on-demand recovery (e.g. when fnames are configured off).
     fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
+    // Shared with the mempool. When set, submissions are charged against their fid's quota
+    // before simulation and the mempool skips charging them again.
+    rate_limits: Option<Arc<RateLimits>>,
 }
 
 impl MyHubService {
@@ -742,8 +745,31 @@ impl MyHubService {
             id_registry_cache,
             mesh_cache,
             fname_lookup,
+            rate_limits: None,
         };
         service
+    }
+
+    /// Charges submissions against the mempool's per-fid rate limits before simulating them.
+    /// Pass the handle from `Mempool::rate_limits_for_rpc`.
+    pub fn with_rate_limits(mut self, rate_limits: Option<Arc<RateLimits>>) -> Self {
+        self.rate_limits = rate_limits;
+        self
+    }
+
+    fn charge_rate_limit(&self, message: &proto::Message) -> Result<(), HubError> {
+        let Some(rate_limits) = &self.rate_limits else {
+            return Ok(());
+        };
+        rate_limits
+            .charge_rpc_message(message, self.network)
+            .inspect_err(|err| {
+                self.statsd_client.count(
+                    "rpc.submit_message.precheck_rejected",
+                    1,
+                    vec![("code", err.code.as_str())],
+                );
+            })
     }
 
     #[cfg(test)]
@@ -764,6 +790,7 @@ impl MyHubService {
         if fid == 0 {
             return Err(HubError::invalid_parameter("fid cannot be 0"));
         }
+        self.charge_rate_limit(&message)?;
 
         let version = EngineVersion::current(self.network);
         let dst_shard =
@@ -1396,6 +1423,16 @@ impl HubService for MyHubService {
 
         // 2. Process each shard's batch transactionally for validation
         for (shard_id, batch) in messages_by_shard {
+            let batch: Vec<proto::Message> = batch
+                .into_iter()
+                .filter_map(|msg| match self.charge_rate_limit(&msg) {
+                    Ok(()) => Some(msg),
+                    Err(err) => {
+                        results.push(create_error_response(msg.hash, err));
+                        None
+                    }
+                })
+                .collect();
             self.statsd_client
                 .count("rpc.submit_message_in_flight", batch.len() as i64, vec![]);
 
