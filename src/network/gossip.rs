@@ -2,6 +2,7 @@ use crate::cfg::{DEFAULT_GOSSIP_PORT, DEFAULT_RPC_PORT};
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
+use crate::core::error::HubError;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext, WellFormedProposal};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::mesh::diagnostics;
@@ -1134,65 +1135,53 @@ impl SnapchainGossip {
         is_mempool_topic: bool,
         message: gossipsub::Message,
     ) {
-        use gossipsub::MessageAcceptance::{Accept, Ignore, Reject};
-
         let Some(system_tx) = self.system_tx.clone() else {
-            self.report_validation(&message_id, &peer_id, Accept);
+            self.report_validation(&message_id, &peer_id, gossipsub::MessageAcceptance::Accept);
             return;
         };
         let system_message =
             self.map_gossip_bytes_to_system_message(peer_id, message.source, message.data);
-        match (is_mempool_topic, system_message) {
-            (
-                true,
-                Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
-                    mempool_message,
-                    source,
-                    _,
-                ))),
-            ) => {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                let request = MempoolRequest::AddMessage(mempool_message, source, Some(reply_tx));
-                // Never wait on the node here: a backlog of mempool messages must not stall the
-                // swarm loop, which relays every other topic and reports these verdicts.
-                if let Err(e) = system_tx.try_send(SystemMessage::Mempool(request)) {
-                    debug!("Dropping gossiped mempool message: {}", e);
-                    self.statsd_client.count(
-                        "gossip.mempool_verdict",
-                        1,
-                        vec![("verdict", "dropped")],
-                    );
-                    self.report_validation(&message_id, &peer_id, Ignore);
-                    return;
-                }
+        match route_gossip_message(is_mempool_topic, system_message) {
+            GossipRoute::AwaitMempool(mempool_message, source) => {
+                let answer_rx =
+                    match submit_gossiped_mempool_message(&system_tx, mempool_message, source) {
+                        Ok(answer_rx) => answer_rx,
+                        Err(e) => {
+                            debug!("Dropping gossiped mempool message: {}", e);
+                            self.statsd_client.count(
+                                "gossip.mempool_verdict",
+                                1,
+                                vec![("verdict", "dropped")],
+                            );
+                            self.report_validation(
+                                &message_id,
+                                &peer_id,
+                                gossipsub::MessageAcceptance::Ignore,
+                            );
+                            return;
+                        }
+                    };
                 let verdicts_tx = self.mempool_verdicts_tx.clone();
                 tokio::spawn(async move {
-                    let acceptance = match tokio::time::timeout(MEMPOOL_VERDICT_TIMEOUT, reply_rx)
+                    let answer = tokio::time::timeout(MEMPOOL_VERDICT_TIMEOUT, answer_rx)
                         .await
-                    {
-                        Ok(Ok(Ok(()))) => Accept,
-                        Ok(Ok(Err(err))) if err.code == "bad_request.validation_failure" => Reject,
-                        // Duplicates, rate limits, a full mempool, no answer in time.
-                        _ => Ignore,
-                    };
-                    let _ = verdicts_tx.send((message_id, peer_id, acceptance)).await;
+                        .ok()
+                        .and_then(Result::ok);
+                    let _ = verdicts_tx
+                        .send((message_id, peer_id, mempool_verdict(answer)))
+                        .await;
                 });
             }
-            // The node routes by message content, not topic. Without these arms a mempool
-            // message published on another topic would reach the mempool and be relayed without
-            // waiting for its verdict.
-            (true, Some(_)) | (false, Some(SystemMessage::Mempool(_))) => {
-                self.report_validation(&message_id, &peer_id, Reject);
-            }
-            (true, None) => self.report_validation(&message_id, &peer_id, Ignore),
-            (false, Some(system_message)) => {
+            GossipRoute::Deliver(system_message) => {
                 // Report before delivering so relay never waits on the node's channel.
-                self.report_validation(&message_id, &peer_id, Accept);
+                self.report_validation(&message_id, &peer_id, gossipsub::MessageAcceptance::Accept);
                 if let Err(e) = system_tx.send(system_message).await {
                     warn!("Failed to send system block message: {}", e);
                 }
             }
-            (false, None) => self.report_validation(&message_id, &peer_id, Accept),
+            GossipRoute::Verdict(acceptance) => {
+                self.report_validation(&message_id, &peer_id, acceptance)
+            }
         }
     }
 
@@ -1757,4 +1746,64 @@ impl SnapchainGossip {
             generated_at,
         }
     }
+}
+
+/// What to do with a received gossip message, decided from its topic and decoded content.
+pub(crate) enum GossipRoute {
+    /// A mempool message: relay it once the local mempool accepts it.
+    AwaitMempool(MempoolMessage, MempoolSource),
+    /// Relay it now and hand it to the node.
+    Deliver(SystemMessage),
+    /// Report this verdict without handing the message to the node.
+    Verdict(gossipsub::MessageAcceptance),
+}
+
+pub(crate) fn route_gossip_message(
+    is_mempool_topic: bool,
+    system_message: Option<SystemMessage>,
+) -> GossipRoute {
+    use gossipsub::MessageAcceptance::{Accept, Ignore, Reject};
+    match (is_mempool_topic, system_message) {
+        (true, Some(SystemMessage::Mempool(MempoolRequest::AddMessage(message, source, _)))) => {
+            GossipRoute::AwaitMempool(message, source)
+        }
+        // The node routes by message content, not topic. Without these arms a mempool message
+        // published on another topic would reach the mempool and be relayed without waiting for
+        // its verdict.
+        (true, Some(_)) | (false, Some(SystemMessage::Mempool(_))) => GossipRoute::Verdict(Reject),
+        (true, None) => GossipRoute::Verdict(Ignore),
+        (false, Some(system_message)) => GossipRoute::Deliver(system_message),
+        (false, None) => GossipRoute::Verdict(Accept),
+    }
+}
+
+/// The gossip verdict for a mempool message, given the mempool's answer or `None` when there
+/// was no answer in time.
+pub(crate) fn mempool_verdict(
+    answer: Option<Result<(), HubError>>,
+) -> gossipsub::MessageAcceptance {
+    use gossipsub::MessageAcceptance::{Accept, Ignore, Reject};
+    match answer {
+        Some(Ok(())) => Accept,
+        Some(Err(err)) if err.code == "bad_request.validation_failure" => Reject,
+        // Duplicates, rate limits, a full mempool, no answer in time.
+        _ => Ignore,
+    }
+}
+
+/// Hands a gossiped mempool message to the node without waiting, so a backlog of mempool
+/// messages can't stall the swarm loop, which relays every other topic and reports verdicts.
+/// Returns the channel the mempool's answer arrives on.
+pub(crate) fn submit_gossiped_mempool_message(
+    system_tx: &Sender<SystemMessage>,
+    message: MempoolMessage,
+    source: MempoolSource,
+) -> Result<oneshot::Receiver<Result<(), HubError>>, mpsc::error::TrySendError<SystemMessage>> {
+    let (answer_tx, answer_rx) = oneshot::channel();
+    system_tx.try_send(SystemMessage::Mempool(MempoolRequest::AddMessage(
+        message,
+        source,
+        Some(answer_tx),
+    )))?;
+    Ok(answer_rx)
 }

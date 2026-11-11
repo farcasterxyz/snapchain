@@ -2085,6 +2085,24 @@ mod tests {
 
         let genuine = create_cast_add(1234, "genuine", None, None);
         add_gossiped_message(&mempool_tx, genuine).await.unwrap();
+
+        let merged = create_cast_add(1234, "merged", None, None);
+        test_helper::commit_message(&mut engine, &merged).await;
+        let error = add_gossiped_message(&mempool_tx, merged).await.unwrap_err();
+        assert_eq!(error.code, "bad_request.duplicate");
+
+        // Only gossip is checked here; RPC submissions were already simulated by the server.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let forged = create_cast_add(1234, "forged over rpc", None, Some(&generate_signer()));
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(forged),
+                MempoolSource::RPC,
+                Some(reply_tx),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_rx.await.unwrap(), Ok(()));
     }
 
     #[test]
