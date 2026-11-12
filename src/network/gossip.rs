@@ -1300,7 +1300,31 @@ impl SnapchainGossip {
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
-                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let signer = match &signed_consensus_msg.consensus_message {
+                        Some(proto::consensus_message::ConsensusMessage::Proposal(proposal)) => {
+                            &proposal.proposer
+                        }
+                        Some(proto::consensus_message::ConsensusMessage::Vote(vote)) => &vote.voter,
+                        None => {
+                            warn!(
+                                peer_id = peer_id.to_string(),
+                                "Dropping empty consensus message"
+                            );
+                            return None;
+                        }
+                    };
+                    // Gossipsub runs in strict mode, so `source` is the signature-checked author.
+                    // A validator's gossip identity is its consensus key, so this checks that the
+                    // named proposer or voter published this message.
+                    let signer = peer_id_from_validator_key(signer);
+                    let Some(author) = source.filter(|author| signer == Some(*author)) else {
+                        warn!(
+                            peer_id = peer_id.to_string(),
+                            "Dropping consensus message not published by its signer"
+                        );
+                        return None;
+                    };
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&author);
                     let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
                     let event = MalachiteNetworkEvent::Message(
                         Channel::Consensus,
