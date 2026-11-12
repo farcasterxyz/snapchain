@@ -416,18 +416,18 @@ impl BlockProposer {
         shard_height: u64,
         stores: &Stores,
     ) -> Result<Option<ShardChunkWitness>, ShardStorageError> {
-        let chunk = stores.shard_store.get_chunk_by_height(shard_height)?;
-        if let Some(chunk) = chunk {
-            let header = chunk.header.as_ref().unwrap();
-            let shard_witness = ShardChunkWitness {
-                height: header.height,
-                shard_hash: chunk.hash.clone(),
-                shard_root: chunk.header.unwrap().shard_root,
-            };
-            Ok(Some(shard_witness))
-        } else {
-            Ok(None)
-        }
+        let Some(chunk) = stores.shard_store.get_chunk_by_height(shard_height)? else {
+            return Ok(None);
+        };
+        let header = chunk.header.unwrap();
+        let Some(height) = header.height else {
+            return Ok(None);
+        };
+        Ok(Some(ShardChunkWitness {
+            height: Some(height),
+            shard_hash: chunk.hash,
+            shard_root: header.shard_root,
+        }))
     }
 
     async fn collect_confirmed_shard_witnesses(
@@ -677,6 +677,14 @@ impl Proposer for BlockProposer {
                     "Received block with wrong number of shard witnesses: {}",
                     witness.shard_chunk_witnesses.len()
                 );
+                return Validity::Invalid;
+            }
+            if witness
+                .shard_chunk_witnesses
+                .iter()
+                .any(|chunk_witness| chunk_witness.height.is_none())
+            {
+                error!("Received block with missing shard witness height");
                 return Validity::Invalid;
             }
             let witness_hash = shard_witness_hash(witness);

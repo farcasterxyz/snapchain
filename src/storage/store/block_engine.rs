@@ -2379,7 +2379,11 @@ impl BlockEngine {
         previous_shard_witness
             .shard_chunk_witnesses
             .iter()
-            .find(|witness| witness.height.unwrap().shard_index == shard_id)
+            .find(|witness| {
+                witness
+                    .height
+                    .is_some_and(|height| height.shard_index == shard_id)
+            })
             .cloned()
     }
 
