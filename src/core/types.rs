@@ -315,6 +315,16 @@ pub fn round_from_i64(round: i64) -> Result<Round, String> {
     Ok(Round::from(round))
 }
 
+/// Converts the wire round of a proposal or vote, which is always a defined round.
+/// [`round_from_i64`] maps every negative value to `Round::Nil`, which is only valid for a
+/// proposal's `pol_round`.
+fn defined_round_from_i64(round: i64) -> Result<Round, String> {
+    if round < 0 {
+        return Err(format!("Invalid round: {}", round));
+    }
+    round_from_i64(round)
+}
+
 /// A [`FullProposal`] whose height, round, proposer and proposed value have been checked, so
 /// they can be read without panicking. The only way to build one is
 /// [`WellFormedProposal::try_from`], so code that takes this type cannot be handed an
@@ -544,7 +554,7 @@ impl Vote {
         Ok(Self {
             vote_type,
             height: proto.height.ok_or("Missing vote height")?,
-            round: round_from_i64(proto.round)?,
+            round: defined_round_from_i64(proto.round)?,
             voter: Address::try_from_slice(&proto.voter)?,
             shard_hash,
         })
@@ -578,7 +588,7 @@ impl Proposal {
     pub fn try_from_proto(proto: proto::Proposal) -> Result<Self, String> {
         Ok(Self {
             height: proto.height.ok_or("Missing proposal height")?,
-            round: round_from_i64(proto.round)?,
+            round: defined_round_from_i64(proto.round)?,
             shard_hash: proto.value.ok_or("Missing proposal value")?,
             pol_round: round_from_i64(proto.pol_round)?,
             proposer: Address::try_from_slice(&proto.proposer)?,

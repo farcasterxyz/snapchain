@@ -1319,3 +1319,99 @@ fn test_message_ids_are_unique_per_topic() {
         gossip_message_id(&message_on(CONTACT_INFO))
     );
 }
+
+/// A consensus proposal or vote reaches consensus only when its gossip author is the validator
+/// it names, and it is attributed to that author.
+#[tokio::test]
+#[serial]
+async fn test_consensus_message_must_be_published_by_its_signer() {
+    use crate::proto::{
+        consensus_message, gossip_message, ConsensusMessage, GossipMessage, Height, Proposal,
+        ShardHash, Vote,
+    };
+    use libp2p::PeerId;
+
+    let addr = format!(
+        "/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1",
+        BASE_PORT_FOR_TEST + 44
+    );
+    let (system_tx, _system_rx) = mpsc::channel::<SystemMessage>(100);
+    let mut gossip = SnapchainGossip::create(
+        Keypair::generate(),
+        &Config::new(addr.clone(), addr),
+        Some(system_tx),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+
+    let validator = Keypair::generate();
+    let validator_key = validator.public().to_bytes().to_vec();
+    let validator_peer_id = libp2p::identity::PublicKey::from(validator.public()).to_peer_id();
+    let relay = PeerId::random();
+
+    let encode = |message: consensus_message::ConsensusMessage| {
+        GossipMessage {
+            gossip_message: Some(gossip_message::GossipMessage::Consensus(ConsensusMessage {
+                consensus_message: Some(message),
+                signature: vec![0u8; 64],
+            })),
+        }
+        .encode_to_vec()
+    };
+    let proposal = |proposer: Vec<u8>| {
+        consensus_message::ConsensusMessage::Proposal(Proposal {
+            height: Some(Height::new(1, 1)),
+            round: 0,
+            pol_round: -1,
+            proposer,
+            value: Some(ShardHash {
+                shard_index: 1,
+                hash: vec![9u8; 20],
+            }),
+        })
+    };
+    let vote = consensus_message::ConsensusMessage::Vote(Vote {
+        height: Some(Height::new(1, 1)),
+        round: 0,
+        voter: validator_key.clone(),
+        ..Default::default()
+    });
+
+    for message in [proposal(validator_key.clone()), vote] {
+        for author in [None, Some(relay), Some(PeerId::random())] {
+            let forwarded =
+                gossip.map_gossip_bytes_to_system_message(relay, author, encode(message.clone()));
+            assert!(
+                forwarded.is_none(),
+                "forwarded {message:?} published by {author:?}"
+            );
+        }
+
+        let forwarded = gossip.map_gossip_bytes_to_system_message(
+            relay,
+            Some(validator_peer_id),
+            encode(message.clone()),
+        );
+        let Some(SystemMessage::MalachiteNetwork(
+            _,
+            MalachiteNetworkEvent::Message(Channel::Consensus, from, _),
+        )) = forwarded
+        else {
+            panic!("dropped {message:?} published by its signer");
+        };
+        assert_eq!(from, MalachitePeerId::from_libp2p(&validator_peer_id));
+    }
+
+    let forwarded = gossip.map_gossip_bytes_to_system_message(
+        relay,
+        Some(validator_peer_id),
+        encode(proposal(vec![1, 2, 3])),
+    );
+    assert!(
+        forwarded.is_none(),
+        "forwarded a proposal with a malformed proposer key"
+    );
+}
