@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::sync::Arc;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -211,6 +211,11 @@ pub const KEY_REMOVE_RATE_LIMIT_PER_MINUTE: u32 = 5;
 /// block's prune events itself. Each pruned message emits a HubEvent, so this keeps one
 /// message's prune work small next to the rest of a block.
 pub const MAX_PRUNE_SWEEP_PER_MESSAGE: u32 = 4096;
+
+/// Most messages that the user messages in one proposal may cause to be pruned in total, until
+/// `BoundedPruneSweep` activates and the engine applies the same budget per block. Keeps a
+/// block's prune events small next to the rest of the block.
+pub const MAX_PRUNE_SWEEP_PER_BLOCK: u32 = 4096;
 
 /// Fixed limit on KEY_REMOVE, kept apart from the storage-quota limiter so a signer that spends
 /// its fid's quota cannot stop the fid from revoking it.
@@ -708,18 +713,8 @@ impl ReadNodeMempool {
     }
 }
 
-/// The number of messages merging `message` would prune, if that is more than
-/// `MAX_PRUNE_SWEEP_PER_MESSAGE` and `version` does not yet bound sweeps per block.
-pub(crate) fn prune_sweep_over_limit(
-    stores: &Stores,
-    message: &proto::Message,
-    version: EngineVersion,
-) -> Option<u32> {
-    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
-        return None;
-    }
-    let msg_type = message.msg_type();
-    if !matches!(
+fn is_prunable(msg_type: MessageType) -> bool {
+    matches!(
         msg_type,
         MessageType::CastAdd
             | MessageType::CastRemove
@@ -732,14 +727,97 @@ pub(crate) fn prune_sweep_over_limit(
             | MessageType::VerificationAddEthAddress
             | MessageType::VerificationRemove
             | MessageType::UsernameProof
-    ) {
+    )
+}
+
+/// The number of stored messages merging `message` would prune, judged from committed state.
+fn estimated_prune_sweep(stores: &Stores, message: &proto::Message) -> u32 {
+    let msg_type = message.msg_type();
+    if !is_prunable(msg_type) {
+        return 0;
+    }
+    stores
+        .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
+        .map_or(0, |(count, max)| (count + 1).saturating_sub(max))
+}
+
+/// The number of messages merging `message` would prune, if that is more than
+/// `MAX_PRUNE_SWEEP_PER_MESSAGE` and `version` does not yet bound sweeps per block.
+pub(crate) fn prune_sweep_over_limit(
+    stores: &Stores,
+    message: &proto::Message,
+    version: EngineVersion,
+) -> Option<u32> {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
         return None;
     }
-    let (count, max) = stores
-        .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
-        .ok()?;
-    let sweep = (count + 1).saturating_sub(max);
+    let sweep = estimated_prune_sweep(stores, message);
     (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
+}
+
+/// Fids whose storage limit a storage lend in `messages` changes.
+fn fids_with_storage_lends(messages: &[MempoolMessage]) -> HashSet<u64> {
+    let mut fids = HashSet::new();
+    for message in messages {
+        let MempoolMessage::BlockEvent { message, .. } = message else {
+            continue;
+        };
+        let Some(proto::block_event_data::Body::MergeMessageEventBody(body)) =
+            message.data.as_ref().and_then(|data| data.body.as_ref())
+        else {
+            continue;
+        };
+        let Some(lend) = body.message.as_ref() else {
+            continue;
+        };
+        if lend.msg_type() != MessageType::LendStorage {
+            continue;
+        }
+        fids.insert(lend.fid());
+        if let Some(proto::message_data::Body::LendStorageBody(lend_body)) =
+            lend.data.as_ref().and_then(|data| data.body.as_ref())
+        {
+            fids.insert(lend_body.to_fid);
+        }
+    }
+    fids
+}
+
+/// Splits messages pulled for one proposal into those to propose now and those to keep for a
+/// later block, so their prune sweeps total at most `MAX_PRUNE_SWEEP_PER_BLOCK` until
+/// `BoundedPruneSweep` activates. Estimates come from committed state, so prunable messages
+/// from a fid whose storage a lend in the same proposal changes are also kept back: the lend
+/// can raise their sweep past the estimate.
+pub(crate) fn defer_excess_prune_sweeps(
+    stores: &Stores,
+    messages: Vec<MempoolMessage>,
+    version: EngineVersion,
+) -> (Vec<MempoolMessage>, Vec<MempoolMessage>) {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+        return (messages, vec![]);
+    }
+    let lent_fids = fids_with_storage_lends(&messages);
+    let mut budget_left = MAX_PRUNE_SWEEP_PER_BLOCK;
+    let mut proposed = Vec::with_capacity(messages.len());
+    let mut deferred = vec![];
+    for message in messages {
+        if let MempoolMessage::UserMessage(user_msg) = &message {
+            if is_prunable(user_msg.msg_type()) {
+                if lent_fids.contains(&user_msg.fid()) {
+                    deferred.push(message);
+                    continue;
+                }
+                let sweep = estimated_prune_sweep(stores, user_msg);
+                if sweep > budget_left {
+                    deferred.push(message);
+                    continue;
+                }
+                budget_left -= sweep;
+            }
+        }
+        proposed.push(message);
+    }
+    (proposed, deferred)
 }
 
 fn verify_signer_on_home_shard(
@@ -969,26 +1047,37 @@ impl Mempool {
     }
 
     async fn pull_messages(&mut self, request: MempoolMessagesRequest) {
+        let version = EngineVersion::current(self.read_node_mempool.network);
+        let messages =
+            self.take_messages(request.shard_id, request.max_messages_per_block, version);
+        if let Err(_) = request.message_tx.send(messages) {
+            error!("Unable to send message from mempool");
+        }
+    }
+
+    /// Removes and returns the messages for one proposal on `shard_id`. Messages kept back by
+    /// `defer_excess_prune_sweeps` go back into the mempool for a later proposal.
+    pub(crate) fn take_messages(
+        &mut self,
+        shard_id: u32,
+        max_messages_per_block: u32,
+        version: EngineVersion,
+    ) -> Vec<MempoolMessage> {
         let mut messages = vec![];
-        while messages.len() < request.max_messages_per_block as usize {
-            let shard_messages = self.messages.get_mut(&request.shard_id);
+        while messages.len() < max_messages_per_block as usize {
+            let shard_messages = self.messages.get_mut(&shard_id);
             match shard_messages {
                 None => break,
                 Some(shard_messages) => {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((key, next_message)) => {
-                            self.remove_live_at_index_for_message(
-                                request.shard_id,
-                                &key,
-                                &next_message,
-                            );
+                            self.remove_live_at_index_for_message(shard_id, &key, &next_message);
                             // `at_admission = false`: keeps the feature-gate, BlockEvent-shard,
                             // and post-merge duplicate checks but skips the token-consuming
                             // rate limiter. The token was already consumed at insertion; a
                             // second check would always fail and permanently drop the message.
-                            let result =
-                                self.message_is_valid(request.shard_id, &next_message, false);
+                            let result = self.message_is_valid(shard_id, &next_message, false);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -998,9 +1087,26 @@ impl Mempool {
             }
         }
 
-        if let Err(_) = request.message_tx.send(messages) {
-            error!("Unable to send message from mempool");
+        let Some(stores) = self.read_node_mempool.shard_stores.get(&shard_id) else {
+            return messages;
+        };
+        let (proposed, deferred) = defer_excess_prune_sweeps(stores, messages, version);
+        if !deferred.is_empty() {
+            self.statsd_client.count_with_shard(
+                shard_id,
+                "mempool.prune_sweep_deferred",
+                deferred.len() as u64,
+                vec![],
+            );
         }
+        for message in deferred {
+            self.index_live_at_insert(shard_id, &message);
+            self.messages
+                .entry(shard_id)
+                .or_default()
+                .insert(message.mempool_key(), message);
+        }
+        proposed
     }
 
     pub fn message_is_valid(
@@ -1186,7 +1292,7 @@ impl Mempool {
         }
     }
 
-    async fn insert(
+    pub(crate) async fn insert(
         &mut self,
         message: MempoolMessage,
         source: MempoolSource,
