@@ -5,7 +5,7 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        LinkStore, MergeContext, Store, StoreEventHandler, StoreOptions,
+        LinkStore, MergeContext, Store, StoreEventHandler, StoreOptions, SweepLimit,
     };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
@@ -2249,6 +2249,72 @@ mod tests {
         let result = store.prune_messages(FID_FOR_TEST, 0, 2, &mut txn).unwrap();
         assert_eq!(result.len(), 0);
         db.commit(txn).unwrap();
+    }
+
+    #[test]
+    fn test_count_prunable_messages_matches_prune_with_compact_state() {
+        let (store, db, _temp_dir) = create_test_store();
+        let now = crate::utils::factory::time::farcaster_time();
+
+        let compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![TARGET_FID],
+            Some(now),
+            None,
+        );
+        merge_message_success(&store, &db, &compact_state);
+        for offset in 1..=2 {
+            let add = messages_factory::links::create_link_add(
+                FID_FOR_TEST,
+                LINK_TYPE_FOLLOW,
+                TARGET_FID + offset as u64,
+                Some(now + offset),
+                None,
+            );
+            merge_message_success(&store, &db, &add);
+        }
+
+        for (current_count, max_count) in [(3, 0), (3, 1), (3, 2), (3, 3), (5, 0)] {
+            let mut txn = RocksDbTransactionBatch::new();
+            let pruned = store
+                .prune_messages(FID_FOR_TEST, current_count, max_count, &mut txn)
+                .unwrap();
+            assert_eq!(
+                store.count_prunable_messages(FID_FOR_TEST, current_count, max_count, u32::MAX),
+                pruned.len() as u32,
+                "current_count={current_count} max_count={max_count}"
+            );
+        }
+        assert_eq!(store.count_prunable_messages(FID_FOR_TEST, 3, 0, 0), 1);
+    }
+
+    #[test]
+    fn test_all_or_nothing_sweep_writes_nothing_when_over_limit() {
+        let (store, db, _temp_dir) = create_test_store();
+        let now = crate::utils::factory::time::farcaster_time();
+        for offset in 0..3 {
+            let add = messages_factory::links::create_link_add(
+                FID_FOR_TEST,
+                LINK_TYPE_FOLLOW,
+                TARGET_FID + offset as u64,
+                Some(now + offset),
+                None,
+            );
+            merge_message_success(&store, &db, &add);
+        }
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store
+            .prune_messages_limited(FID_FOR_TEST, 3, 0, &mut txn, SweepLimit::AllOrNothing(2))
+            .unwrap();
+        assert!(result.is_none());
+        assert!(txn.batch.is_empty());
+
+        let result = store
+            .prune_messages_limited(FID_FOR_TEST, 3, 0, &mut txn, SweepLimit::AllOrNothing(3))
+            .unwrap();
+        assert_eq!(result.map(|events| events.len()), Some(3));
     }
 
     #[test]

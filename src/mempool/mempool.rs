@@ -206,6 +206,12 @@ impl KeyAddRateLimits {
 /// KEY_REMOVE messages admitted per minute for each (fid, key, authorization type).
 pub const KEY_REMOVE_RATE_LIMIT_PER_MINUTE: u32 = 5;
 
+/// Most messages a single user message may cause to be pruned and still be admitted or
+/// pulled into a proposal, until `BoundedPruneSweep` activates and the engine limits each
+/// block's prune events itself. Each pruned message emits a HubEvent, so this keeps one
+/// message's prune work small next to the rest of a block.
+pub const MAX_PRUNE_SWEEP_PER_MESSAGE: u32 = 4096;
+
 /// Fixed limit on KEY_REMOVE, kept apart from the storage-quota limiter so a signer that spends
 /// its fid's quota cannot stop the fid from revoking it.
 ///
@@ -702,6 +708,40 @@ impl ReadNodeMempool {
     }
 }
 
+/// The number of messages merging `message` would prune, if that is more than
+/// `MAX_PRUNE_SWEEP_PER_MESSAGE` and `version` does not yet bound sweeps per block.
+pub(crate) fn prune_sweep_over_limit(
+    stores: &Stores,
+    message: &proto::Message,
+    version: EngineVersion,
+) -> Option<u32> {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+        return None;
+    }
+    let msg_type = message.msg_type();
+    if !matches!(
+        msg_type,
+        MessageType::CastAdd
+            | MessageType::CastRemove
+            | MessageType::LinkAdd
+            | MessageType::LinkRemove
+            | MessageType::LinkCompactState
+            | MessageType::ReactionAdd
+            | MessageType::ReactionRemove
+            | MessageType::UserDataAdd
+            | MessageType::VerificationAddEthAddress
+            | MessageType::VerificationRemove
+            | MessageType::UsernameProof
+    ) {
+        return None;
+    }
+    let (count, max) = stores
+        .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
+        .ok()?;
+    let sweep = (count + 1).saturating_sub(max);
+    (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
+}
+
 fn verify_signer_on_home_shard(
     message_router: &dyn MessageRouter,
     num_shards: u32,
@@ -1029,6 +1069,32 @@ impl Mempool {
 
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
+        }
+        if let MempoolMessage::UserMessage(user_msg) = message {
+            let sweep = self
+                .read_node_mempool
+                .shard_stores
+                .get(&shard)
+                .and_then(|stores| {
+                    prune_sweep_over_limit(
+                        stores,
+                        user_msg,
+                        EngineVersion::current(self.read_node_mempool.network),
+                    )
+                });
+            if let Some(sweep) = sweep {
+                self.statsd_client.count_with_shard(
+                    shard,
+                    "mempool.prune_sweep_over_limit",
+                    1,
+                    vec![],
+                );
+                return Err(HubError::validation_failure(&format!(
+                    "message would prune {} messages over the fid's storage limit; at most {} \
+                     can be pruned by one message",
+                    sweep, MAX_PRUNE_SWEEP_PER_MESSAGE
+                )));
+            }
         }
         // Rate-limit checks are token-consuming (the KEY_ADD limiter uses
         // `governor::RateLimiter::check`, which decrements the bucket). They must run

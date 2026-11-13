@@ -44,7 +44,7 @@ pub const FID_FOR_TEST: u64 = 1234;
 /// Two things ARE version-sensitive and build their own context instead: link compaction
 /// (`is_compaction_conflict`), and the reaction store's channel-follow index, which is gated on
 /// `ProtocolFeature::ChannelFollows` read from this context. A test that asserts a follow row is
-/// absent must pass a pre-V24 context explicitly rather than relying on this helper.
+/// absent must pass a pre-V25 context explicitly rather than relying on this helper.
 pub fn default_merge_ctx() -> crate::storage::store::account::MergeContext {
     crate::storage::store::account::MergeContext {
         version: crate::version::version::EngineVersion::latest(),
@@ -483,6 +483,77 @@ pub async fn commit_block_events(engine: &mut ShardEngine, block_events: Vec<&Bl
         None,
     );
 
+    validate_and_commit_state_change(engine, &state_change).await;
+}
+
+/// A `ReactionAdd` from `fid` whose target hash encodes `i`, so each `i` is a distinct row.
+pub fn numbered_reaction(fid: u64, i: u64, timestamp: u32) -> proto::Message {
+    let mut hash = [0u8; 20];
+    hash[12..].copy_from_slice(&i.to_be_bytes());
+    crate::utils::factory::messages_factory::reactions::create_reaction_add(
+        fid,
+        proto::ReactionType::Like,
+        proto::reaction_body::Target::TargetCastId(proto::CastId {
+            fid: 1,
+            hash: hash.to_vec(),
+        }),
+        Some(timestamp),
+        None,
+    )
+}
+
+/// Commits `count` distinct reactions from `fid` in blocks stamped `block_time`. The fid's
+/// cap must already allow them, or the commits prune as they go.
+pub async fn fill_reactions(
+    engine: &mut ShardEngine,
+    fid: u64,
+    count: u32,
+    block_time: &FarcasterTime,
+) {
+    let timestamp = block_time.to_u64() as u32 - 120;
+    let mut filled = 0u64;
+    while filled < count as u64 {
+        let batch = (count as u64 - filled).min(4096);
+        let messages = (filled..filled + batch)
+            .map(|i| MempoolMessage::UserMessage(numbered_reaction(fid, i, timestamp)))
+            .collect();
+        filled += batch;
+        let state_change =
+            engine.propose_state_change(engine.shard_id(), messages, Some(block_time.clone()));
+        validate_and_commit_state_change(engine, &state_change).await;
+    }
+}
+
+/// Replays, in a block stamped `block_time`, a `LendStorage` block event moving `units` 2025
+/// units from `from_fid` to `to_fid`. Lending lowers the lender's caps without touching its
+/// stored messages.
+#[cfg(test)]
+pub async fn lend_storage(
+    engine: &mut ShardEngine,
+    from_fid: u64,
+    to_fid: u64,
+    units: u64,
+    seqnum: u64,
+    block_time: &FarcasterTime,
+) {
+    let lend = crate::utils::factory::messages_factory::storage_lend::create_storage_lend(
+        from_fid,
+        to_fid,
+        units,
+        proto::StorageUnitType::UnitType2025,
+        Some(block_time.to_u64() as u32 - 60),
+        None,
+    );
+    let block_event =
+        events_factory::create_merge_message_event_at(lend, seqnum, block_time.to_u64());
+    let state_change = engine.propose_state_change(
+        engine.shard_id(),
+        vec![MempoolMessage::BlockEvent {
+            for_shard: engine.shard_id(),
+            message: block_event,
+        }],
+        Some(block_time.clone()),
+    );
     validate_and_commit_state_change(engine, &state_change).await;
 }
 
