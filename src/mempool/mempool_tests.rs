@@ -6,7 +6,7 @@ mod tests {
 
     use crate::{
         consensus::consensus::SystemMessage,
-        core::util::to_farcaster_time,
+        core::util::{to_farcaster_time, FarcasterTime},
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
         proto::{
@@ -29,6 +29,7 @@ mod tests {
             },
             statsd_wrapper::StatsdClientWrapper,
         },
+        version::version::EngineVersion,
     };
 
     use self::test_helper::{default_custody_address, default_signer};
@@ -2126,73 +2127,44 @@ mod tests {
             &events_factory::create_rent_event_with_timestamp(fid, 1_400, now),
         )
         .await;
-        test_helper::fill_reactions(engine, fid, stored).await;
+        test_helper::fill_reactions(engine, fid, stored, &FarcasterTime::current()).await;
         1_401
     }
 
-    fn trigger_reaction(fid: u64) -> MempoolMessage {
-        MempoolMessage::UserMessage(test_helper::numbered_reaction(
-            fid,
-            u64::MAX,
-            crate::utils::factory::time::farcaster_time(),
-        ))
+    fn trigger_reaction(fid: u64) -> proto::Message {
+        test_helper::numbered_reaction(fid, u64::MAX, crate::utils::factory::time::farcaster_time())
     }
 
     #[tokio::test]
-    async fn test_message_that_would_prune_more_than_the_limit_is_rejected_at_admission() {
-        // Testnet has no V24 entry, so its mempool still guards against large sweeps.
-        let (mut engines, _, _, mut mempool, _, _, _, _, _) =
-            setup_for_network(None, false, 1, FarcasterNetwork::Testnet).await;
+    async fn test_prune_sweep_limit_applies_only_before_bounded_sweeps() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
         let engine = engines.get_mut(&1).unwrap();
         let over = FID_FOR_TEST;
         let at_limit = FID_FOR_TEST + 1;
+        let now = FarcasterTime::current();
         let units = register_with_reactions(engine, over, 4_096).await;
         register_with_reactions(engine, at_limit, 4_095).await;
-        test_helper::lend_storage(engine, over, at_limit + 1, units, 1).await;
-        test_helper::lend_storage(engine, at_limit, at_limit + 1, units, 2).await;
+        test_helper::lend_storage(engine, over, at_limit + 1, units, 1, &now).await;
+        test_helper::lend_storage(engine, at_limit, at_limit + 1, units, 2, &now).await;
+        let stores = engine.get_stores();
 
         // The trigger counts itself: 4,096 stored + 1 over a zero cap is one past the limit.
-        assert!(mempool
-            .message_is_valid(1, &trigger_reaction(over), true)
-            .is_err());
-        assert!(mempool
-            .message_is_valid(1, &trigger_reaction(at_limit), true)
-            .is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_admitted_message_is_not_proposed_once_its_prune_exceeds_the_limit() {
-        let (
-            mut engines,
-            _,
-            _,
-            mut mempool,
-            mempool_tx,
-            messages_request_tx,
-            _shard_decision_tx,
-            _block_decision_tx,
-            _,
-        ) = setup_for_network(None, false, 1, FarcasterNetwork::Testnet).await;
-        let engine = engines.get_mut(&1).unwrap();
-        let units = register_with_reactions(engine, FID_FOR_TEST, 4_096).await;
-        let trigger = trigger_reaction(FID_FOR_TEST);
-        assert!(mempool.message_is_valid(1, &trigger, true).is_ok());
-        tokio::spawn(async move {
-            mempool.run().await;
-        });
-
-        mempool_tx
-            .send(MempoolRequest::AddMessage(
-                trigger,
-                MempoolSource::Local,
-                None,
-            ))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        test_helper::lend_storage(engine, FID_FOR_TEST, FID_FOR_TEST + 1, units, 1).await;
-        pull_message(&messages_request_tx, 1, None).await;
+        assert_eq!(
+            mempool::prune_sweep_over_limit(&stores, &trigger_reaction(over), EngineVersion::V23),
+            Some(4_097)
+        );
+        assert_eq!(
+            mempool::prune_sweep_over_limit(
+                &stores,
+                &trigger_reaction(at_limit),
+                EngineVersion::V23
+            ),
+            None
+        );
+        assert_eq!(
+            mempool::prune_sweep_over_limit(&stores, &trigger_reaction(over), EngineVersion::V24),
+            None
+        );
     }
 
     #[tokio::test]
@@ -2201,10 +2173,22 @@ mod tests {
             setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
         let engine = engines.get_mut(&1).unwrap();
         let units = register_with_reactions(engine, FID_FOR_TEST, 4_096).await;
-        test_helper::lend_storage(engine, FID_FOR_TEST, FID_FOR_TEST + 1, units, 1).await;
+        test_helper::lend_storage(
+            engine,
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            units,
+            1,
+            &FarcasterTime::current(),
+        )
+        .await;
 
         assert!(mempool
-            .message_is_valid(1, &trigger_reaction(FID_FOR_TEST), true)
+            .message_is_valid(
+                1,
+                &MempoolMessage::UserMessage(trigger_reaction(FID_FOR_TEST)),
+                true
+            )
             .is_ok());
     }
 }

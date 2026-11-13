@@ -708,6 +708,40 @@ impl ReadNodeMempool {
     }
 }
 
+/// The number of messages merging `message` would prune, if that is more than
+/// `MAX_PRUNE_SWEEP_PER_MESSAGE` and `version` does not yet bound sweeps per block.
+pub(crate) fn prune_sweep_over_limit(
+    stores: &Stores,
+    message: &proto::Message,
+    version: EngineVersion,
+) -> Option<u32> {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+        return None;
+    }
+    let msg_type = message.msg_type();
+    if !matches!(
+        msg_type,
+        MessageType::CastAdd
+            | MessageType::CastRemove
+            | MessageType::LinkAdd
+            | MessageType::LinkRemove
+            | MessageType::LinkCompactState
+            | MessageType::ReactionAdd
+            | MessageType::ReactionRemove
+            | MessageType::UserDataAdd
+            | MessageType::VerificationAddEthAddress
+            | MessageType::VerificationRemove
+            | MessageType::UsernameProof
+    ) {
+        return None;
+    }
+    let (count, max) = stores
+        .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
+        .ok()?;
+    let sweep = (count + 1).saturating_sub(max);
+    (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
+}
+
 fn verify_signer_on_home_shard(
     message_router: &dyn MessageRouter,
     num_shards: u32,
@@ -1037,7 +1071,18 @@ impl Mempool {
             return Err(HubError::duplicate("message has already been merged"));
         }
         if let MempoolMessage::UserMessage(user_msg) = message {
-            if let Some(sweep) = self.prune_sweep_over_limit(shard, user_msg) {
+            let sweep = self
+                .read_node_mempool
+                .shard_stores
+                .get(&shard)
+                .and_then(|stores| {
+                    prune_sweep_over_limit(
+                        stores,
+                        user_msg,
+                        EngineVersion::current(self.read_node_mempool.network),
+                    )
+                });
+            if let Some(sweep) = sweep {
                 self.statsd_client.count_with_shard(
                     shard,
                     "mempool.prune_sweep_over_limit",
@@ -1069,39 +1114,6 @@ impl Mempool {
             )));
         }
         Ok(())
-    }
-
-    /// The number of messages merging `message` would prune, if that is more than
-    /// `MAX_PRUNE_SWEEP_PER_MESSAGE` and the engine does not yet bound sweeps per block.
-    fn prune_sweep_over_limit(&self, shard: u32, message: &proto::Message) -> Option<u32> {
-        if EngineVersion::current(self.read_node_mempool.network)
-            .is_enabled(ProtocolFeature::BoundedPruneSweep)
-        {
-            return None;
-        }
-        let msg_type = message.msg_type();
-        if !matches!(
-            msg_type,
-            MessageType::CastAdd
-                | MessageType::CastRemove
-                | MessageType::LinkAdd
-                | MessageType::LinkRemove
-                | MessageType::LinkCompactState
-                | MessageType::ReactionAdd
-                | MessageType::ReactionRemove
-                | MessageType::UserDataAdd
-                | MessageType::VerificationAddEthAddress
-                | MessageType::VerificationRemove
-                | MessageType::UsernameProof
-        ) {
-            return None;
-        }
-        let stores = self.read_node_mempool.shard_stores.get(&shard)?;
-        let (count, max) = stores
-            .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
-            .ok()?;
-        let sweep = (count + 1).saturating_sub(max);
-        (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
     }
 
     fn remove_live_at_index_for_message(

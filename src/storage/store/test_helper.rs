@@ -502,10 +502,15 @@ pub fn numbered_reaction(fid: u64, i: u64, timestamp: u32) -> proto::Message {
     )
 }
 
-/// Commits `count` distinct reactions from `fid`. The fid's cap must already allow them,
-/// or the commits prune as they go.
-pub async fn fill_reactions(engine: &mut ShardEngine, fid: u64, count: u32) {
-    let timestamp = FarcasterTime::current().to_u64() as u32 - 120;
+/// Commits `count` distinct reactions from `fid` in blocks stamped `block_time`. The fid's
+/// cap must already allow them, or the commits prune as they go.
+pub async fn fill_reactions(
+    engine: &mut ShardEngine,
+    fid: u64,
+    count: u32,
+    block_time: &FarcasterTime,
+) {
+    let timestamp = block_time.to_u64() as u32 - 120;
     let mut filled = 0u64;
     while filled < count as u64 {
         let batch = (count as u64 - filled).min(4096);
@@ -513,13 +518,15 @@ pub async fn fill_reactions(engine: &mut ShardEngine, fid: u64, count: u32) {
             .map(|i| MempoolMessage::UserMessage(numbered_reaction(fid, i, timestamp)))
             .collect();
         filled += batch;
-        let state_change = engine.propose_state_change(engine.shard_id(), messages, None);
+        let state_change =
+            engine.propose_state_change(engine.shard_id(), messages, Some(block_time.clone()));
         validate_and_commit_state_change(engine, &state_change).await;
     }
 }
 
-/// Replays a `LendStorage` block event moving `units` 2025 units from `from_fid` to `to_fid`.
-/// Lending lowers the lender's caps without touching its stored messages.
+/// Replays, in a block stamped `block_time`, a `LendStorage` block event moving `units` 2025
+/// units from `from_fid` to `to_fid`. Lending lowers the lender's caps without touching its
+/// stored messages.
 #[cfg(test)]
 pub async fn lend_storage(
     engine: &mut ShardEngine,
@@ -527,24 +534,27 @@ pub async fn lend_storage(
     to_fid: u64,
     units: u64,
     seqnum: u64,
+    block_time: &FarcasterTime,
 ) {
     let lend = crate::utils::factory::messages_factory::storage_lend::create_storage_lend(
         from_fid,
         to_fid,
         units,
         proto::StorageUnitType::UnitType2025,
-        Some(FarcasterTime::current().to_u64() as u32 - 60),
+        Some(block_time.to_u64() as u32 - 60),
         None,
     );
-    commit_block_events(
-        engine,
-        vec![&events_factory::create_merge_message_event_at(
-            lend,
-            seqnum,
-            FarcasterTime::current().to_u64(),
-        )],
-    )
-    .await;
+    let block_event =
+        events_factory::create_merge_message_event_at(lend, seqnum, block_time.to_u64());
+    let state_change = engine.propose_state_change(
+        engine.shard_id(),
+        vec![MempoolMessage::BlockEvent {
+            for_shard: engine.shard_id(),
+            message: block_event,
+        }],
+        Some(block_time.clone()),
+    );
+    validate_and_commit_state_change(engine, &state_change).await;
 }
 
 pub fn assert_block_confirmed_event(event: HubEvent) -> BlockConfirmedBody {
