@@ -145,10 +145,14 @@ async fn resolve_wildcard<P: Provider>(
 }
 
 /// Encodes `name` in DNS wire format, as ENSIP-10 `resolve` expects.
+///
+/// Normalizes `name` the same way as [`namehash`], so the DNS name and the node passed
+/// alongside it always describe the same name.
 fn dns_encode(name: &str) -> Result<Vec<u8>, EnsError> {
-    let mut encoded = Vec::with_capacity(name.len() + 2);
-    if !name.is_empty() {
-        for label in name.split('.') {
+    let normalized = strip_variation_selector(name);
+    let mut encoded = Vec::with_capacity(normalized.len() + 2);
+    if !normalized.is_empty() {
+        for label in normalized.split('.') {
             let len = u8::try_from(label.len())
                 .ok()
                 .filter(|len| *len > 0)
@@ -161,6 +165,16 @@ fn dns_encode(name: &str) -> Result<Vec<u8>, EnsError> {
     Ok(encoded)
 }
 
+/// Removes the emoji variation selector `U+FE0F`, which ENS normalization drops.
+fn strip_variation_selector(name: &str) -> Cow<'_, str> {
+    const VARIATION_SELECTOR: char = '\u{fe0f}';
+    if name.contains(VARIATION_SELECTOR) {
+        Cow::Owned(name.replace(VARIATION_SELECTOR, ""))
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 /// Returns the ENS namehash as specified in
 /// [EIP-137](https://eips.ethereum.org/EIPS/eip-137).
 pub fn namehash(name: &str) -> B256 {
@@ -168,13 +182,7 @@ pub fn namehash(name: &str) -> B256 {
         return B256::ZERO;
     }
 
-    // Remove the variation selector `U+FE0F` if present.
-    const VARIATION_SELECTOR: char = '\u{fe0f}';
-    let name = if name.contains(VARIATION_SELECTOR) {
-        Cow::Owned(name.replace(VARIATION_SELECTOR, ""))
-    } else {
-        Cow::Borrowed(name)
-    };
+    let name = strip_variation_selector(name);
 
     // Generate the node starting from the right.
     // This buffer is `[node @ [u8; 32], label_hash @ [u8; 32]]`.
@@ -484,6 +492,14 @@ mod tests {
             Err(EnsError::InvalidName(_))
         ));
         assert!(matches!(dns_encode(".eth"), Err(EnsError::InvalidName(_))));
+    }
+
+    #[test]
+    fn dns_encode_normalizes_like_namehash() {
+        let name = "ret\u{21a9}\u{fe0f}rn.eth";
+        let encoded = dns_encode(name).unwrap();
+        assert_eq!(encoded, dns_encode("ret\u{21a9}rn.eth").unwrap());
+        assert_eq!(namehash(&dns_decode(&encoded)), namehash(name));
     }
 
     #[test]
