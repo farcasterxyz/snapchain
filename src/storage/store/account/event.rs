@@ -176,7 +176,7 @@ impl HubEventStorageExt for HubEvent {
         let start_prefix = make_event_key(start_id);
         let stop_prefix = match stop_id {
             Some(id) => make_event_key(id),
-            None => increment_vec_u8(&make_event_key(std::u64::MAX)),
+            None => increment_vec_u8(&make_event_key(u64::MAX)),
         };
 
         let mut events = Vec::new();
