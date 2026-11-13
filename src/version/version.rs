@@ -72,6 +72,9 @@ pub enum ProtocolFeature {
     UniqueOnchainEventTrieKeys,
     // Shard and block headers commit to their transactions through `transactions_root`.
     HeaderTransactionsRoot,
+    // A block emits at most a fixed number of storage-prune events; a fid's remaining
+    // over-cap rows are pruned by its later messages.
+    BoundedPruneSweep,
 }
 
 pub struct VersionSchedule {
@@ -475,6 +478,9 @@ impl EngineVersion {
             ProtocolFeature::ChannelFollows => self >= &EngineVersion::V25,
             ProtocolFeature::UniqueOnchainEventTrieKeys
             | ProtocolFeature::HeaderTransactionsRoot => self >= &EngineVersion::V23,
+            // Not coupled to the channel rollout, and must be able to activate before it: V25
+            // waits on the mainnet channel registrar.
+            ProtocolFeature::BoundedPruneSweep => self >= &EngineVersion::V24,
         }
     }
 
@@ -997,6 +1003,19 @@ mod version_test {
     }
 
     #[test]
+    fn test_bounded_prune_sweep_feature_gate() {
+        // The sweep budget changes which rows a block prunes, so moving this boundary would
+        // fork replay of every block that hit the budget.
+        assert!(!EngineVersion::V23.is_enabled(ProtocolFeature::BoundedPruneSweep));
+        assert!(EngineVersion::V24.is_enabled(ProtocolFeature::BoundedPruneSweep));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::BoundedPruneSweep));
+        // V24 ships without the channel rollout.
+        assert!(!EngineVersion::V24.is_enabled(ProtocolFeature::ChannelRegistrations));
+        assert!(!EngineVersion::V24.is_enabled(ProtocolFeature::ChannelFollows));
+        assert!(EngineVersion::V25.is_enabled(ProtocolFeature::ChannelRegistrations));
+    }
+
+    #[test]
     fn test_v23_schedule() {
         for (network, active_at) in [
             (FarcasterNetwork::Testnet, 1793210400),
@@ -1393,8 +1412,8 @@ mod version_test {
             Some(1792756800)
         );
 
-        // V21 and V22 share a timestamp; V23 is the last scheduled mainnet version and V25
-        // (channels) has no entry yet.
+        // V21 and V22 share a timestamp; V23 is the last scheduled mainnet version, and neither
+        // V24 (bounded prune sweeps) nor V25 (channels) has an entry yet.
         let time = FarcasterTime::from_unix_seconds(1792756800);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),

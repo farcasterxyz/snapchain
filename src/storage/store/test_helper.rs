@@ -538,7 +538,11 @@ pub async fn lend_storage(
     );
     commit_block_events(
         engine,
-        vec![&events_factory::create_merge_message_event(lend, seqnum)],
+        vec![&events_factory::create_merge_message_event_at(
+            lend,
+            seqnum,
+            FarcasterTime::current().to_u64(),
+        )],
     )
     .await;
 }

@@ -5,7 +5,7 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        LinkStore, MergeContext, Store, StoreEventHandler, StoreOptions,
+        LinkStore, MergeContext, Store, StoreEventHandler, StoreOptions, SweepLimit,
     };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
@@ -2290,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_messages_within_writes_nothing_when_over_limit() {
+    fn test_all_or_nothing_sweep_writes_nothing_when_over_limit() {
         let (store, db, _temp_dir) = create_test_store();
         let now = crate::utils::factory::time::farcaster_time();
         for offset in 0..3 {
@@ -2306,13 +2306,13 @@ mod tests {
 
         let mut txn = RocksDbTransactionBatch::new();
         let result = store
-            .prune_messages_within(FID_FOR_TEST, 3, 0, &mut txn, 2)
+            .prune_messages_limited(FID_FOR_TEST, 3, 0, &mut txn, SweepLimit::AllOrNothing(2))
             .unwrap();
         assert!(result.is_none());
         assert!(txn.batch.is_empty());
 
         let result = store
-            .prune_messages_within(FID_FOR_TEST, 3, 0, &mut txn, 3)
+            .prune_messages_limited(FID_FOR_TEST, 3, 0, &mut txn, SweepLimit::AllOrNothing(3))
             .unwrap();
         assert_eq!(result.map(|events| events.len()), Some(3));
     }

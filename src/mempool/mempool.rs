@@ -207,8 +207,9 @@ impl KeyAddRateLimits {
 pub const KEY_REMOVE_RATE_LIMIT_PER_MINUTE: u32 = 5;
 
 /// Most messages a single user message may cause to be pruned and still be admitted or
-/// pulled into a proposal. Each pruned message emits a HubEvent, so this keeps one message's
-/// prune work small next to the rest of a block.
+/// pulled into a proposal, until `BoundedPruneSweep` activates and the engine limits each
+/// block's prune events itself. Each pruned message emits a HubEvent, so this keeps one
+/// message's prune work small next to the rest of a block.
 pub const MAX_PRUNE_SWEEP_PER_MESSAGE: u32 = 4096;
 
 /// Fixed limit on KEY_REMOVE, kept apart from the storage-quota limiter so a signer that spends
@@ -1071,8 +1072,13 @@ impl Mempool {
     }
 
     /// The number of messages merging `message` would prune, if that is more than
-    /// `MAX_PRUNE_SWEEP_PER_MESSAGE`.
+    /// `MAX_PRUNE_SWEEP_PER_MESSAGE` and the engine does not yet bound sweeps per block.
     fn prune_sweep_over_limit(&self, shard: u32, message: &proto::Message) -> Option<u32> {
+        if EngineVersion::current(self.read_node_mempool.network)
+            .is_enabled(ProtocolFeature::BoundedPruneSweep)
+        {
+            return None;
+        }
         let msg_type = message.msg_type();
         if !matches!(
             msg_type,

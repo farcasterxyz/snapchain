@@ -451,6 +451,15 @@ where
     store_opts: StoreOptions,
 }
 
+/// How many `PruneMessage` events a single prune sweep may emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepLimit {
+    /// Run the whole sweep only if it fits; otherwise prune nothing.
+    AllOrNothing(u32),
+    /// Prune the oldest rows up to this many and leave the rest over the cap.
+    AtMost(u32),
+}
+
 impl<T: StoreDef + Clone> Store<T> {
     pub fn new_with_store_def(
         db: Arc<RocksDB>,
@@ -1242,21 +1251,30 @@ impl<T: StoreDef + Clone> Store<T> {
         prunable
     }
 
-    /// Runs `prune_messages` only if the sweep would emit at most `max_events` events.
-    /// Returns `Ok(None)`, having written nothing, when it would emit more.
-    pub fn prune_messages_within(
+    /// Runs `prune_messages` within `limit`. Returns `Ok(None)`, having written nothing, when
+    /// an `AllOrNothing` sweep would emit more than its limit.
+    pub fn prune_messages_limited(
         &self,
         fid: u64,
         current_count: u32,
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
-        max_events: u32,
+        limit: SweepLimit,
     ) -> Result<Option<Vec<HubEvent>>, HubError> {
-        if self.count_prunable_messages(fid, current_count, max_count, max_events) > max_events {
-            return Ok(None);
+        match limit {
+            SweepLimit::AllOrNothing(max_events) => {
+                if self.count_prunable_messages(fid, current_count, max_count, max_events)
+                    > max_events
+                {
+                    return Ok(None);
+                }
+                self.prune_messages(fid, current_count, max_count, txn)
+                    .map(Some)
+            }
+            SweepLimit::AtMost(max_events) => self
+                .prune_messages_bounded(fid, current_count, max_count, txn, max_events)
+                .map(Some),
         }
-        self.prune_messages(fid, current_count, max_count, txn)
-            .map(Some)
     }
 
     pub fn prune_messages(
@@ -1265,6 +1283,19 @@ impl<T: StoreDef + Clone> Store<T> {
         current_count: u32,
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, HubError> {
+        self.prune_messages_bounded(fid, current_count, max_count, txn, u32::MAX)
+    }
+
+    /// Prunes the oldest rows until the fid is back under `max_count`, stopping early once
+    /// `max_events` rows have been pruned.
+    pub fn prune_messages_bounded(
+        &self,
+        fid: u64,
+        current_count: u32,
+        max_count: u32,
+        txn: &mut RocksDbTransactionBatch,
+        max_events: u32,
     ) -> Result<Vec<HubEvent>, HubError> {
         if self.store_def.requires_consensus_order_slot_merge() {
             return Err(HubError::validation_failure(
@@ -1285,7 +1316,7 @@ impl<T: StoreDef + Clone> Store<T> {
             Some(increment_vec_u8(prefix)),
             &PageOptions::default(),
             |_key, value| {
-                if count <= max_count {
+                if count <= max_count || pruned_events.len() as u32 >= max_events {
                     return Ok(true); // Stop the iteration, nothing left to prune
                 }
 

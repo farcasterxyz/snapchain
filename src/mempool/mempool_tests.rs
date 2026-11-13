@@ -2140,7 +2140,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_that_would_prune_more_than_the_limit_is_rejected_at_admission() {
-        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        // Testnet has no V24 entry, so its mempool still guards against large sweeps.
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Testnet).await;
         let engine = engines.get_mut(&1).unwrap();
         let over = FID_FOR_TEST;
         let at_limit = FID_FOR_TEST + 1;
@@ -2170,7 +2172,7 @@ mod tests {
             _shard_decision_tx,
             _block_decision_tx,
             _,
-        ) = setup(None, false, 1).await;
+        ) = setup_for_network(None, false, 1, FarcasterNetwork::Testnet).await;
         let engine = engines.get_mut(&1).unwrap();
         let units = register_with_reactions(engine, FID_FOR_TEST, 4_096).await;
         let trigger = trigger_reaction(FID_FOR_TEST);
@@ -2191,5 +2193,18 @@ mod tests {
 
         test_helper::lend_storage(engine, FID_FOR_TEST, FID_FOR_TEST + 1, units, 1).await;
         pull_message(&messages_request_tx, 1, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_large_prune_is_admitted_once_sweeps_are_bounded() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let units = register_with_reactions(engine, FID_FOR_TEST, 4_096).await;
+        test_helper::lend_storage(engine, FID_FOR_TEST, FID_FOR_TEST + 1, units, 1).await;
+
+        assert!(mempool
+            .message_is_valid(1, &trigger_reaction(FID_FOR_TEST), true)
+            .is_ok());
     }
 }
