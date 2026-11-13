@@ -486,6 +486,63 @@ pub async fn commit_block_events(engine: &mut ShardEngine, block_events: Vec<&Bl
     validate_and_commit_state_change(engine, &state_change).await;
 }
 
+/// A `ReactionAdd` from `fid` whose target hash encodes `i`, so each `i` is a distinct row.
+pub fn numbered_reaction(fid: u64, i: u64, timestamp: u32) -> proto::Message {
+    let mut hash = [0u8; 20];
+    hash[12..].copy_from_slice(&i.to_be_bytes());
+    crate::utils::factory::messages_factory::reactions::create_reaction_add(
+        fid,
+        proto::ReactionType::Like,
+        proto::reaction_body::Target::TargetCastId(proto::CastId {
+            fid: 1,
+            hash: hash.to_vec(),
+        }),
+        Some(timestamp),
+        None,
+    )
+}
+
+/// Commits `count` distinct reactions from `fid`. The fid's cap must already allow them,
+/// or the commits prune as they go.
+pub async fn fill_reactions(engine: &mut ShardEngine, fid: u64, count: u32) {
+    let timestamp = FarcasterTime::current().to_u64() as u32 - 120;
+    let mut filled = 0u64;
+    while filled < count as u64 {
+        let batch = (count as u64 - filled).min(4096);
+        let messages = (filled..filled + batch)
+            .map(|i| MempoolMessage::UserMessage(numbered_reaction(fid, i, timestamp)))
+            .collect();
+        filled += batch;
+        let state_change = engine.propose_state_change(engine.shard_id(), messages, None);
+        validate_and_commit_state_change(engine, &state_change).await;
+    }
+}
+
+/// Replays a `LendStorage` block event moving `units` 2025 units from `from_fid` to `to_fid`.
+/// Lending lowers the lender's caps without touching its stored messages.
+#[cfg(test)]
+pub async fn lend_storage(
+    engine: &mut ShardEngine,
+    from_fid: u64,
+    to_fid: u64,
+    units: u64,
+    seqnum: u64,
+) {
+    let lend = crate::utils::factory::messages_factory::storage_lend::create_storage_lend(
+        from_fid,
+        to_fid,
+        units,
+        proto::StorageUnitType::UnitType2025,
+        Some(FarcasterTime::current().to_u64() as u32 - 60),
+        None,
+    );
+    commit_block_events(
+        engine,
+        vec![&events_factory::create_merge_message_event(lend, seqnum)],
+    )
+    .await;
+}
+
 pub fn assert_block_confirmed_event(event: HubEvent) -> BlockConfirmedBody {
     if let hub_event::Body::BlockConfirmedBody(body) = event.body.unwrap() {
         return body;
