@@ -49,6 +49,10 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+/// Most non-`BlockConfirmed` events whose ids fit in one block alongside `BlockConfirmed`.
+const MAX_EVENTS_BEFORE_BLOCK_CONFIRMED: usize =
+    (1 << crate::storage::store::account::SEQUENCE_BITS) - 2;
+
 #[derive(Error, Debug)]
 pub enum EngineError {
     #[error(transparent)]
@@ -371,6 +375,7 @@ impl ShardEngine {
                     version,
                     timestamp,
                     max_block_event_seqnum,
+                    events.len(),
                 )?;
             snapchain_txn.account_root = account_root;
             events.extend(txn_events);
@@ -564,6 +569,7 @@ impl ShardEngine {
                     version,
                     timestamp,
                     max_block_event_seqnum,
+                    events.len(),
                 )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
@@ -1238,6 +1244,7 @@ impl ShardEngine {
         version: EngineVersion,
         timestamp: &FarcasterTime,
         mut last_block_event_seqnum: u64,
+        block_events_before_txn: usize,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>, u64), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
@@ -1652,9 +1659,16 @@ impl ShardEngine {
             }
         }
 
+        // Sweeps share the block's event budget, so whether a later sweep fits depends on
+        // the earlier ones. Iterate in a fixed order or nodes can disagree on what was pruned.
+        let mut message_types_to_prune: Vec<MessageType> =
+            message_types_to_prune.into_iter().collect();
+        message_types_to_prune.sort_by_key(|msg_type| *msg_type as i32);
         for msg_type in message_types_to_prune {
             let fid = snapchain_txn.fid;
-            let result = self.prune_messages(fid, msg_type, txn_batch, &version);
+            let events_so_far = block_events_before_txn + events.len();
+            let max_events = MAX_EVENTS_BEFORE_BLOCK_CONFIRMED.saturating_sub(events_so_far) as u32;
+            let result = self.prune_messages(fid, msg_type, txn_batch, &version, max_events);
             match result {
                 Ok(pruned_events) => {
                     for event in pruned_events {
@@ -1974,6 +1988,7 @@ impl ShardEngine {
         msg_type: MessageType,
         txn_batch: &mut RocksDbTransactionBatch,
         version: &EngineVersion,
+        max_events: u32,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let (current_count, max_count) = self
             .stores
@@ -1984,42 +1999,42 @@ impl ShardEngine {
             MessageType::CastAdd | MessageType::CastRemove => self
                 .stores
                 .cast_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
                 .stores
                 .link_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::ReactionAdd | MessageType::ReactionRemove => self
                 .stores
                 .reaction_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::UserDataAdd => self
                 .stores
                 .user_data_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
                 .stores
                 .verification_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::UsernameProof => {
                 // Usernameproof pruning was missing before this version
                 if version.is_enabled(ProtocolFeature::EnsValidation) {
                     let store = &self.stores.username_proof_store;
                     store
-                        .prune_messages(fid, current_count, max_count, txn_batch)
+                        .prune_messages_within(fid, current_count, max_count, txn_batch, max_events)
                         .map_err(|e| EngineError::StoreError(e))
                 } else {
-                    Ok(vec![])
+                    Ok(Some(vec![]))
                 }
             }
             MessageType::LendStorage => {
                 // Pruning not supported for storage lend messages
-                Ok(vec![])
+                Ok(Some(vec![]))
             }
             MessageType::KeyAdd | MessageType::KeyRemove => {
                 // Gasless keys are never pruned — they live on shard 0 alongside signer events
@@ -2027,12 +2042,26 @@ impl ShardEngine {
                 // they are not routed to shards 1..N as user messages, but `handle_block_event`
                 // replays them onto shard-local DBs, so this arm guards against a future prune
                 // path ever being pointed at the replicated records.
-                Ok(vec![])
+                Ok(Some(vec![]))
             }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
         }?;
+
+        let Some(events) = events else {
+            warn!(
+                fid = fid,
+                msg_type = msg_type.into_u8(),
+                current_count,
+                max_count,
+                max_events,
+                "Skipped prune sweep that would exceed the block's event id space"
+            );
+            self.metrics
+                .count("prune.skipped_over_event_budget", 1, vec![]);
+            return Ok(vec![]);
+        };
 
         if !events.is_empty() {
             info!(
@@ -2842,6 +2871,7 @@ impl ShardEngine {
             version,
             &FarcasterTime::current(),
             max_block_event_seqnum,
+            0,
         );
 
         match result {
@@ -2912,6 +2942,7 @@ impl ShardEngine {
                 version,
                 &timestamp,
                 max_block_event_seqnum,
+                0,
             ) {
                 Ok((_, _, validation_errors, latest_block_event_seqnum)) => {
                     // If there are any validation errors, assign them to the results
@@ -3322,6 +3353,7 @@ mod prune_arm_tests {
             MessageType::KeyAdd,
             &mut txn_batch,
             &version,
+            u32::MAX,
         );
 
         let events = result.expect("KeyAdd prune arm must return Ok");
@@ -3343,6 +3375,7 @@ mod prune_arm_tests {
             MessageType::KeyRemove,
             &mut txn_batch,
             &version,
+            u32::MAX,
         );
 
         let events = result.expect("KeyRemove prune arm must return Ok");
