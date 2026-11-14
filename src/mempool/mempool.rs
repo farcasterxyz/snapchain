@@ -15,7 +15,9 @@ use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::core::validations::{self, error::ValidationError};
 use crate::mempool::routing;
-use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
+use crate::proto::{
+    Block, FarcasterNetwork, Height, MessageType, OnChainEventType, StoreType, Transaction,
+};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -29,7 +31,7 @@ use crate::{
                 verify_message_signer,
             },
             mempool_poller::MempoolMessage,
-            stores::Stores,
+            stores::{Limits, Stores},
         },
         util::bytes_compare,
     },
@@ -755,6 +757,36 @@ pub(crate) fn prune_sweep_over_limit(
     (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
 }
 
+/// One fid's usage of one store, counting messages already chosen for a proposal.
+struct ProjectedStoreUsage {
+    count: u32,
+    max: u32,
+    /// Prune work already charged to the proposal's budget for this store.
+    charged: u32,
+}
+
+impl ProjectedStoreUsage {
+    fn committed(stores: &Stores, fid: u64, msg_type: MessageType) -> Self {
+        // Unreadable usage is treated as never over the limit, matching `estimated_prune_sweep`.
+        let (count, max) = stores
+            .get_usage(fid, msg_type, &mut RocksDbTransactionBatch::new())
+            .unwrap_or((0, u32::MAX));
+        Self {
+            count,
+            max,
+            charged: 0,
+        }
+    }
+
+    /// The prune work one more message adds to this store's sweep.
+    fn added_sweep(&self) -> u32 {
+        self.count
+            .saturating_add(1)
+            .saturating_sub(self.max)
+            .saturating_sub(self.charged)
+    }
+}
+
 /// Fids whose storage limit a storage lend in `messages` changes.
 fn fids_with_storage_lends(messages: &[MempoolMessage]) -> HashSet<u64> {
     let mut fids = HashSet::new();
@@ -788,6 +820,9 @@ fn fids_with_storage_lends(messages: &[MempoolMessage]) -> HashSet<u64> {
 /// `BoundedPruneSweep` activates. Estimates come from committed state, so prunable messages
 /// from a fid whose storage a lend in the same proposal changes are also kept back: the lend
 /// can raise their sweep past the estimate.
+///
+/// The engine merges all of a fid's messages before it sweeps, so each message is charged the
+/// prune work it adds on top of the messages already chosen for the same fid and store.
 pub(crate) fn defer_excess_prune_sweeps(
     stores: &Stores,
     messages: Vec<MempoolMessage>,
@@ -798,21 +833,29 @@ pub(crate) fn defer_excess_prune_sweeps(
     }
     let lent_fids = fids_with_storage_lends(&messages);
     let mut budget_left = MAX_PRUNE_SWEEP_PER_BLOCK;
+    let mut projected: HashMap<(u64, StoreType), ProjectedStoreUsage> = HashMap::new();
     let mut proposed = Vec::with_capacity(messages.len());
     let mut deferred = vec![];
     for message in messages {
         if let MempoolMessage::UserMessage(user_msg) = &message {
-            if is_prunable(user_msg.msg_type()) {
-                if lent_fids.contains(&user_msg.fid()) {
+            let msg_type = user_msg.msg_type();
+            if is_prunable(msg_type) {
+                let fid = user_msg.fid();
+                if lent_fids.contains(&fid) {
                     deferred.push(message);
                     continue;
                 }
-                let sweep = estimated_prune_sweep(stores, user_msg);
+                let usage = projected
+                    .entry((fid, Limits::message_type_to_store_type(msg_type)))
+                    .or_insert_with(|| ProjectedStoreUsage::committed(stores, fid, msg_type));
+                let sweep = usage.added_sweep();
                 if sweep > budget_left {
                     deferred.push(message);
                     continue;
                 }
                 budget_left -= sweep;
+                usage.count += 1;
+                usage.charged += sweep;
             }
         }
         proposed.push(message);
