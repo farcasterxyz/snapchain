@@ -350,7 +350,9 @@ fn is_rpc_failure(err: &EnsError) -> bool {
         EnsError::Resolver(e) | EnsError::Resolve(e) => {
             matches!(e, alloy_contract::Error::TransportError(_)) && e.as_revert_data().is_none()
         }
-        EnsError::ResolverNotFound(_) => false,
+        EnsError::ResolverNotFound(_)
+        | EnsError::WildcardUnsupported(_)
+        | EnsError::InvalidName(_) => false,
     }
 }
 
