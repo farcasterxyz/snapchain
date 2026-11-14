@@ -2257,6 +2257,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_messages_from_one_fid_share_its_prune_sweep_estimate() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let (heavy, near_cap) = (FID_FOR_TEST, FID_FOR_TEST + 1);
+        // 4,095 stored over a zero cap: the next reaction's sweep takes the whole budget.
+        register_over_cap(engine, heavy, 4_095, 1).await;
+        let units = register_with_reactions(engine, near_cap, 0).await;
+        test_helper::lend_storage(
+            engine,
+            near_cap,
+            near_cap + 1_000,
+            units - 1,
+            2,
+            &FarcasterTime::current(),
+        )
+        .await;
+        let (_, max) = engine
+            .get_stores()
+            .get_usage(
+                near_cap,
+                proto::MessageType::ReactionAdd,
+                &mut crate::storage::db::RocksDbTransactionBatch::new(),
+            )
+            .unwrap();
+        test_helper::fill_reactions(engine, near_cap, max - 1, &FarcasterTime::current()).await;
+        let stores = engine.get_stores();
+        let now = crate::utils::factory::time::farcaster_time();
+        let pulled = vec![
+            MempoolMessage::UserMessage(trigger_reaction(heavy)),
+            MempoolMessage::UserMessage(test_helper::numbered_reaction(near_cap, u64::MAX, now)),
+            MempoolMessage::UserMessage(test_helper::numbered_reaction(
+                near_cap,
+                u64::MAX - 1,
+                now,
+            )),
+        ];
+
+        // Each of near_cap's reactions alone fits under its cap, but merging both prunes one.
+        let (proposed, deferred) =
+            mempool::defer_excess_prune_sweeps(&stores, pulled, EngineVersion::V23);
+        assert_eq!(fids(&proposed), vec![heavy, near_cap]);
+        assert_eq!(fids(&deferred), vec![near_cap]);
+    }
+
+    #[tokio::test]
     async fn test_prunable_messages_wait_for_a_storage_lend_in_the_same_proposal() {
         let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
         let engine = engines.get_mut(&1).unwrap();
