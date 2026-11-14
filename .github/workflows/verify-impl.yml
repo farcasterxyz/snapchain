@@ -43,8 +43,8 @@ jobs:
           commit_ts=$(git -C ./malachite show -s --format=%cI HEAD)
           find ./malachite -type f -not -path '*/.git/*' -exec touch -d "$commit_ts" {} +
 
-      - name: Install Rust 1.95.0
-        uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, llvm-tools-preview
 

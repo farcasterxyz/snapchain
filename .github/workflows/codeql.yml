@@ -39,8 +39,8 @@ jobs:
         ref: 58730933edc170a395e6a905d791fac4666da192
         path: ./malachite
 
-    - name: Install Rust 1.95.0
-      uses: dtolnay/rust-toolchain@1.95.0
+    - name: Install Rust 1.99.1
+      uses: dtolnay/rust-toolchain@1.99.1
 
     - name: Cache cargo registry + target
       uses: Swatinem/rust-cache@v2
