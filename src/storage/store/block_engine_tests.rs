@@ -3289,8 +3289,11 @@ mod tests {
 
         let (mut engine_a, _dir_a) = setup();
         let (mut engine_b, _dir_b) = setup();
-        let block_a = commit_event(&mut engine_a, &register);
-        let block_b = commit_event(&mut engine_b, &register);
+        // One block time for both: block events carry it, and two wall-clock reads can land in
+        // different seconds.
+        let block_time = FarcasterTime::current();
+        let block_a = commit_event_at(&mut engine_a, &register, block_time.clone());
+        let block_b = commit_event_at(&mut engine_b, &register, block_time);
 
         assert_eq!(block_a.events, block_b.events);
     }
