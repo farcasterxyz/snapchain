@@ -1,6 +1,6 @@
 use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::header::HeaderValue;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -14,6 +14,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tonic::async_trait;
 use tonic::metadata::MetadataValue;
@@ -5683,14 +5684,9 @@ where
     ) -> Result<proto::SubmitBulkMessagesRequest, Response<Bytes>> {
         use prost::Message;
 
-        let body_bytes = req.collect().await.map_err(|e| {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Bytes::from(format!("Internal server error: {}", e)))
-                .unwrap()
-        })?;
+        let body_bytes = read_request_body(req.into_body()).await?;
 
-        proto::SubmitBulkMessagesRequest::decode(body_bytes.to_bytes()).map_err(|e| {
+        proto::SubmitBulkMessagesRequest::decode(body_bytes).map_err(|e| {
             Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Bytes::from(format!("Invalid protobuf data: {}", e)))
@@ -5703,18 +5699,9 @@ where
         req: Request<hyper::body::Incoming>,
     ) -> Result<proto::Message, Response<Bytes>> {
         // For POST/PUT requests, parse body
-        let body_bytes = req.collect().await;
-        if body_bytes.is_err() {
-            return Err(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Bytes::from(format!(
-                    "Internal server error: {}",
-                    body_bytes.unwrap_err().to_string()
-                )))
-                .unwrap());
-        }
+        let body_bytes = read_request_body(req.into_body()).await?;
 
-        match message_decode(&body_bytes.unwrap().to_bytes().slice(..)) {
+        match message_decode(&body_bytes) {
             Ok(parsed) => Ok(parsed),
             Err(e) => Err(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -5739,24 +5726,61 @@ where
         }
 
         // For POST/PUT requests, parse body
-        let body_bytes = req.collect().await;
-        if body_bytes.is_err() {
-            return Err(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Bytes::from(format!(
-                    "Internal server error: {}",
-                    body_bytes.unwrap_err().to_string()
-                )))
-                .unwrap());
-        }
+        let body_bytes = read_request_body(req.into_body()).await?;
 
-        match serde_json::from_slice(&body_bytes.unwrap().to_bytes().slice(..)) {
+        match serde_json::from_slice(&body_bytes) {
             Ok(parsed) => Ok(parsed),
             Err(e) => Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Bytes::from(format!("Invalid request format: {}", e)))
                 .unwrap()),
         }
+    }
+}
+
+const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+const REQUEST_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn read_request_body<B>(body: B) -> Result<Bytes, Response<Bytes>>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    read_body_within(body, MAX_REQUEST_BODY_BYTES, REQUEST_BODY_READ_TIMEOUT).await
+}
+
+async fn read_body_within<B>(
+    body: B,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<Bytes, Response<Bytes>>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let refuse = |status: StatusCode, message: String| {
+        Response::builder()
+            .status(status)
+            .body(Bytes::from(message))
+            .unwrap()
+    };
+
+    let body = Limited::new(body, max_bytes);
+    match tokio::time::timeout(timeout, body.collect()).await {
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+        Ok(Err(err)) if err.downcast_ref::<LengthLimitError>().is_some() => Err(refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Request body exceeds {} bytes", max_bytes),
+        )),
+        Ok(Err(err)) => Err(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Internal server error: {}", err),
+        )),
+        Err(_) => Err(refuse(
+            StatusCode::REQUEST_TIMEOUT,
+            "Timed out reading request body".to_string(),
+        )),
     }
 }
 
@@ -5803,6 +5827,58 @@ where
 mod tests {
     use super::*;
     use crate::proto::{self, message_data::Body, MessageType};
+    use http_body_util::StreamBody;
+    use hyper::body::Frame;
+
+    struct StalledBody;
+
+    impl hyper::body::Body for StalledBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Infallible>>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn request_body_within_the_limit_is_read() {
+        let body = Full::new(Bytes::from(vec![7u8; 16]));
+        let bytes = read_body_within(body, 16, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(bytes, Bytes::from(vec![7u8; 16]));
+    }
+
+    #[tokio::test]
+    async fn request_body_over_the_limit_is_refused() {
+        let body = Full::new(Bytes::from(vec![7u8; 17]));
+        let response = read_body_within(body, 16, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn streamed_request_body_is_limited_in_total() {
+        let frames = (0..3).map(|_| Ok::<_, Infallible>(Frame::data(Bytes::from(vec![7u8; 8]))));
+        let body = StreamBody::new(futures::stream::iter(frames));
+        let response = read_body_within(body, 16, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn stalled_request_body_times_out() {
+        let response = read_body_within(StalledBody, 16, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
 
     fn sample_message_data(body: Body) -> proto::MessageData {
         let r#type = match &body {

@@ -1,6 +1,6 @@
 use super::rpc_extensions::{
-    authenticate_request, AsMessagesResponse, AsSingleMessageResponse, FidRequestExt,
-    FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
+    authenticate_request, bounded_page_size, AsMessagesResponse, AsSingleMessageResponse,
+    FidRequestExt, FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
 };
 use crate::connectors::fname::FnameTransferLookup;
 use crate::core::error::HubError;
@@ -1729,7 +1729,7 @@ impl HubService for MyHubService {
         let stores = self.get_stores_for_shard(inner_request.shard_id)?;
 
         let page_options = PageOptions {
-            page_size: inner_request.page_size.map(|s| s as usize),
+            page_size: bounded_page_size(inner_request.page_size),
             page_token: inner_request.page_token,
             reverse: inner_request.reverse.unwrap_or(false),
         };
@@ -1951,7 +1951,7 @@ impl HubService for MyHubService {
             .zip(per_shard_tokens.into_iter())
             .map(|(store, shard_token)| {
                 let page_options = PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
@@ -2284,7 +2284,7 @@ impl HubService for MyHubService {
             .zip(per_shard_tokens.into_iter())
             .map(|(shard_entry, shard_token)| {
                 let page_options = PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
@@ -2340,7 +2340,7 @@ impl HubService for MyHubService {
                 .zip(per_shard_tokens.into_iter())
                 .map(|(shard_entry, shard_token)| {
                     let page_options = PageOptions {
-                        page_size: req.page_size.map(|s| s as usize),
+                        page_size: bounded_page_size(req.page_size),
                         page_token: shard_token,
                         reverse: req.reverse.unwrap_or(false),
                     };
@@ -2412,7 +2412,7 @@ impl HubService for MyHubService {
             .zip(per_shard_tokens.into_iter())
             .map(|(shard_entry, shard_token)| {
                 let page_options = PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
@@ -2490,7 +2490,7 @@ impl HubService for MyHubService {
             .zip(per_shard_tokens.into_iter())
             .map(|(shard_entry, shard_token)| {
                 let page_options = PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
@@ -2713,7 +2713,7 @@ impl HubService for MyHubService {
             .get_signers(
                 Some(fid),
                 &PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: req.page_token.clone(),
                     reverse: req.reverse.unwrap_or(false),
                 },
@@ -3467,7 +3467,7 @@ impl HubService for MyHubService {
             .zip(per_shard_tokens.into_iter())
             .map(|(shard_entry, shard_token)| {
                 let page_options = PageOptions {
-                    page_size: req.page_size.map(|s| s as usize),
+                    page_size: bounded_page_size(req.page_size),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };

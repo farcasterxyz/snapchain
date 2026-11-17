@@ -4,6 +4,7 @@ use crate::proto::{
     CastsByParentRequest, ChannelsByAddressRequest, FidRequest, FidTimestampRequest,
     LinksByFidRequest, ReactionsByFidRequest, SignersByFidRequest,
 };
+use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::account::MessagesPage;
 use base64::Engine;
@@ -56,15 +57,16 @@ impl AsSingleMessageResponse for Result<proto::Message, HubError> {
     }
 }
 
+pub fn bounded_page_size(page_size: Option<u32>) -> Option<usize> {
+    page_size.map(|size| (size as usize).min(PAGE_SIZE_MAX))
+}
+
 fn page_options(
     page_size: Option<u32>,
     page_token: Option<Vec<u8>>,
     reverse: Option<bool>,
 ) -> PageOptions {
-    let page_size = match page_size {
-        Some(size) => Some(size as usize),
-        None => None,
-    };
+    let page_size = bounded_page_size(page_size);
     let reverse = reverse.unwrap_or(false);
     let token = match page_token {
         None => None,
@@ -197,5 +199,49 @@ pub fn authenticate_request<T>(
         }
     } else {
         Err(Status::unauthenticated("missing authorization header"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_page_size_caps_an_oversized_request() {
+        assert_eq!(bounded_page_size(Some(u32::MAX)), Some(PAGE_SIZE_MAX));
+        assert_eq!(
+            bounded_page_size(Some(PAGE_SIZE_MAX as u32 + 1)),
+            Some(PAGE_SIZE_MAX)
+        );
+    }
+
+    #[test]
+    fn bounded_page_size_keeps_a_size_within_the_cap() {
+        assert_eq!(bounded_page_size(Some(50)), Some(50));
+        assert_eq!(
+            bounded_page_size(Some(PAGE_SIZE_MAX as u32)),
+            Some(PAGE_SIZE_MAX)
+        );
+        assert_eq!(bounded_page_size(Some(0)), Some(0));
+        assert_eq!(bounded_page_size(None), None);
+    }
+
+    #[test]
+    fn request_page_options_are_capped() {
+        let request = FidRequest {
+            fid: 1,
+            page_size: Some(u32::MAX),
+            page_token: None,
+            reverse: None,
+        };
+        assert_eq!(request.page_options().page_size, Some(PAGE_SIZE_MAX));
+
+        let request = FidRequest {
+            fid: 1,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        };
+        assert_eq!(request.page_options().page_size, None);
     }
 }
