@@ -48,7 +48,7 @@ mod tests {
         )
         .await;
 
-        let mut rate_limits = RateLimits::new(
+        let rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
                 time_to_idle: Duration::from_secs(2),
@@ -90,7 +90,7 @@ mod tests {
         )
         .await;
 
-        let mut rate_limits = RateLimits::new(
+        let rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
                 time_to_idle: Duration::from_millis(10), // Time to idle is lower than the refresh rate on the rate limiter here since the limits are fairly small
@@ -135,7 +135,7 @@ mod tests {
             .await;
         }
 
-        let mut rate_limits = RateLimits::new(
+        let rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
                 time_to_idle: Duration::from_secs(1),
@@ -179,7 +179,7 @@ mod tests {
         )
         .await;
 
-        let mut rate_limits = RateLimits::new(
+        let rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
                 time_to_idle: Duration::from_secs(1),
@@ -207,7 +207,7 @@ mod tests {
         )
         .await;
 
-        let mut rate_limits = RateLimits::new(
+        let rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
                 time_to_idle: Duration::from_secs(1),
@@ -276,7 +276,7 @@ mod tests {
         )
         .await;
 
-        let mut general_limits = RateLimits::new(
+        let general_limits = RateLimits::new(
             shard_stores.clone(),
             RateLimitsConfig {
                 time_to_idle: Duration::from_secs(1),

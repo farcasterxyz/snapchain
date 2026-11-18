@@ -211,6 +211,47 @@ mod tests {
     }
 
     #[test]
+    fn rejects_vote_with_negative_round() {
+        assert_rejected(
+            decode_vote(proto::Vote {
+                height: Some(height()),
+                voter: addr32(),
+                round: -1,
+                ..Default::default()
+            }),
+            "Invalid round: -1",
+        );
+    }
+
+    #[test]
+    fn rejects_proposal_with_negative_round() {
+        assert_rejected(
+            decode_proposal(proto::Proposal {
+                height: Some(height()),
+                value: Some(shard_hash()),
+                proposer: addr32(),
+                round: -1,
+                ..Default::default()
+            }),
+            "Invalid round: -1",
+        );
+    }
+
+    #[test]
+    fn accepts_proposal_without_pol_round() {
+        let decoded = decode_proposal(proto::Proposal {
+            height: Some(height()),
+            value: Some(shard_hash()),
+            proposer: addr32(),
+            round: 0,
+            pol_round: -1,
+        });
+        if let Err(err) = decoded {
+            panic!("rejected a proposal without a pol round: {err}");
+        }
+    }
+
+    #[test]
     fn rejects_synced_commits_with_short_signer() {
         assert_rejected(
             decode_value_response(Commits {

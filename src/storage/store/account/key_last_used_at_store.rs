@@ -126,6 +126,63 @@ pub fn delete_last_used_at(
     Ok(())
 }
 
+/// Read-only half of [`check_and_bump_last_used_at`]: returns the stored `last_used_at` if the
+/// gasless key is still live at `current_timestamp`, with the same errors.
+pub fn check_last_used_at_not_expired(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    fid: u64,
+    public_key: &[u8],
+    ttl: u32,
+    current_timestamp: u64,
+) -> Result<u64, HubError> {
+    let key = make_last_used_at_key(fid, public_key)?;
+    let stored = match get_from_db_or_txn(db, txn, &key)? {
+        Some(bytes) => {
+            if bytes.len() != LAST_USED_AT_VALUE_BYTES {
+                return Err(HubError {
+                    code: "internal_error".to_string(),
+                    message: format!(
+                        "corrupt gasless-key last_used_at value: expected {} bytes, got {}",
+                        LAST_USED_AT_VALUE_BYTES,
+                        bytes.len()
+                    ),
+                });
+            }
+            let mut buf = [0u8; LAST_USED_AT_VALUE_BYTES];
+            buf.copy_from_slice(&bytes);
+            u32::from_be_bytes(buf) as u64
+        }
+        None => {
+            // Missing entry means the key was never initialized via `init_last_used_at` — either
+            // the engine didn't call `init_last_used_at` on KEY_ADD, or this is being invoked for
+            // a non-gasless key. Either is a contract violation; surface as internal_error so it's
+            // loud in logs rather than silently accepting the message.
+            return Err(HubError {
+                code: "internal_error".to_string(),
+                message: format!(
+                    "gasless-key last_used_at entry missing for fid={} (expected KEY_ADD to have initialized it)",
+                    fid
+                ),
+            });
+        }
+    };
+
+    // `stored + ttl` cannot overflow u32: `ttl` is capped at `MAX_KEY_TTL_SECONDS` by
+    // `validate_key_add_body` and `stored` is a farcaster-epoch second count well below
+    // u32 saturation for any realistic block. See the module docstring for the full invariant.
+    if stored + (ttl as u64) < current_timestamp {
+        return Err(HubError {
+            code: "bad_request.validation_failure".to_string(),
+            message: format!(
+                "gasless-key last_used_at expired: stored={} + ttl={} < current_block_timestamp={}",
+                stored, ttl, current_timestamp
+            ),
+        });
+    }
+    Ok(stored)
+}
+
 /// Validates that the gasless key is not expired and stages a `last_used_at` bump to
 /// `message_timestamp`. Called from the per-message validation hook for every user message signed
 /// by a TTL'd key.
@@ -167,50 +224,9 @@ pub fn check_and_bump_last_used_at(
     message_timestamp: u32,
     current_block_timestamp: u64,
 ) -> Result<(), HubError> {
+    let stored =
+        check_last_used_at_not_expired(db, txn, fid, public_key, ttl, current_block_timestamp)?;
     let key = make_last_used_at_key(fid, public_key)?;
-    let stored = match get_from_db_or_txn(db, txn, &key)? {
-        Some(bytes) => {
-            if bytes.len() != LAST_USED_AT_VALUE_BYTES {
-                return Err(HubError {
-                    code: "internal_error".to_string(),
-                    message: format!(
-                        "corrupt gasless-key last_used_at value: expected {} bytes, got {}",
-                        LAST_USED_AT_VALUE_BYTES,
-                        bytes.len()
-                    ),
-                });
-            }
-            let mut buf = [0u8; LAST_USED_AT_VALUE_BYTES];
-            buf.copy_from_slice(&bytes);
-            u32::from_be_bytes(buf) as u64
-        }
-        None => {
-            // Missing entry means the key was never initialized via `init_last_used_at` — either
-            // the engine didn't call `init_last_used_at` on KEY_ADD, or this is being invoked for
-            // a non-gasless key. Either is a contract violation; surface as internal_error so it's
-            // loud in logs rather than silently accepting the message.
-            return Err(HubError {
-                code: "internal_error".to_string(),
-                message: format!(
-                    "gasless-key last_used_at entry missing for fid={} (expected KEY_ADD to have initialized it)",
-                    fid
-                ),
-            });
-        }
-    };
-
-    // `stored + ttl` cannot overflow u32: `ttl` is capped at `MAX_KEY_TTL_SECONDS` by
-    // `validate_key_add_body` and `stored` is a farcaster-epoch second count well below
-    // u32 saturation for any realistic block. See the module docstring for the full invariant.
-    if stored + (ttl as u64) < current_block_timestamp {
-        return Err(HubError {
-            code: "bad_request.validation_failure".to_string(),
-            message: format!(
-                "gasless-key last_used_at expired: stored={} + ttl={} < current_block_timestamp={}",
-                stored, ttl, current_block_timestamp
-            ),
-        });
-    }
 
     // Sliding-TTL throttle (NEYN-10579): skip the put unless the bump would advance `stored` by
     // strictly more than SLIDING_TTL_THROTTLE_SECONDS. The key is still valid (expiry check above

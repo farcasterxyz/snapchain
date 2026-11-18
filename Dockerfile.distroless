@@ -11,7 +11,8 @@ ARG MALACHITE_GIT_REF=58730933edc170a395e6a905d791fac4666da192
 ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
-apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler openssh-client cmake
+apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --only-upgrade apt && \
+apt-get -o Acquire::Retries=0 install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler openssh-client cmake || exit 1
 cargo install cargo-chef --locked
 cd ..
 git clone $MALACHITE_GIT_REPO_URL

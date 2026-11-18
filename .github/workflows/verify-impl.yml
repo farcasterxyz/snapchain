@@ -76,9 +76,11 @@ jobs:
       - working-directory: ./snapchain
         env:
           RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        # src/perf and src/bin hold perf harnesses and CLI entry points that no test runs, so
+        # they would only drag down the diff coverage of PRs that touch them.
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex 'proto/'
-          cargo llvm-cov report --html --output-dir coverage --ignore-filename-regex 'proto/'
+          cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex 'proto/|src/perf/|src/bin/'
+          cargo llvm-cov report --html --output-dir coverage --ignore-filename-regex 'proto/|src/perf/|src/bin/'
 
       - name: Set up Python
         if: github.event_name == 'pull_request'

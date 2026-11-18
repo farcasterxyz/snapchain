@@ -24,4 +24,6 @@ mod engine_tests;
 #[cfg(test)]
 mod node_local_state_tests;
 #[cfg(test)]
+mod prune_budget_tests;
+#[cfg(test)]
 mod stores_tests;

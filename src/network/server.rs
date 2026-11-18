@@ -8,7 +8,7 @@ use crate::core::types::SnapchainValidatorContext;
 use crate::core::util::{get_farcaster_time, FarcasterTime};
 use crate::core::validations;
 use crate::mempool::l1_validator::L1Validator;
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{MempoolRequest, MempoolSource, RateLimits};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
 use crate::network::mesh::cache::MeshCache;
@@ -653,6 +653,9 @@ pub struct MyHubService {
     // the background fname connector has polled the corresponding transfer. None
     // disables on-demand recovery (e.g. when fnames are configured off).
     fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
+    // Shared with the mempool. When set, submissions are charged against their fid's quota
+    // before simulation and the mempool skips charging them again.
+    rate_limits: Option<Arc<RateLimits>>,
 }
 
 impl MyHubService {
@@ -742,8 +745,31 @@ impl MyHubService {
             id_registry_cache,
             mesh_cache,
             fname_lookup,
+            rate_limits: None,
         };
         service
+    }
+
+    /// Charges submissions against the mempool's per-fid rate limits before simulating them.
+    /// Pass the handle from `Mempool::rate_limits_for_rpc`.
+    pub fn with_rate_limits(mut self, rate_limits: Option<Arc<RateLimits>>) -> Self {
+        self.rate_limits = rate_limits;
+        self
+    }
+
+    fn charge_rate_limit(&self, message: &proto::Message) -> Result<(), HubError> {
+        let Some(rate_limits) = &self.rate_limits else {
+            return Ok(());
+        };
+        rate_limits
+            .charge_rpc_message(message, self.network)
+            .inspect_err(|err| {
+                self.statsd_client.count(
+                    "rpc.submit_message.precheck_rejected",
+                    1,
+                    vec![("code", err.code.as_str())],
+                );
+            })
     }
 
     #[cfg(test)]
@@ -764,6 +790,7 @@ impl MyHubService {
         if fid == 0 {
             return Err(HubError::invalid_parameter("fid cannot be 0"));
         }
+        self.charge_rate_limit(&message)?;
 
         let version = EngineVersion::current(self.network);
         let dst_shard =
@@ -1384,18 +1411,36 @@ impl HubService for MyHubService {
             message_bytes_decode(msg);
         }
 
-        // 1. Group messages by their destination shard
-        let mut messages_by_shard: HashMap<u32, Vec<proto::Message>> = HashMap::new();
-        for msg in messages {
+        // 1. Group messages by their destination shard, keeping each one's position in the
+        // request so responses can be returned in submission order.
+        let hashes: Vec<Vec<u8>> = messages.iter().map(|msg| msg.hash.clone()).collect();
+        let mut messages_by_shard: HashMap<u32, Vec<(usize, proto::Message)>> = HashMap::new();
+        for (index, msg) in messages.into_iter().enumerate() {
             let shard_id =
                 routing::route_message(&self.message_router, &msg, self.num_shards, version);
-            messages_by_shard.entry(shard_id).or_default().push(msg);
+            messages_by_shard
+                .entry(shard_id)
+                .or_default()
+                .push((index, msg));
         }
 
-        let mut results = Vec::with_capacity(num_messages);
+        let mut results: Vec<Option<proto::BulkMessageResponse>> = vec![None; num_messages];
 
         // 2. Process each shard's batch transactionally for validation
         for (shard_id, batch) in messages_by_shard {
+            let (indices, batch): (Vec<usize>, Vec<proto::Message>) = batch
+                .into_iter()
+                .filter_map(|(index, msg)| match self.charge_rate_limit(&msg) {
+                    Ok(()) => Some((index, msg)),
+                    Err(err) => {
+                        results[index] = Some(create_error_response(msg.hash, err));
+                        None
+                    }
+                })
+                .unzip();
+            if batch.is_empty() {
+                continue;
+            }
             self.statsd_client
                 .count("rpc.submit_message_in_flight", batch.len() as i64, vec![]);
 
@@ -1405,13 +1450,13 @@ impl HubService for MyHubService {
                 .await;
 
             // 4. Process simulation results
-            for (sim_result, msg) in sim_results.into_iter().zip(batch.into_iter()) {
-                match sim_result {
+            for ((sim_result, msg), index) in sim_results.into_iter().zip(batch).zip(indices) {
+                results[index] = Some(match sim_result {
                     Ok(()) => {
                         // 4a. If simulation succeeds, submit the message to the mempool
                         let message_hash_for_error = msg.hash.clone();
                         let result = self.submit_message_to_mempool(msg).await;
-                        results.push(match result {
+                        match result {
                             Ok(message) => {
                                 self.statsd_client
                                     .count("rpc.submit_message.success", 1, vec![]);
@@ -1436,18 +1481,28 @@ impl HubService for MyHubService {
                                 );
                                 create_error_response(message_hash_for_error, err)
                             }
-                        });
+                        }
                     }
-                    Err(hub_error) => {
-                        // 4b. If simulation fails, create an error response for the message
-                        results.push(create_error_response(msg.hash, hub_error));
-                    }
-                }
+                    // 4b. If simulation fails, create an error response for the message
+                    Err(hub_error) => create_error_response(msg.hash, hub_error),
+                });
             }
         }
 
+        let messages = results
+            .into_iter()
+            .zip(hashes)
+            .map(|(response, hash)| {
+                response.unwrap_or_else(|| {
+                    create_error_response(
+                        hash,
+                        HubError::invalid_internal_state("message was not processed"),
+                    )
+                })
+            })
+            .collect();
         Ok(Response::new(proto::SubmitBulkMessagesResponse {
-            messages: results,
+            messages,
         }))
     }
 

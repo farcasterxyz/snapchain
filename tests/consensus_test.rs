@@ -682,6 +682,7 @@ impl NodeForTest {
             block_tx.subscribe(),
             statsd_client.clone(),
         );
+        let rpc_rate_limits = mempool.rate_limits_for_rpc();
         let handle = tokio::spawn(async move { mempool.run().await });
         join_handles.push(handle);
 
@@ -703,29 +704,32 @@ impl NodeForTest {
         join_handles.push(tokio::spawn(gossip_l1_gate_worker.run()));
         let l1_rejection_count = gossip_l1_gate.l1_rejection_count_handle();
 
-        let hub_service = Arc::new(MyHubService::new(
-            "".to_string(),
-            "".to_string(),
-            vec![],
-            node.block_stores.clone(),
-            node.shard_stores.clone(),
-            node.shard_senders.clone(),
-            statsd_client.clone(),
-            num_shards,
-            FarcasterNetwork::Devnet,
-            // Match the router used inside `Mempool` (`ShardRouter`). Using a different
-            // router here would route gRPC `submit_message` simulations to a different
-            // shard than the one mempool/consensus committed the on-chain registrations
-            // to, causing "unknown fid" failures despite the FID being registered.
-            Box::new(routing::ShardRouter {}),
-            mempool_tx.clone(),
-            gossip_tx.clone(),
-            l1_validator,
-            "".to_string(),
-            "".to_string(),
-            None,
-            Default::default(),
-        ));
+        let hub_service = Arc::new(
+            MyHubService::new(
+                "".to_string(),
+                "".to_string(),
+                vec![],
+                node.block_stores.clone(),
+                node.shard_stores.clone(),
+                node.shard_senders.clone(),
+                statsd_client.clone(),
+                num_shards,
+                FarcasterNetwork::Devnet,
+                // Match the router used inside `Mempool` (`ShardRouter`). Using a different
+                // router here would route gRPC `submit_message` simulations to a different
+                // shard than the one mempool/consensus committed the on-chain registrations
+                // to, causing "unknown fid" failures despite the FID being registered.
+                Box::new(routing::ShardRouter {}),
+                mempool_tx.clone(),
+                gossip_tx.clone(),
+                l1_validator,
+                "".to_string(),
+                "".to_string(),
+                None,
+                Default::default(),
+            )
+            .with_rate_limits(rpc_rate_limits),
+        );
 
         let grpc_service = hub_service.clone();
         let handle = tokio::spawn(async move {
