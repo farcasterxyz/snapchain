@@ -10,8 +10,6 @@ use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent, SolType};
 use async_trait::async_trait;
-use ens::EnsResolver::EnsResolverInstance;
-use ens::{namehash, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -357,31 +355,10 @@ impl RealL1Client {
 #[async_trait]
 impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
-        // Adapted from the ens module (originally foundry_common::ens) so we can support
-        // both ETH and Base mainnet
-        let node = namehash(name.as_str());
-        let ens_resolver_address = self.ens_resolver_address.ok_or(EnsError::ResolverNotFound(
+        let registry = self.ens_resolver_address.ok_or(EnsError::ResolverNotFound(
             "no resolver address configured for chain".to_string(),
         ))?;
-        let registry = EnsRegistry::new(ens_resolver_address, self.provider.clone());
-        let address = registry
-            .resolver(node)
-            .call()
-            .await
-            .map_err(EnsError::Resolver)?;
-        if address == Address::ZERO {
-            return Err(EnsError::ResolverNotFound(name.to_string()));
-        }
-        let resolver = EnsResolverInstance::new(address, self.provider.clone());
-        let addr = resolver
-            .addr(node)
-            .call()
-            .await
-            .map_err(EnsError::Resolve)
-            .inspect_err(|e| {
-                warn!("Failed to resolve ens name {name}: {}", e);
-            })?;
-        Ok(addr)
+        ens::resolve_name(&self.provider, registry, &name).await
     }
 
     async fn verify_contract_signature(
@@ -1775,6 +1752,40 @@ mod tests {
             address,
             address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires an Ethereum mainnet RPC URL in ENS_TEST_L1_RPC_URL"]
+    async fn test_resolve_ensv2_names_live() {
+        let client = RealL1Client::new(
+            std::env::var("ENS_TEST_L1_RPC_URL").unwrap(),
+            Some(ETH_L1_ENS_REGISTRY),
+        )
+        .unwrap();
+        for (name, expected) in [
+            // Not migrated: resolver set in the v1 registry.
+            (
+                "vitalik.eth",
+                address!("0xD8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+            ),
+            // Registered on ENSv2 only.
+            (
+                "basefriendbot.eth",
+                address!("0xa28506D332eDA2f6E1EDAE2abAA194D254AA0c4b"),
+            ),
+            // Migrated from v1 to ENSv2.
+            (
+                "nick.eth",
+                address!("0xb8c2C29ee19D8307cb7255e1Cd9CbDE883A267d5"),
+            ),
+        ] {
+            let resolved = client.resolve_ens_name(name.to_string()).await;
+            assert_eq!(resolved.unwrap(), expected, "{name}");
+        }
+        let unregistered = client
+            .resolve_ens_name("unregistered-zz-qq-123.eth".to_string())
+            .await;
+        assert!(unregistered.is_err(), "{unregistered:?}");
     }
 
     #[test]
