@@ -62,6 +62,11 @@ pub fn decode_trie_page_token(encoded: &str) -> Result<Option<Vec<Vec<u8>>>, Tri
     let mut offset = 0usize;
     let count = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
+    if count > (bytes.len() - offset) / 4 {
+        return Err(TrieError::TokenDecodeError(
+            "Segment count exceeds token length".into(),
+        ));
+    }
     let mut out: Vec<Vec<u8>> = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 4 > bytes.len() {
@@ -93,6 +98,7 @@ pub fn decode_trie_page_token(encoded: &str) -> Result<Option<Vec<Vec<u8>>>, Tri
 #[cfg(test)]
 mod tests {
     use crate::storage::trie::util::{decode_trie_page_token, encode_trie_page_token};
+    use base64::Engine;
 
     #[test]
     fn test_encode_decode_trie_token() {
@@ -107,5 +113,34 @@ mod tests {
         assert_eq!(decode_trie_page_token("").unwrap(), None);
         let empty: Option<Vec<Vec<u8>>> = Some(vec![]);
         assert_eq!(encode_trie_page_token(&empty), "");
+    }
+
+    #[test]
+    fn test_decode_rejects_segment_count_larger_than_token() {
+        let token = base64::engine::general_purpose::STANDARD.encode([0xff, 0xff, 0xff, 0xff]);
+        let err = decode_trie_page_token(&token).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Segment count exceeds token length"),
+            "unexpected error: {err}"
+        );
+
+        let mut bytes = 3u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        let token = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert!(decode_trie_page_token(&token).is_err());
+    }
+
+    #[test]
+    fn test_decode_accepts_token_of_empty_segments() {
+        let mut bytes = 2u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        let token = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(
+            decode_trie_page_token(&token).unwrap(),
+            Some(vec![vec![], vec![]])
+        );
     }
 }
