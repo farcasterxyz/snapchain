@@ -81,12 +81,22 @@ pub mod events_factory {
     }
 
     pub fn create_merge_message_event(message: proto::Message, seqnum: u64) -> BlockEvent {
+        create_merge_message_event_at(message, seqnum, 0)
+    }
+
+    /// `block_timestamp` is Farcaster time; data shards gate the replayed message's feature
+    /// on the version at that time.
+    pub fn create_merge_message_event_at(
+        message: proto::Message,
+        seqnum: u64,
+        block_timestamp: u64,
+    ) -> BlockEvent {
         let data = BlockEventData {
             seqnum,
             r#type: BlockEventType::MergeMessage as i32,
             block_number: 0,
             event_index: 0,
-            block_timestamp: 0,
+            block_timestamp,
             body: Some(message::block_event_data::Body::MergeMessageEventBody(
                 MergeMessageEventBody {
                     message: Some(message),
@@ -103,10 +113,10 @@ pub mod events_factory {
     }
 
     // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
-    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V24) is
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V25) is
     // active; tests construct it directly to exercise the receiver-side admission arm. The
     // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
-    // network (devnet -> V24 active; mainnet -> pre-V24 inactive), mirroring the KEY_ADD tests.
+    // network (devnet -> V25 active; mainnet -> pre-V25 inactive), mirroring the KEY_ADD tests.
     pub fn create_merge_on_chain_event_event(
         on_chain_event: OnChainEvent,
         seqnum: u64,

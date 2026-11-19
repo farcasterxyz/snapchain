@@ -21,11 +21,11 @@ jobs:
       - volume=80gb
     steps:
       - name: Install Protoc
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: protoc
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: farcasterxyz/malachite
           ref: ${{ env.MALACHITE_GIT_REF }}
@@ -44,15 +44,16 @@ jobs:
           find ./malachite -type f -not -path '*/.git/*' -exec touch -d "$commit_ts" {} +
 
       - name: Install Rust 1.99.1
-        uses: dtolnay/rust-toolchain@1.99.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.99.1
           components: rustfmt, llvm-tools-preview
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: ./snapchain
           fetch-depth: 0
@@ -63,13 +64,13 @@ jobs:
       # of the cache key so a ref bump lands on a cold cache and rebuilds malachite from scratch,
       # rather than reusing artifacts from the previous ref.
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ./snapchain
           key: malachite-${{ env.MALACHITE_GIT_REF }}
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-llvm-cov
 
@@ -84,7 +85,7 @@ jobs:
 
       - name: Set up Python
         if: github.event_name == 'pull_request'
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
@@ -106,7 +107,7 @@ jobs:
       - name: Post diff coverage comment
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@v3
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:
           header: coverage
           path: ./snapchain/diff-coverage.md
@@ -142,7 +143,7 @@ jobs:
         run: yarn test
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: coverage-report
@@ -152,7 +153,7 @@ jobs:
       # Publish the L0 conformance corpus as a portable artifact an external client can download
       # and run against in its own CI.
       - name: Upload conformance corpus
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: conformance-corpus

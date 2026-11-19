@@ -6,7 +6,7 @@ mod tests {
 
     use crate::{
         consensus::consensus::SystemMessage,
-        core::util::to_farcaster_time,
+        core::util::{to_farcaster_time, FarcasterTime},
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
         proto::{
@@ -29,6 +29,7 @@ mod tests {
             },
             statsd_wrapper::StatsdClientWrapper,
         },
+        version::version::EngineVersion,
     };
 
     use self::test_helper::{default_custody_address, default_signer};
@@ -186,10 +187,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s4_mempool_wall_clock_rejects_channels_before_v24_and_admits_them_at_v24() {
-        let (_, _, _, mut pre_v24_mempool, _, _, _, _, _) =
+    async fn s4_mempool_wall_clock_rejects_channels_before_v25_and_admits_them_at_v25() {
+        let (_, _, _, mut pre_v25_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
-        let (_, _, _, mut v24_mempool, _, _, _, _, _) =
+        let (_, _, _, mut v25_mempool, _, _, _, _, _) =
             setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
@@ -197,11 +198,11 @@ mod tests {
             // timestamps are inert, so wall-clock admission changes only with the node version.
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, Some(0), None);
-            let error = pre_v24_mempool
+            let error = pre_v25_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message.clone()), true)
                 .unwrap_err();
             assert_eq!(error.message, "channel messages not yet active");
-            assert!(v24_mempool
+            assert!(v25_mempool
                 .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
                 .is_ok());
         }
@@ -2113,5 +2114,241 @@ mod tests {
         message.data = None;
         let key = message.mempool_key();
         assert_eq!(key.identity(), message.hex_hash());
+    }
+
+    /// Gives `fid` 1,400 units on top of its registration unit (4,203 reactions under the
+    /// test limits), fills `stored` reactions, and returns the lend that drops its cap to
+    /// zero without touching what is stored.
+    async fn register_with_reactions(engine: &mut ShardEngine, fid: u64, stored: u32) -> u64 {
+        test_helper::register_user(fid, default_signer(), default_custody_address(), engine).await;
+        let now = crate::utils::factory::time::current_timestamp();
+        commit_event(
+            engine,
+            &events_factory::create_rent_event_with_timestamp(fid, 1_400, now),
+        )
+        .await;
+        test_helper::fill_reactions(engine, fid, stored, &FarcasterTime::current()).await;
+        1_401
+    }
+
+    fn trigger_reaction(fid: u64) -> proto::Message {
+        test_helper::numbered_reaction(fid, u64::MAX, crate::utils::factory::time::farcaster_time())
+    }
+
+    #[tokio::test]
+    async fn test_prune_sweep_limit_applies_only_before_bounded_sweeps() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let over = FID_FOR_TEST;
+        let at_limit = FID_FOR_TEST + 1;
+        let now = FarcasterTime::current();
+        let units = register_with_reactions(engine, over, 4_096).await;
+        register_with_reactions(engine, at_limit, 4_095).await;
+        test_helper::lend_storage(engine, over, at_limit + 1, units, 1, &now).await;
+        test_helper::lend_storage(engine, at_limit, at_limit + 1, units, 2, &now).await;
+        let stores = engine.get_stores();
+
+        // The trigger counts itself: 4,096 stored + 1 over a zero cap is one past the limit.
+        assert_eq!(
+            mempool::prune_sweep_over_limit(&stores, &trigger_reaction(over), EngineVersion::V23),
+            Some(4_097)
+        );
+        assert_eq!(
+            mempool::prune_sweep_over_limit(
+                &stores,
+                &trigger_reaction(at_limit),
+                EngineVersion::V23
+            ),
+            None
+        );
+        assert_eq!(
+            mempool::prune_sweep_over_limit(&stores, &trigger_reaction(over), EngineVersion::V24),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_prune_is_admitted_once_sweeps_are_bounded() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Devnet).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let units = register_with_reactions(engine, FID_FOR_TEST, 4_096).await;
+        test_helper::lend_storage(
+            engine,
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            units,
+            1,
+            &FarcasterTime::current(),
+        )
+        .await;
+
+        assert!(mempool
+            .message_is_valid(
+                1,
+                &MempoolMessage::UserMessage(trigger_reaction(FID_FOR_TEST)),
+                true
+            )
+            .is_ok());
+    }
+
+    fn lend_event(from_fid: u64, to_fid: u64, units: u64, seqnum: u64) -> MempoolMessage {
+        let now = FarcasterTime::current();
+        let lend = crate::utils::factory::messages_factory::storage_lend::create_storage_lend(
+            from_fid,
+            to_fid,
+            units,
+            proto::StorageUnitType::UnitType2025,
+            Some(now.to_u64() as u32 - 60),
+            None,
+        );
+        MempoolMessage::BlockEvent {
+            for_shard: 1,
+            message: events_factory::create_merge_message_event_at(lend, seqnum, now.to_u64()),
+        }
+    }
+
+    /// Registers `fid` with `stored` reactions and lends all of its storage away, so its next
+    /// reaction prunes `stored + 1 - 0` messages.
+    async fn register_over_cap(engine: &mut ShardEngine, fid: u64, stored: u32, seqnum: u64) {
+        let units = register_with_reactions(engine, fid, stored).await;
+        test_helper::lend_storage(
+            engine,
+            fid,
+            fid + 1_000,
+            units,
+            seqnum,
+            &FarcasterTime::current(),
+        )
+        .await;
+    }
+
+    fn fids(messages: &[MempoolMessage]) -> Vec<u64> {
+        messages.iter().map(|message| message.fid()).collect()
+    }
+
+    #[tokio::test]
+    async fn test_proposal_prune_sweeps_share_one_budget_before_bounded_sweeps() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let (first, second, under) = (FID_FOR_TEST, FID_FOR_TEST + 1, FID_FOR_TEST + 2);
+        register_over_cap(engine, first, 3_000, 1).await;
+        register_over_cap(engine, second, 3_000, 2).await;
+        register_with_reactions(engine, under, 10).await;
+        let stores = engine.get_stores();
+        let pulled = || {
+            vec![
+                MempoolMessage::UserMessage(trigger_reaction(first)),
+                MempoolMessage::UserMessage(trigger_reaction(second)),
+                MempoolMessage::UserMessage(trigger_reaction(under)),
+            ]
+        };
+
+        // 3,001 + 3,001 is over the 4,096 budget, so the second sweep waits for a later block.
+        let (proposed, deferred) =
+            mempool::defer_excess_prune_sweeps(&stores, pulled(), EngineVersion::V23);
+        assert_eq!(fids(&proposed), vec![first, under]);
+        assert_eq!(fids(&deferred), vec![second]);
+
+        let (proposed, deferred) =
+            mempool::defer_excess_prune_sweeps(&stores, pulled(), EngineVersion::V24);
+        assert_eq!(fids(&proposed), vec![first, second, under]);
+        assert!(deferred.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_messages_from_one_fid_share_its_prune_sweep_estimate() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let (heavy, near_cap) = (FID_FOR_TEST, FID_FOR_TEST + 1);
+        // 4,095 stored over a zero cap: the next reaction's sweep takes the whole budget.
+        register_over_cap(engine, heavy, 4_095, 1).await;
+        let units = register_with_reactions(engine, near_cap, 0).await;
+        test_helper::lend_storage(
+            engine,
+            near_cap,
+            near_cap + 1_000,
+            units - 1,
+            2,
+            &FarcasterTime::current(),
+        )
+        .await;
+        let (_, max) = engine
+            .get_stores()
+            .get_usage(
+                near_cap,
+                proto::MessageType::ReactionAdd,
+                &mut crate::storage::db::RocksDbTransactionBatch::new(),
+            )
+            .unwrap();
+        test_helper::fill_reactions(engine, near_cap, max - 1, &FarcasterTime::current()).await;
+        let stores = engine.get_stores();
+        let now = crate::utils::factory::time::farcaster_time();
+        let pulled = vec![
+            MempoolMessage::UserMessage(trigger_reaction(heavy)),
+            MempoolMessage::UserMessage(test_helper::numbered_reaction(near_cap, u64::MAX, now)),
+            MempoolMessage::UserMessage(test_helper::numbered_reaction(
+                near_cap,
+                u64::MAX - 1,
+                now,
+            )),
+        ];
+
+        // Each of near_cap's reactions alone fits under its cap, but merging both prunes one.
+        let (proposed, deferred) =
+            mempool::defer_excess_prune_sweeps(&stores, pulled, EngineVersion::V23);
+        assert_eq!(fids(&proposed), vec![heavy, near_cap]);
+        assert_eq!(fids(&deferred), vec![near_cap]);
+    }
+
+    #[tokio::test]
+    async fn test_prunable_messages_wait_for_a_storage_lend_in_the_same_proposal() {
+        let (mut engines, _, _, _, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let (lender, borrower, other) = (FID_FOR_TEST, FID_FOR_TEST + 1, FID_FOR_TEST + 2);
+        let units = register_with_reactions(engine, lender, 3_000).await;
+        register_with_reactions(engine, borrower, 10).await;
+        register_with_reactions(engine, other, 10).await;
+        let stores = engine.get_stores();
+        let lend = lend_event(lender, borrower, units, 1);
+        let pulled = vec![
+            lend.clone(),
+            MempoolMessage::UserMessage(trigger_reaction(lender)),
+            MempoolMessage::UserMessage(trigger_reaction(borrower)),
+            MempoolMessage::UserMessage(trigger_reaction(other)),
+        ];
+
+        // Committed state shows no sweep for the lender, but the lend drops its cap to zero.
+        let (proposed, deferred) =
+            mempool::defer_excess_prune_sweeps(&stores, pulled, EngineVersion::V23);
+        assert_eq!(fids(&proposed), vec![lender, other]);
+        assert_eq!(proposed[0], lend);
+        assert_eq!(fids(&deferred), vec![lender, borrower]);
+    }
+
+    #[tokio::test]
+    async fn test_deferred_prune_sweeps_are_proposed_in_a_later_block() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let engine = engines.get_mut(&1).unwrap();
+        let (first, second) = (FID_FOR_TEST, FID_FOR_TEST + 1);
+        register_over_cap(engine, first, 3_000, 1).await;
+        register_over_cap(engine, second, 3_000, 2).await;
+        for fid in [first, second] {
+            mempool
+                .insert(
+                    MempoolMessage::UserMessage(trigger_reaction(fid)),
+                    MempoolSource::Local,
+                )
+                .await
+                .unwrap();
+        }
+
+        let block_one = mempool.take_messages(1, 10, EngineVersion::V23);
+        let block_two = mempool.take_messages(1, 10, EngineVersion::V23);
+        let block_three = mempool.take_messages(1, 10, EngineVersion::V23);
+        assert_eq!(block_one.len(), 1);
+        assert_eq!(block_two.len(), 1);
+        assert_ne!(block_one[0].fid(), block_two[0].fid());
+        assert!(block_three.is_empty());
     }
 }

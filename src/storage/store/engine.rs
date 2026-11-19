@@ -25,7 +25,7 @@ use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     drop_unknown_data_fields, BlockEventStorageError, CastStore, ChannelMemberStore,
     ChannelModerateStore, ChannelPinStore, ChannelUpdateStore, DerivedIndexGate, MergeContext,
-    MessagesPage, StorageLendStore, StoreOptions, VerificationStore,
+    MessagesPage, StorageLendStore, StoreOptions, SweepLimit, VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -48,6 +48,35 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
+
+/// Most non-`BlockConfirmed` events whose ids fit in one block alongside `BlockConfirmed`.
+const MAX_EVENTS_BEFORE_BLOCK_CONFIRMED: usize =
+    (1 << crate::storage::store::account::SEQUENCE_BITS) - 2;
+
+/// Most `PruneMessage` events one block may emit once `BoundedPruneSweep` is active. A quarter
+/// of the event id space, leaving the rest for the block's messages.
+const PRUNE_EVENT_BUDGET_PER_BLOCK: usize = 4096;
+
+/// Events a block has produced so far, carried from one transaction's replay to the next.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BlockEventUsage {
+    events: usize,
+    prune_events: usize,
+}
+
+impl BlockEventUsage {
+    fn record(&mut self, events: &[HubEvent]) {
+        self.events += events.len();
+        self.prune_events += count_prune_events(events);
+    }
+}
+
+fn count_prune_events(events: &[HubEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| event.r#type() == proto::HubEventType::PruneMessage)
+        .count()
+}
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -359,6 +388,7 @@ impl ShardEngine {
             .collect_vec();
 
         let mut events = vec![];
+        let mut block_usage = BlockEventUsage::default();
         let mut validation_error_count = 0;
         let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum()?;
         for snapchain_txn in &mut snapchain_txns {
@@ -371,8 +401,10 @@ impl ShardEngine {
                     version,
                     timestamp,
                     max_block_event_seqnum,
+                    block_usage,
                 )?;
             snapchain_txn.account_root = account_root;
+            block_usage.record(&txn_events);
             events.extend(txn_events);
             validation_error_count += validation_errors.len();
             max_block_event_seqnum = last_block_event_seqnum;
@@ -554,6 +586,7 @@ impl ShardEngine {
             },
         }
 
+        let mut block_usage = BlockEventUsage::default();
         for snapchain_txn in transactions {
             let (account_root, txn_events, _, last_block_event_seqnum) = self
                 .replay_snapchain_txn(
@@ -564,6 +597,7 @@ impl ShardEngine {
                     version,
                     timestamp,
                     max_block_event_seqnum,
+                    block_usage,
                 )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
@@ -579,6 +613,7 @@ impl ShardEngine {
                 );
                 return Err(EngineError::HashMismatch);
             }
+            block_usage.record(&txn_events);
             events.extend(txn_events);
             max_block_event_seqnum = last_block_event_seqnum;
         }
@@ -705,7 +740,7 @@ impl ShardEngine {
     }
 
     /// The verification message types successfully merged by a block-event replay, which must
-    /// feed the same post-loop prune pass as live merges so a fid's combined pre-V24 + replayed
+    /// feed the same post-loop prune pass as live merges so a fid's combined pre-V25 + replayed
     /// rows converge to its storage cap.
     ///
     /// Read from the replayed `BlockEvent` rather than from the emitted events, mirroring the
@@ -828,7 +863,7 @@ impl ShardEngine {
                     self.update_trie(trie_ctx, event, txn_batch)?;
                 }
                 if merge_strategy == ReplayMerge::Forced {
-                    // Verification-caused hints belong to the forced replay leg: after V24,
+                    // Verification-caused hints belong to the forced replay leg: after V25,
                     // shard-0-routed verifications reach a data shard only here. Append them only
                     // after merge + trie success and never route them through `update_trie`.
                     // `data_shard_block_version` is the block clock already threaded through
@@ -839,7 +874,7 @@ impl ShardEngine {
                     // interchangeable. The feature gate above derives its version from the SHARD-0
                     // block timestamp (VerificationsOnShardZero); this call passes the DATA-SHARD
                     // block version (gating ChannelOwnershipEvents). `version::version_test::
-                    // test_channel_features_activate_together` pins both features to V24, which is
+                    // test_channel_features_activate_together` pins both features to V25, which is
                     // what makes the pair safe today -- no behavioral test would catch them
                     // drifting apart. If the two features ever activate at different versions,
                     // revisit this: a shard-0 event minted just after one activation can replay
@@ -1040,10 +1075,10 @@ impl ShardEngine {
     /// addresses, and Solana verifications never own channels, so they take no hint.
     ///
     /// `pub(crate)` only so tests can pin the two edges unreachable through any
-    /// running network: the pre-V24 gate and the Solana-protocol skip. The V24 fork
+    /// running network: the pre-V25 gate and the Solana-protocol skip. The V25 fork
     /// both opens the gate AND enables the replica fold, so no live network ever has
     /// a populated replica with the feature off — that state exists only when the
-    /// hook is called directly with an explicit pre-V24 `version`. Its single production caller
+    /// hook is called directly with an explicit pre-V25 `version`. Its single production caller
     /// is the successful forced-verification replay leg.
     pub(crate) fn emit_channel_owner_hints_for_verification(
         &self,
@@ -1238,6 +1273,7 @@ impl ShardEngine {
         version: EngineVersion,
         timestamp: &FarcasterTime,
         mut last_block_event_seqnum: u64,
+        block_usage: BlockEventUsage,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>, u64), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
@@ -1652,9 +1688,25 @@ impl ShardEngine {
             }
         }
 
+        // Sweeps share the block's event budget, so whether a later sweep fits depends on
+        // the earlier ones. Iterate in a fixed order or nodes can disagree on what was pruned.
+        let mut message_types_to_prune: Vec<MessageType> =
+            message_types_to_prune.into_iter().collect();
+        message_types_to_prune.sort_by_key(|msg_type| *msg_type as i32);
         for msg_type in message_types_to_prune {
             let fid = snapchain_txn.fid;
-            let result = self.prune_messages(fid, msg_type, txn_batch, &version);
+            let events_left =
+                MAX_EVENTS_BEFORE_BLOCK_CONFIRMED.saturating_sub(block_usage.events + events.len());
+            let limit = if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+                let prune_events_left = PRUNE_EVENT_BUDGET_PER_BLOCK
+                    .saturating_sub(block_usage.prune_events + count_prune_events(&events));
+                SweepLimit::AtMost(prune_events_left.min(events_left) as u32)
+            } else {
+                // Before the gate, a sweep that does not fit in the block's remaining event
+                // ids is skipped whole.
+                SweepLimit::AllOrNothing(events_left as u32)
+            };
+            let result = self.prune_messages(fid, msg_type, txn_batch, &version, limit);
             match result {
                 Ok(pruned_events) => {
                     for event in pruned_events {
@@ -1974,6 +2026,7 @@ impl ShardEngine {
         msg_type: MessageType,
         txn_batch: &mut RocksDbTransactionBatch,
         version: &EngineVersion,
+        limit: SweepLimit,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let (current_count, max_count) = self
             .stores
@@ -1984,42 +2037,42 @@ impl ShardEngine {
             MessageType::CastAdd | MessageType::CastRemove => self
                 .stores
                 .cast_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
                 .stores
                 .link_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::ReactionAdd | MessageType::ReactionRemove => self
                 .stores
                 .reaction_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::UserDataAdd => self
                 .stores
                 .user_data_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
                 .stores
                 .verification_store
-                .prune_messages(fid, current_count, max_count, txn_batch)
+                .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                 .map_err(|e| EngineError::StoreError(e)),
             MessageType::UsernameProof => {
                 // Usernameproof pruning was missing before this version
                 if version.is_enabled(ProtocolFeature::EnsValidation) {
                     let store = &self.stores.username_proof_store;
                     store
-                        .prune_messages(fid, current_count, max_count, txn_batch)
+                        .prune_messages_limited(fid, current_count, max_count, txn_batch, limit)
                         .map_err(|e| EngineError::StoreError(e))
                 } else {
-                    Ok(vec![])
+                    Ok(Some(vec![]))
                 }
             }
             MessageType::LendStorage => {
                 // Pruning not supported for storage lend messages
-                Ok(vec![])
+                Ok(Some(vec![]))
             }
             MessageType::KeyAdd | MessageType::KeyRemove => {
                 // Gasless keys are never pruned — they live on shard 0 alongside signer events
@@ -2027,12 +2080,40 @@ impl ShardEngine {
                 // they are not routed to shards 1..N as user messages, but `handle_block_event`
                 // replays them onto shard-local DBs, so this arm guards against a future prune
                 // path ever being pointed at the replicated records.
-                Ok(vec![])
+                Ok(Some(vec![]))
             }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
         }?;
+
+        let Some(events) = events else {
+            warn!(
+                fid = fid,
+                msg_type = msg_type.into_u8(),
+                current_count,
+                max_count,
+                ?limit,
+                "Skipped prune sweep that would exceed the block's event id space"
+            );
+            self.metrics
+                .count("prune.skipped_over_event_budget", 1, vec![]);
+            return Ok(vec![]);
+        };
+
+        if let SweepLimit::AtMost(max_events) = limit {
+            let over_cap = current_count.saturating_sub(max_count);
+            if events.len() as u32 == max_events && over_cap > max_events {
+                info!(
+                    fid = fid,
+                    msg_type = msg_type.into_u8(),
+                    pruned = max_events,
+                    over_cap,
+                    "Prune sweep reached the block's prune budget; the rest is left for later"
+                );
+                self.metrics.count("prune.truncated_sweeps", 1, vec![]);
+            }
+        }
 
         if !events.is_empty() {
             info!(
@@ -2173,9 +2254,9 @@ impl ShardEngine {
             ));
         }
 
-        // Verifications ordered at V24 and later must enter through shard 0 so quota,
+        // Verifications ordered at V25 and later must enter through shard 0 so quota,
         // consensus ordering, and fan-out all observe the same write. Historical blocks keep
-        // their block-derived pre-V24 version, and BlockEvent/replicator replay bypasses this
+        // their block-derived pre-V25 version, and BlockEvent/replicator replay bypasses this
         // admission function entirely.
         if version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
             && matches!(
@@ -2842,6 +2923,7 @@ impl ShardEngine {
             version,
             &FarcasterTime::current(),
             max_block_event_seqnum,
+            BlockEventUsage::default(),
         );
 
         match result {
@@ -2912,6 +2994,7 @@ impl ShardEngine {
                 version,
                 &timestamp,
                 max_block_event_seqnum,
+                BlockEventUsage::default(),
             ) {
                 Ok((_, _, validation_errors, latest_block_event_seqnum)) => {
                     // If there are any validation errors, assign them to the results
@@ -3214,7 +3297,7 @@ mod verification_replay_gate_tests {
             .validate_user_message(
                 &message,
                 &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
-                EngineVersion::V24,
+                EngineVersion::V25,
                 &mut RocksDbTransactionBatch::new(),
             )
             .unwrap_err();
@@ -3231,7 +3314,7 @@ mod verification_replay_gate_tests {
             trie_ctx(),
             &block_event,
             &mut replay_txn,
-            EngineVersion::V24,
+            EngineVersion::V25,
         );
         assert_eq!(result.unwrap().len(), 1);
         let channel_id = match message.data.unwrap().body.unwrap() {
@@ -3248,7 +3331,7 @@ mod verification_replay_gate_tests {
     }
 
     #[tokio::test]
-    async fn s4_pre_v24_channel_block_event_cannot_reach_replica_store() {
+    async fn s4_pre_v25_channel_block_event_cannot_reach_replica_store() {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
             ..Default::default()
@@ -3274,7 +3357,7 @@ mod verification_replay_gate_tests {
             let block_event = events_factory::create_merge_message_event(message, 1);
             let mut txn = RocksDbTransactionBatch::new();
             let result =
-                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V24);
+                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V25);
             assert!(matches!(
                 result,
                 Err(EngineError::EngineMessageValidationError(
@@ -3322,6 +3405,7 @@ mod prune_arm_tests {
             MessageType::KeyAdd,
             &mut txn_batch,
             &version,
+            super::SweepLimit::AtMost(u32::MAX),
         );
 
         let events = result.expect("KeyAdd prune arm must return Ok");
@@ -3343,6 +3427,7 @@ mod prune_arm_tests {
             MessageType::KeyRemove,
             &mut txn_batch,
             &version,
+            super::SweepLimit::AtMost(u32::MAX),
         );
 
         let events = result.expect("KeyRemove prune arm must return Ok");
@@ -3391,12 +3476,12 @@ mod channel_message_shard_engine_boundary_tests {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
-            let mut v24_txn = RocksDbTransactionBatch::new();
+            let mut v25_txn = RocksDbTransactionBatch::new();
             let result = engine.validate_user_message(
                 &message,
                 &timestamp,
-                EngineVersion::V24,
-                &mut v24_txn,
+                EngineVersion::V25,
+                &mut v25_txn,
             );
             assert!(
                 matches!(
@@ -3408,7 +3493,7 @@ mod channel_message_shard_engine_boundary_tests {
                 message_type,
                 result
             );
-            assert!(v24_txn.batch.is_empty());
+            assert!(v25_txn.batch.is_empty());
 
             let mut pre_feature_txn = RocksDbTransactionBatch::new();
             let pre_feature = engine.validate_user_message(
@@ -3468,7 +3553,7 @@ mod channel_message_shard_engine_boundary_tests {
         // Straddle the gate: one version with ChannelMessages closed, one with it open. Asserted
         // rather than assumed because a version renumber can silently collapse this pair into a
         // single case, leaving the test green while covering only one side.
-        let versions = [EngineVersion::V22, EngineVersion::V24];
+        let versions = [EngineVersion::V22, EngineVersion::V25];
         assert!(!versions[0].is_enabled(ProtocolFeature::ChannelMessages));
         assert!(versions[1].is_enabled(ProtocolFeature::ChannelMessages));
 

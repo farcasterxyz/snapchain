@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-11-16
+
+### 🚀 Features
+
+- *(network)* Relay mempool gossip only after the local mempool accepts it (ENG-631) (#1114)
+
+### 🐛 Bug Fixes
+
+- *(site)* Force patched @hono/node-server and katex via resolutions (NS-2128) (#1099)
+- *(network)* Update libp2p to 0.56 and pin malachite to the farcasterxyz fork (NS-2128) (#1098)
+- *(docker)* Mitigate CVE-2026-109518 (upgrade apt on Debian, disable retries on Ubuntu) (#1107)
+- *(consensus)* Reject commit certificates with a repeated signer (#1111)
+- *(snapshot)* Validate snapshot chunk paths before writing to disk (#1112)
+- *(mempool)* Check gossiped message signers and cap capacity per shard (ENG-631) (#1113)
+- *(consensus)* Attribute consensus gossip to its signer and require a defined round (#1118)
+- *(site)* Patch hono and @hono/node-server advisories (ENG-688) (#1122)
+- *(engine)* Bound prune sweeps by the block's event id space and schedule V24 (NS-2719) (#1124)
+- *(mempool)* Limit total prune sweeps per proposal before V24 (NS-2719) (#1125)
+- *(mempool)* Charge each message the prune work it adds for its fid and store (NS-2719) (#1127)
+
+### 🧪 Testing
+
+- *(engine)* Pin the block time in the channel register fan-out determinism test (NS-2788) (#1126)
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade GitHub Actions to Node 24 majors and pin ubuntu-26.04 (#1097)
+
+### 💼 Other
+
+- Reject blocks with unset shard witness heights (#1116)
+
 ## [0.16.0] - 2026-10-28
 
 ### 🐛 Bug Fixes
