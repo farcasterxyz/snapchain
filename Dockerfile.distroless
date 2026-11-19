@@ -1,7 +1,7 @@
 # Distroless snapchain binary. `make distroless` or:
 #   docker build -f Dockerfile.distroless -t snapchain:distroless .
 
-FROM rust:1.95 AS chef
+FROM rust:1.99 AS chef
 
 WORKDIR /usr/src/app
 
