@@ -21,9 +21,14 @@ This guide will get you set up with a Snapchain node on an AWS EC2 instance and 
 1. Go to EC2 → Instances and find your instance
 2. Click on the Instance ID
 3. Click on Security > Security groups > (Security Group ID) 
-4. Click on Edit inbound rules and Edit outbound rules on the group page and add rules until they match the below.
-![inbound](/images/inbound.png)
-![outbound](/images/outbound.png)
+4. Click on Edit inbound rules on the group page and make the rules match the table below. Leave the outbound rules at the default (all traffic).
+
+| Type | Protocol | Port range | Source | Use |
+| --- | --- | --- | --- | --- |
+| SSH | TCP | 22 | My IP | Your SSH access |
+| Custom UDP | UDP | 3382 | Anywhere-IPv4 | Gossip with other nodes (libp2p over QUIC) |
+
+The node does not need the HTTP (3381) or gRPC (3383) API ports open to sync. Query it from the instance instead, for example `curl localhost:3381/v1/info`. If other machines need the APIs, add Custom TCP rules for 3381 and 3383 with only their IP addresses as the source. The APIs have no authentication, so anyone who can reach them can read from the node and submit messages to it.
 
 ## Connect to your instance
 1. Find your *.pem* file from earlier and run `chmod 400 key.pem`
