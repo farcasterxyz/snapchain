@@ -209,8 +209,9 @@ store_operator_fid_env() {
     read -p "> Your FID or farcaster username: " input
     if [[ -z $input ]]; then
         response=""
-    elif [[ $input =~ ^-?[0-9]+$ ]]; then
-        response=$(curl -s "https://fnames.farcaster.xyz/transfers?fid=$input" | jq '.transfers[-1].to')
+    elif [[ $input =~ ^[0-9]+$ ]]; then
+        # Use a numeric FID as-is: an FID without an fname has no transfers to look up
+        response=$input
     else
         response=$(curl -s "https://fnames.farcaster.xyz/transfers?name=$input" | jq '.transfers[-1].to')
     fi
@@ -438,8 +439,10 @@ setup_crontab() {
         content_to_hash=$(cat ./.hub/default_id.protobuf)
         echo "auto-upgrade: Using Peer Identity to determine upgrade day"
     else
-        echo "auto-upgrade: Unable to determine upgrade day"
-        exit 1
+        # Neither exists when the FID prompt was skipped (Snapchain has no peer identity file).
+        # Pick a random day instead of exiting before the node is started.
+        content_to_hash="$RANDOM$RANDOM"
+        echo "auto-upgrade: No operator FID set, picking a random upgrade day"
     fi
 
     # Pick a random weekday based on the sha of the operator FID or peer identity
