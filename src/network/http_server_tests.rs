@@ -807,6 +807,26 @@ pub mod tests {
         ));
     }
 
+    #[test]
+    fn cors_preflight_allows_posting_protobuf() {
+        use crate::network::http_server::cors_preflight_response;
+        use hyper::StatusCode;
+
+        let res = cors_preflight_response("*");
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let header = |name: &str| {
+            res.headers()
+                .get(name)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(header("access-control-allow-origin"), "*");
+        assert!(header("access-control-allow-methods").contains("POST"));
+        assert!(header("access-control-allow-headers").contains("content-type"));
+    }
+
     #[tokio::test]
     async fn test_current_peers() {
         let mut mock_hub_service = MockHubService::new();
