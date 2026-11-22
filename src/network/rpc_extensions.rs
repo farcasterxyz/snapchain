@@ -35,7 +35,9 @@ impl AsSingleMessageResponse for Result<Option<proto::Message>, HubError> {
     fn as_response(&self) -> Result<Response<proto::Message>, Status> {
         match self {
             Ok(Some(message)) => Ok(Response::new(message.clone())),
-            Ok(None) => Err(Status::not_found("cast not found")),
+            // Shared by GetCast, GetReaction, GetLink, GetVerification and GetUserData,
+            // so the message can't name a specific type.
+            Ok(None) => Err(Status::not_found("message not found")),
             Err(err) => Err(Status::internal(err.to_string())),
         }
     }
@@ -197,5 +199,18 @@ pub fn authenticate_request<T>(
         }
     } else {
         Err(Status::unauthenticated("missing authorization header"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_single_message_is_not_found_without_naming_a_type() {
+        let missing: Result<Option<proto::Message>, HubError> = Ok(None);
+        let status = missing.as_response().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert_eq!(status.message(), "message not found");
     }
 }
