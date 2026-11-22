@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+enum CONST {
+  FARCASTER_EPOCH = 1609459200;
+}
