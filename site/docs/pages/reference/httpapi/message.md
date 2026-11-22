@@ -150,8 +150,6 @@ message valid. Or to validate message that cannot be submitted (e.g. Frame actio
 ::: details
 The hub validates the following for all messages:
 
-- The fid is registered
-- The signer is active and registered to the fid
 - The message hash is correct
 - The signature is valid and corresponds to the signer
 - Any other message specific validation
@@ -254,14 +252,14 @@ async fn main() {
     // Construct the actual message
     let mut msg = message::Message::new();
     msg.set_hash_scheme(message::HashScheme::HASH_SCHEME_BLAKE3);
-    msg.set_hash(hash);
+    msg.set_hash(hash.clone());
 
     // Sign the message. You need to use a signing key that corresponds to the FID you are adding.
     // REPLACE THE PRIVATE KEY WITH YOUR OWN
     let private_key = SigningKey::from_bytes(
         &SecretKey::from_hex("0x...").expect("Please provide a valid private key"),
     );
-    let signature = private_key.sign(&msg_data_bytes).to_bytes();
+    let signature = private_key.sign(&hash).to_bytes();
 
     msg.set_signature_scheme(message::SignatureScheme::SIGNATURE_SCHEME_ED25519);
     msg.set_signature(signature.to_vec());
