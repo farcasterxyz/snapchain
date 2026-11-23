@@ -5,6 +5,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::error::HubError;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext, WellFormedProposal};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::network::connection_limits::{denial_reason, ConnectionLimits};
 use crate::network::mesh::diagnostics;
 use crate::network::mesh::metrics::GossipMetrics;
 use crate::network::mesh::view::peer_id_from_validator_key;
@@ -26,11 +27,11 @@ use informalsystems_malachitebft_sync::{self as sync};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::request_response::{self, InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::ListenError;
 use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId,
     Swarm,
 };
-use libp2p_connection_limits::ConnectionLimits;
 use parking_lot::Mutex;
 use prost::Message;
 use reqwest::Client;
@@ -238,12 +239,15 @@ pub enum GossipTopic {
 
 #[derive(NetworkBehaviour)]
 pub struct SnapchainBehavior {
+    /// Must stay first: the derived behaviour offers each new connection to
+    /// fields in order, and a later denial leaves earlier fields (notably
+    /// request-response) tracking a connection the swarm never established.
+    pub connection_limits: ConnectionLimits,
     pub gossipsub: gossipsub::Behaviour,
     pub rpc: sync::Behaviour,
     /// Mesh diagnostics request-response (the crawl). Sibling to `rpc` so it can
     /// evolve independently of Malachite's consensus sync protocol.
     pub diagnostics: diagnostics::Behaviour,
-    pub connection_limits: libp2p_connection_limits::Behaviour,
 }
 
 pub struct SnapchainGossip {
@@ -391,19 +395,13 @@ impl SnapchainGossip {
                 );
 
                 // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
-                let connection_limits = libp2p_connection_limits::Behaviour::new(
-                    ConnectionLimits::default()
-                        // .with_max_pending_incoming(Some(5))
-                        // .with_max_pending_outgoing(Some(5)),
-                        .with_max_established_incoming(Some(100))
-                        .with_max_established_outgoing(Some(100)),
-                );
+                let connection_limits = ConnectionLimits::new(config.direct_peers());
 
                 Ok(SnapchainBehavior {
+                    connection_limits,
                     gossipsub,
                     rpc,
                     diagnostics,
-                    connection_limits,
                 })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -776,6 +774,11 @@ impl SnapchainGossip {
                         .count() as u64;
                     self.statsd_client.gauge("gossip.direct_peer_missing_contact_info_topic", direct_missing_contact_info, vec![]);
 
+                    let network_info = self.swarm.network_info();
+                    let counters = network_info.connection_counters();
+                    self.statsd_client.gauge("gossip.established_connections", counters.num_established_incoming() as u64, vec![("direction", "incoming")]);
+                    self.statsd_client.gauge("gossip.established_connections", counters.num_established_outgoing() as u64, vec![("direction", "outgoing")]);
+
                     // Validators only: surface consensus mesh size so we can
                     // alert if grafts to N-1 peers don't establish.
                     if !self.read_node {
@@ -917,6 +920,15 @@ impl SnapchainGossip {
                         },
                         SwarmEvent::OutgoingConnectionError {connection_id: _, peer_id, error} => {
                             warn!("Failed to dial peer: {:?} due to: {:?}", peer_id, error);
+                        },
+                        SwarmEvent::IncomingConnectionError {peer_id, send_back_addr, error: ListenError::Denied { cause }, ..} => {
+                            let is_direct = peer_id.is_some_and(|p| self.direct_peers.contains(&p));
+                            warn!(direct = is_direct, remote = %send_back_addr, "Denied incoming connection from peer: {:?} due to: {:?}", peer_id, cause);
+                            self.statsd_client.count(
+                                "gossip.incoming_connection_denied",
+                                1,
+                                vec![("reason", denial_reason(&cause)), ("direct", if is_direct { "true" } else { "false" })],
+                            );
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
                             propagation_source: peer_id,

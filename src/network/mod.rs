@@ -1,4 +1,5 @@
 pub mod admin_server;
+pub mod connection_limits;
 pub mod gossip;
 pub mod http_server;
 pub mod mesh;
