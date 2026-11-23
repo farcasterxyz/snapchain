@@ -1415,3 +1415,30 @@ async fn test_consensus_message_must_be_published_by_its_signer() {
         "forwarded a proposal with a malformed proposer key"
     );
 }
+
+#[test]
+fn bootstrap_redial_skips_only_connected_peers() {
+    use super::gossip::bootstrap_addrs_to_redial;
+    use libp2p::PeerId;
+    use std::collections::{HashMap, HashSet};
+
+    let never_reached = "/ip4/10.0.0.1/udp/3382/quic-v1".to_string();
+    let connected = "/ip4/10.0.0.2/udp/3382/quic-v1".to_string();
+    let dropped = "/ip4/10.0.0.3/udp/3382/quic-v1".to_string();
+    let connected_peer = PeerId::random();
+    let dropped_peer = PeerId::random();
+
+    let bootstrap_addrs: HashSet<String> =
+        [never_reached.clone(), connected.clone(), dropped.clone()].into();
+    let bootstrap_peers: HashMap<String, PeerId> = [
+        (connected.clone(), connected_peer),
+        (dropped.clone(), dropped_peer),
+    ]
+    .into();
+
+    let redial = bootstrap_addrs_to_redial(&bootstrap_addrs, &bootstrap_peers, |peer| {
+        *peer == connected_peer
+    });
+
+    assert_eq!(redial, vec![never_reached, dropped]);
+}

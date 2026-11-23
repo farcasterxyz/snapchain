@@ -259,7 +259,8 @@ pub struct SnapchainGossip {
     read_node: bool,
     enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
-    connected_bootstrap_addrs: HashSet<String>,
+    /// Peer last reached by dialing each bootstrap address.
+    bootstrap_peers: HashMap<String, PeerId>,
     announce_gossip_address: String,
     announce_rpc_address: String,
     fc_network: FarcasterNetwork,
@@ -331,6 +332,27 @@ pub struct SnapchainGossip {
     /// from the configured validator set (see [`Self::set_validator_peers`]).
     /// **Fail-closed:** an empty set answers no one.
     validator_peers: HashSet<PeerId>,
+}
+
+/// Bootstrap addresses that need dialing, sorted: those never reached, and
+/// those whose peer is no longer connected.
+///
+/// `bootstrap_peers` maps each address to the peer last reached by dialing it.
+/// Liveness comes from `is_connected` (the swarm) rather than from tracking
+/// connection opens and closes per address, which can drift and leave a dead
+/// address marked connected so it is never redialed.
+pub(crate) fn bootstrap_addrs_to_redial(
+    bootstrap_addrs: &HashSet<String>,
+    bootstrap_peers: &HashMap<String, PeerId>,
+    is_connected: impl Fn(&PeerId) -> bool,
+) -> Vec<String> {
+    let mut addrs: Vec<String> = bootstrap_addrs
+        .iter()
+        .filter(|addr| !bootstrap_peers.get(*addr).is_some_and(&is_connected))
+        .cloned()
+        .collect();
+    addrs.sort();
+    addrs
 }
 
 impl SnapchainGossip {
@@ -498,7 +520,7 @@ impl SnapchainGossip {
             contact_info_interval: config.contact_info_interval,
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
-            connected_bootstrap_addrs: HashSet::new(),
+            bootstrap_peers: HashMap::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
             peer_blocklist: Arc::new(Mutex::new(HashSet::new())),
@@ -632,11 +654,14 @@ impl SnapchainGossip {
         // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
         if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
         {
-            for addr in &self.bootstrap_addrs {
-                if !self.connected_bootstrap_addrs.contains(addr) {
-                    warn!("Attempting to reconnect to bootstrap peer: {}", addr);
-                    let _ = Self::dial(&mut self.swarm, &addr);
-                }
+            let swarm = &self.swarm;
+            let redial =
+                bootstrap_addrs_to_redial(&self.bootstrap_addrs, &self.bootstrap_peers, |peer| {
+                    swarm.is_connected(peer)
+                });
+            for addr in redial {
+                warn!("Attempting to reconnect to bootstrap peer: {}", addr);
+                let _ = Self::dial(&mut self.swarm, &addr);
             }
         }
     }
@@ -832,7 +857,7 @@ impl SnapchainGossip {
                             match endpoint {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     if self.bootstrap_addrs.contains(&address.to_string()) {
-                                        self.connected_bootstrap_addrs.insert(address.to_string());
+                                        self.bootstrap_peers.insert(address.to_string(), peer_id);
                                     }
 
                                 },
@@ -869,7 +894,7 @@ impl SnapchainGossip {
                                 self.statsd_client.count("gossip.boot_resub_fired", 1, vec![]);
                             }
                         },
-                        SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
+                        SwarmEvent::ConnectionClosed {peer_id, cause, ..} => {
                             let is_direct = self.direct_peers.contains(&peer_id);
                             // Only forget the first-connect time when ALL connections
                             // to this peer have closed. Until then, the peer is still
@@ -895,12 +920,6 @@ impl SnapchainGossip {
                                     warn!("Failed to send connection closed message: {}", e);
                                 }
                             }
-                            match endpoint {
-                                libp2p::core::ConnectedPoint::Dialer { address, ..} => {
-                                    self.connected_bootstrap_addrs.remove(&address.to_string());
-                                },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
-                            };
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) => {
                             let is_direct = self.direct_peers.contains(&peer_id);
