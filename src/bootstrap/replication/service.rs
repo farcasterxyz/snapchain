@@ -37,7 +37,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    u64,
 };
 use std::{fs, io};
 use tokio::signal::ctrl_c;
