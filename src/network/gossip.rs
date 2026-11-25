@@ -355,6 +355,15 @@ pub(crate) fn bootstrap_addrs_to_redial(
     addrs
 }
 
+/// Whether a failed publish is routine and not worth a warning.
+///
+/// Only read nodes subscribe to `read-node-peers`, and most read nodes peer
+/// only with validators, so a status broadcast there usually reaches nobody.
+pub(crate) fn publish_failure_is_expected(topic: &str, error: &gossipsub::PublishError) -> bool {
+    topic == READ_NODE_PEER_STATUSES
+        && matches!(error, gossipsub::PublishError::NoPeersSubscribedToTopic)
+}
+
 impl SnapchainGossip {
     pub async fn create(
         keypair: Keypair,
@@ -1199,7 +1208,11 @@ impl SnapchainGossip {
             .gossipsub
             .publish(publish_topic, message)
         {
-            warn!("Failed to publish gossip message: {} ({:?})", e, topic);
+            if publish_failure_is_expected(topic, &e) {
+                debug!("Failed to publish gossip message: {} ({:?})", e, topic);
+            } else {
+                warn!("Failed to publish gossip message: {} ({:?})", e, topic);
+            }
         }
     }
 
