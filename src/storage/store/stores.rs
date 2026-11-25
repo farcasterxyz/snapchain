@@ -144,7 +144,7 @@ impl Limits {
         self.for_store_type(Limits::message_type_to_store_type(message_type))
     }
 
-    fn message_type_to_store_type(message_type: MessageType) -> StoreType {
+    pub(crate) fn message_type_to_store_type(message_type: MessageType) -> StoreType {
         match message_type {
             MessageType::CastAdd => StoreType::Casts,
             MessageType::CastRemove => StoreType::Casts,

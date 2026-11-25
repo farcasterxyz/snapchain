@@ -141,11 +141,28 @@ pub fn validate_and_commit_state_change(
 }
 
 pub fn commit_event(engine: &mut BlockEngine, event: &OnChainEvent) -> Block {
+    propose_and_commit_event(engine, event, None)
+}
+
+/// Commits `event` in a block stamped with `timestamp` rather than the current time.
+pub fn commit_event_at(
+    engine: &mut BlockEngine,
+    event: &OnChainEvent,
+    timestamp: FarcasterTime,
+) -> Block {
+    propose_and_commit_event(engine, event, Some(timestamp))
+}
+
+fn propose_and_commit_event(
+    engine: &mut BlockEngine,
+    event: &OnChainEvent,
+    timestamp: Option<FarcasterTime>,
+) -> Block {
     let height = engine.get_confirmed_height().increment();
     let state_change = engine.propose_state_change(
         vec![MempoolMessage::OnchainEvent(event.clone())],
         height,
-        None,
+        timestamp,
     );
 
     validate_and_commit_state_change(engine, &state_change)

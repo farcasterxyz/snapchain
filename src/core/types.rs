@@ -223,6 +223,26 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         VotingPower,
         informalsystems_malachitebft_core_types::CertificateError<SnapchainValidatorContext>,
     > {
+        let repeated = certificate
+            .aggregated_signature
+            .signatures
+            .iter()
+            .filter(|signature| signature.address == commit_sig.address)
+            .nth(1)
+            .is_some();
+        if repeated {
+            warn!(
+                address = %commit_sig.address,
+                height = %certificate.height,
+                "duplicate signer in commit certificate"
+            );
+            return Err(
+                informalsystems_malachitebft_core_types::CertificateError::InvalidSignature(
+                    commit_sig.clone(),
+                ),
+            );
+        }
+
         // Reconstruct the vote that was signed
         let vote = Vote::new_precommit(
             certificate.height,
@@ -293,6 +313,16 @@ pub fn round_from_i64(round: i64) -> Result<Round, String> {
         return Err(format!("Round out of range: {}", round));
     }
     Ok(Round::from(round))
+}
+
+/// Converts the wire round of a proposal or vote, which is always a defined round.
+/// [`round_from_i64`] maps every negative value to `Round::Nil`, which is only valid for a
+/// proposal's `pol_round`.
+fn defined_round_from_i64(round: i64) -> Result<Round, String> {
+    if round < 0 {
+        return Err(format!("Invalid round: {}", round));
+    }
+    round_from_i64(round)
 }
 
 /// A [`FullProposal`] whose height, round, proposer and proposed value have been checked, so
@@ -524,7 +554,7 @@ impl Vote {
         Ok(Self {
             vote_type,
             height: proto.height.ok_or("Missing vote height")?,
-            round: round_from_i64(proto.round)?,
+            round: defined_round_from_i64(proto.round)?,
             voter: Address::try_from_slice(&proto.voter)?,
             shard_hash,
         })
@@ -558,7 +588,7 @@ impl Proposal {
     pub fn try_from_proto(proto: proto::Proposal) -> Result<Self, String> {
         Ok(Self {
             height: proto.height.ok_or("Missing proposal height")?,
-            round: round_from_i64(proto.round)?,
+            round: defined_round_from_i64(proto.round)?,
             shard_hash: proto.value.ok_or("Missing proposal value")?,
             pol_round: round_from_i64(proto.pol_round)?,
             proposer: Address::try_from_slice(&proto.proposer)?,
@@ -876,5 +906,141 @@ impl CommitsExt for Commits {
             value,
             signatures,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use informalsystems_malachitebft_core_types::{
+        AggregatedSignature, CertificateError, CommitCertificate, CommitSignature, NilOrVal, Round,
+        SigningProvider, SigningProviderExt, ThresholdParams,
+    };
+    use libp2p::identity::ed25519::Keypair;
+
+    use super::{
+        Address, Ed25519Provider, Height, ShardHash, SnapchainShard, SnapchainValidator,
+        SnapchainValidatorContext, SnapchainValidatorSet, Vote,
+    };
+
+    struct Validators {
+        keys: Vec<Keypair>,
+        set: SnapchainValidatorSet,
+        height: Height,
+        round: Round,
+        value_id: ShardHash,
+    }
+
+    impl Validators {
+        fn new() -> Self {
+            let keys: Vec<Keypair> = (0..4).map(|_| Keypair::generate()).collect();
+            let set = SnapchainValidatorSet::new(
+                keys.iter()
+                    .map(|key| SnapchainValidator::new(SnapchainShard(1), key.public(), None, 0))
+                    .collect(),
+            );
+            Self {
+                keys,
+                set,
+                height: Height::new(1, 42),
+                round: Round::new(0),
+                value_id: ShardHash {
+                    shard_index: 1,
+                    hash: vec![0xde, 0xad],
+                },
+            }
+        }
+
+        fn sign(&self, index: usize) -> CommitSignature<SnapchainValidatorContext> {
+            let key = &self.keys[index];
+            let address = Address(key.public().to_bytes());
+            let vote = Vote::new_precommit(
+                self.height,
+                self.round,
+                NilOrVal::Val(self.value_id.clone()),
+                address.clone(),
+            );
+            let signed = Ed25519Provider::new(Arc::new(key.clone())).sign_vote(vote);
+            CommitSignature::new(address, signed.signature)
+        }
+
+        fn verify(
+            &self,
+            signatures: Vec<CommitSignature<SnapchainValidatorContext>>,
+        ) -> Result<(), CertificateError<SnapchainValidatorContext>> {
+            let certificate = CommitCertificate {
+                height: self.height,
+                round: self.round,
+                value_id: self.value_id.clone(),
+                aggregated_signature: AggregatedSignature::new(signatures),
+            };
+            Ed25519Provider::new(Arc::new(self.keys[0].clone())).verify_certificate(
+                &certificate,
+                &self.set,
+                ThresholdParams::default(),
+            )
+        }
+
+        fn address(&self, index: usize) -> Address {
+            Address(self.keys[index].public().to_bytes())
+        }
+    }
+
+    fn assert_invalid_signature(
+        result: Result<(), CertificateError<SnapchainValidatorContext>>,
+        address: Address,
+    ) {
+        match result {
+            Err(CertificateError::InvalidSignature(signature)) => {
+                assert_eq!(signature.address, address);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_repeated_precommit_is_rejected() {
+        let validators = Validators::new();
+        let one = validators.sign(0);
+        let result = validators.verify(vec![one.clone(), one.clone(), one]);
+        assert_invalid_signature(result, validators.address(0));
+    }
+
+    #[test]
+    fn test_single_signature_lacks_quorum() {
+        let validators = Validators::new();
+        let result = validators.verify(vec![validators.sign(0)]);
+        match result {
+            Err(CertificateError::NotEnoughVotingPower { signed, total, .. }) => {
+                assert_eq!(signed, 1);
+                assert_eq!(total, 4);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_three_distinct_signers_pass() {
+        let validators = Validators::new();
+        let result = validators.verify(vec![
+            validators.sign(0),
+            validators.sign(1),
+            validators.sign(2),
+        ]);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn test_quorum_plus_repeat_is_rejected() {
+        let validators = Validators::new();
+        let first = validators.sign(0);
+        let result = validators.verify(vec![
+            first.clone(),
+            validators.sign(1),
+            validators.sign(2),
+            first,
+        ]);
+        assert_invalid_signature(result, validators.address(0));
     }
 }

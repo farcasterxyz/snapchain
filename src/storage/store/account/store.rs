@@ -451,6 +451,15 @@ where
     store_opts: StoreOptions,
 }
 
+/// How many `PruneMessage` events a single prune sweep may emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepLimit {
+    /// Run the whole sweep only if it fits; otherwise prune nothing.
+    AllOrNothing(u32),
+    /// Prune the oldest rows up to this many and leave the rest over the cap.
+    AtMost(u32),
+}
+
 impl<T: StoreDef + Clone> Store<T> {
     pub fn new_with_store_def(
         db: Arc<RocksDB>,
@@ -1199,12 +1208,94 @@ impl<T: StoreDef + Clone> Store<T> {
         Ok(Some(hub_event))
     }
 
+    /// Counts the `PruneMessage` events `prune_messages` would emit for the same arguments,
+    /// without writing anything. Walks rows in the same order with the same skip rule.
+    ///
+    /// A row that fails to decode ends the count at the same row where `prune_messages`
+    /// would return its error, so a corrupt row can't push the count past what
+    /// `prune_messages` would mint.
+    ///
+    /// Stops once the count exceeds `stop_above`, since callers only need to know whether it
+    /// does.
+    pub fn count_prunable_messages(
+        &self,
+        fid: u64,
+        current_count: u32,
+        max_count: u32,
+        stop_above: u32,
+    ) -> u32 {
+        if current_count <= max_count || self.store_def.requires_consensus_order_slot_merge() {
+            return 0;
+        }
+        let needed = current_count - max_count;
+        let mut prunable = 0u32;
+
+        let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
+        let _ = self.db.for_each_iterator_by_prefix(
+            Some(prefix.to_vec()),
+            Some(increment_vec_u8(prefix)),
+            &PageOptions::default(),
+            |_key, value| {
+                if prunable >= needed || prunable > stop_above {
+                    return Ok(true);
+                }
+                let message = message_decode(value)?;
+                if !(self.store_def.compact_state_type_supported()
+                    && self.store_def.is_compact_state_type(&message))
+                {
+                    prunable += 1;
+                }
+                Ok(false)
+            },
+        );
+        prunable
+    }
+
+    /// Runs `prune_messages` within `limit`. Returns `Ok(None)`, having written nothing, when
+    /// an `AllOrNothing` sweep would emit more than its limit.
+    pub fn prune_messages_limited(
+        &self,
+        fid: u64,
+        current_count: u32,
+        max_count: u32,
+        txn: &mut RocksDbTransactionBatch,
+        limit: SweepLimit,
+    ) -> Result<Option<Vec<HubEvent>>, HubError> {
+        match limit {
+            SweepLimit::AllOrNothing(max_events) => {
+                if self.count_prunable_messages(fid, current_count, max_count, max_events)
+                    > max_events
+                {
+                    return Ok(None);
+                }
+                self.prune_messages(fid, current_count, max_count, txn)
+                    .map(Some)
+            }
+            SweepLimit::AtMost(max_events) => self
+                .prune_messages_bounded(fid, current_count, max_count, txn, max_events)
+                .map(Some),
+        }
+    }
+
     pub fn prune_messages(
         &self,
         fid: u64,
         current_count: u32,
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, HubError> {
+        self.prune_messages_bounded(fid, current_count, max_count, txn, u32::MAX)
+    }
+
+    /// Prunes the oldest rows until the fid is back under `max_count`, stopping early once
+    /// `max_events` rows have been pruned.
+    pub fn prune_messages_bounded(
+        &self,
+        fid: u64,
+        current_count: u32,
+        max_count: u32,
+        txn: &mut RocksDbTransactionBatch,
+        max_events: u32,
     ) -> Result<Vec<HubEvent>, HubError> {
         if self.store_def.requires_consensus_order_slot_merge() {
             return Err(HubError::validation_failure(
@@ -1225,7 +1316,7 @@ impl<T: StoreDef + Clone> Store<T> {
             Some(increment_vec_u8(prefix)),
             &PageOptions::default(),
             |_key, value| {
-                if count <= max_count {
+                if count <= max_count || pruned_events.len() as u32 >= max_events {
                     return Ok(true); // Stop the iteration, nothing left to prune
                 }
 

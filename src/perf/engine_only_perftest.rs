@@ -61,8 +61,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let mut shard_stores = HashMap::new();
     shard_stores.insert(1, engine.get_stores());
+    // This loop pushes far more messages for one fid than an hour's quota allows.
     let mut mempool = Mempool::new(
-        mempool::Config::default(),
+        mempool::Config {
+            enable_rate_limits: false,
+            ..mempool::Config::default()
+        },
         FarcasterNetwork::Devnet,
         mempool_rx,
         messages_request_rx,

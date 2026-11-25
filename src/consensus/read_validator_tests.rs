@@ -6,13 +6,21 @@ mod tests {
     use crate::consensus::consensus::{SystemMessage, ValidatorSetConfig};
     use crate::consensus::read_validator::{Engine, ReadValidator};
     use crate::consensus::validator::{StoredValidatorSet, StoredValidatorSets};
-    use crate::core::types::{Address, ShardId};
-    use crate::proto::{self, CommitSignature, Commits, Height, ShardChunk, ShardHash};
+    use crate::core::types::{Address, ShardId, Vote};
+    use crate::core::util::{block_hash, expected_transactions_root, shard_witness_hash};
+    use crate::proto::{
+        self, BlockHeader, CommitSignature, Commits, FarcasterNetwork, Height, ShardChunk,
+        ShardChunkWitness, ShardHash, ShardWitness,
+    };
+    use crate::storage::store::block_engine::BlockStateChange;
+    use crate::storage::store::block_engine_test_helpers;
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
         self, commit_event, default_storage_event, new_engine_with_options, sign_chunk,
         EngineOptions, FID_FOR_TEST,
     };
+    use crate::version::version::EngineVersion;
+    use informalsystems_malachitebft_core_types::{NilOrVal, Round};
     use libp2p::identity::ed25519::Keypair;
     use tokio::sync::mpsc;
 
@@ -400,5 +408,107 @@ mod tests {
             ReadValidator::decided_value_height(&shard_value(ShardChunk::default())),
             None
         );
+    }
+
+    fn signed_decided_block(
+        proposer_keypair: &Keypair,
+        state_change: &BlockStateChange,
+        witnesses: Vec<ShardChunkWitness>,
+    ) -> proto::DecidedValue {
+        let height = Height::new(0, 1);
+        let version = EngineVersion::version_for(&state_change.timestamp, FarcasterNetwork::Devnet);
+        let shard_witness = ShardWitness {
+            shard_chunk_witnesses: witnesses,
+        };
+        let header = BlockHeader {
+            parent_hash: vec![0; 32],
+            chain_id: FarcasterNetwork::Devnet as i32,
+            version: version.protocol_version(),
+            timestamp: state_change.timestamp.to_u64(),
+            height: Some(height),
+            shard_witnesses_hash: shard_witness_hash(&shard_witness),
+            state_root: state_change.new_state_root.clone(),
+            events_hash: state_change.events_hash.clone(),
+            transactions_root: expected_transactions_root(&state_change.transactions, version),
+        };
+        let hash = block_hash(&header);
+        let value = ShardHash {
+            shard_index: 0,
+            hash: hash.clone(),
+        };
+        let signer = proposer_keypair.public().to_bytes().to_vec();
+        let vote = Vote::new_precommit(
+            height,
+            Round::from(0u32),
+            NilOrVal::Val(value.clone()),
+            Address::from_vec(signer.clone()),
+        );
+        let signature = proposer_keypair.sign(&vote.to_sign_bytes());
+        proto::DecidedValue {
+            value: Some(proto::decided_value::Value::Block(proto::Block {
+                header: Some(header),
+                hash,
+                shard_witness: Some(shard_witness),
+                commits: Some(Commits {
+                    height: Some(height),
+                    round: 0,
+                    value: Some(value),
+                    signatures: vec![CommitSignature { signature, signer }],
+                }),
+                transactions: state_change.transactions.clone(),
+                events: state_change.events.clone(),
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ignore_block_with_unset_witness_height() {
+        let proposer_keypair = Keypair::generate();
+        let proposer_address = Address(proposer_keypair.public().to_bytes());
+        let (mut proposer_engine, _proposer_dir) = block_engine_test_helpers::setup();
+        let (read_engine, _read_dir) = block_engine_test_helpers::setup();
+        let validator_sets = vec![StoredValidatorSet::new(
+            ShardId::new(0),
+            &ValidatorSetConfig {
+                effective_at: 0,
+                validator_public_keys: vec![proposer_address.to_hex()],
+                shard_ids: vec![0],
+            },
+        )];
+        let (system_tx, _system_rx) = mpsc::channel(100);
+        let mut read_validator = ReadValidator {
+            shard_id: 0,
+            last_height: Height::new(0, 0),
+            engine: Engine::BlockEngine(read_engine),
+            max_num_buffered_blocks: 1,
+            buffered_blocks: BTreeMap::new(),
+            statsd_client: test_helper::statsd_client(),
+            validator_sets: StoredValidatorSets::new(0, validator_sets),
+            system_tx,
+        };
+        let state_change = proposer_engine.propose_state_change(vec![], Height::new(0, 1), None);
+
+        let unset_height = signed_decided_block(
+            &proposer_keypair,
+            &state_change,
+            vec![ShardChunkWitness {
+                height: None,
+                shard_hash: vec![1; 32],
+                shard_root: vec![2; 32],
+            }],
+        );
+        assert_dropped(&mut read_validator, unset_height).await;
+
+        let valid = signed_decided_block(
+            &proposer_keypair,
+            &state_change,
+            vec![ShardChunkWitness {
+                height: Some(Height::new(1, 1)),
+                shard_hash: vec![1; 32],
+                shard_root: vec![2; 32],
+            }],
+        );
+        assert_eq!(read_validator.process_decided_value(valid).await, 1);
+        assert_eq!(read_validator.last_height, Height::new(0, 1));
     }
 }

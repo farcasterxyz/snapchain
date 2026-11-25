@@ -162,7 +162,11 @@ impl ReadValidator {
                 // to the header too. Blocks from before witnesses were introduced have no hash.
                 let witness_matches = header.shard_witnesses_hash.is_empty()
                     || block.shard_witness.as_ref().is_some_and(|witness| {
-                        shard_witness_hash(witness) == header.shard_witnesses_hash
+                        witness
+                            .shard_chunk_witnesses
+                            .iter()
+                            .all(|chunk| chunk.height.is_some())
+                            && shard_witness_hash(witness) == header.shard_witnesses_hash
                     });
                 let events_match = block_events_match_hash(&block.events, &header.events_hash);
                 (

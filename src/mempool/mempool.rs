@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::sync::Arc;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -15,7 +15,9 @@ use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::core::validations::{self, error::ValidationError};
 use crate::mempool::routing;
-use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
+use crate::proto::{
+    Block, FarcasterNetwork, Height, MessageType, OnChainEventType, StoreType, Transaction,
+};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -26,9 +28,10 @@ use crate::{
         store::{
             account::{
                 get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+                verify_message_signer,
             },
             mempool_poller::MempoolMessage,
-            stores::Stores,
+            stores::{Limits, Stores},
         },
         util::bytes_compare,
     },
@@ -86,11 +89,11 @@ impl RateLimits {
         }
     }
 
-    fn invalidate_rate_limiter_for_fid(&mut self, fid: u64) {
+    fn invalidate_rate_limiter_for_fid(&self, fid: u64) {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(&mut self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
+    fn get_rate_limiter_for_fid(&self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
             let shard_id = self.message_router.route_fid(fid, self.num_shards);
             let stores = self.shard_stores.get(&shard_id).unwrap();
@@ -111,7 +114,32 @@ impl RateLimits {
         })
     }
 
-    pub fn consume_for_fid(&mut self, fid: u64) -> bool {
+    /// Charges an RPC-submitted message against its fid's quota before the server simulates
+    /// it, so a fid over its limit costs no simulation work. The signature and signer are
+    /// checked first so a message can only spend the quota of the fid that signed it.
+    pub fn charge_rpc_message(
+        &self,
+        message: &proto::Message,
+        network: FarcasterNetwork,
+    ) -> Result<(), HubError> {
+        validate_gossiped_message(message, network)
+            .map_err(|err| HubError::validation_failure(&err.to_string()))?;
+        verify_signer_on_home_shard(
+            self.message_router.as_ref(),
+            self.num_shards,
+            &self.shard_stores,
+            message,
+        )?;
+        if charges_storage_quota(message) && !self.consume_for_fid(message.fid()) {
+            return Err(HubError::rate_limited(&format!(
+                "rate limit exceeded for FID {}",
+                message.fid()
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn consume_for_fid(&self, fid: u64) -> bool {
         let rate_limiter = self.get_rate_limiter_for_fid(fid);
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
@@ -130,8 +158,8 @@ impl RateLimits {
 // -------------------------------------------------------------------------------------------
 //
 // Separate from the storage-quota-derived `RateLimits` above: this is a fixed, FIP-required
-// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` is
-// intentionally never rate-limited — revocation of a compromised key must never be blockable.
+// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` has its
+// own limiter (`KeyRemoveRateLimits`) so revoking a key is never blocked by other traffic.
 // Gating in the mempool covers both RPC-submitted and gossip-forwarded KEY_ADD messages: a
 // rejection in `message_is_valid` both keeps the message out of the pool and suppresses
 // downstream gossip (since `insert_into_shard` only gossips on the success branch).
@@ -171,6 +199,61 @@ impl KeyAddRateLimits {
         self.statsd_client.gauge(
             "mempool.key_add_rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
+            vec![],
+        );
+        limiter.check().is_ok()
+    }
+}
+
+/// KEY_REMOVE messages admitted per minute for each (fid, key, authorization type).
+pub const KEY_REMOVE_RATE_LIMIT_PER_MINUTE: u32 = 5;
+
+/// Most messages a single user message may cause to be pruned and still be admitted or
+/// pulled into a proposal, until `BoundedPruneSweep` activates and the engine limits each
+/// block's prune events itself. Each pruned message emits a HubEvent, so this keeps one
+/// message's prune work small next to the rest of a block.
+pub const MAX_PRUNE_SWEEP_PER_MESSAGE: u32 = 4096;
+
+/// Most messages that the user messages in one proposal may cause to be pruned in total, until
+/// `BoundedPruneSweep` activates and the engine applies the same budget per block. Keeps a
+/// block's prune events small next to the rest of the block.
+pub const MAX_PRUNE_SWEEP_PER_BLOCK: u32 = 4096;
+
+/// Fixed limit on KEY_REMOVE, kept apart from the storage-quota limiter so a signer that spends
+/// its fid's quota cannot stop the fid from revoking it.
+///
+/// Buckets are keyed by (fid, removed key, authorization type). Admission only accepts a
+/// KEY_REMOVE that is authorized to remove its key, so a bucket can only be filled by messages
+/// that would remove that same key, and a compromised key's self-revocations never touch the
+/// custody bucket.
+pub struct KeyRemoveRateLimits {
+    rate_limits: Cache<(u64, Vec<u8>, u32), Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
+}
+
+impl KeyRemoveRateLimits {
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
+        Self {
+            rate_limits: CacheBuilder::new(1_000_000)
+                .time_to_idle(Duration::from_secs(120))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
+            statsd_client,
+        }
+    }
+
+    /// Returns `true` if the message may proceed, `false` if its bucket is empty.
+    pub fn consume(&self, fid: u64, body: &proto::KeyRemoveBody) -> bool {
+        let limiter =
+            self.rate_limits
+                .get_with((fid, body.key.clone(), body.signature_type), || {
+                    Arc::new(RateLimiter::direct(Quota::per_minute(
+                        NonZeroU32::new(KEY_REMOVE_RATE_LIMIT_PER_MINUTE).unwrap(),
+                    )))
+                });
+        self.statsd_client.gauge(
+            "mempool.key_remove_rate_limiter_entries",
+            self.rate_limits.entry_count(),
             vec![],
         );
         limiter.check().is_ok()
@@ -261,7 +344,7 @@ impl Default for Config {
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 1_000_000,
             rx_poll_interval: Duration::from_millis(1),
-            enable_rate_limits: false,
+            enable_rate_limits: true,
         }
     }
 }
@@ -555,6 +638,34 @@ impl ReadNodeMempool {
         }
     }
 
+    /// Checks the message's signer against the FID's home shard. Gossip comes from untrusted
+    /// peers, so without this anyone could claim any FID with a throwaway key, filling the
+    /// mempool and spending that FID's rate limits.
+    fn verify_gossiped_signer(&self, message: &proto::Message) -> Result<(), HubError> {
+        verify_signer_on_home_shard(
+            self.message_router.as_ref(),
+            self.num_shards,
+            &self.shard_stores,
+            message,
+        )
+    }
+
+    /// The checks a read node runs on a gossiped user message before gossip relays it: the
+    /// same stateless and signer checks validators run at admission.
+    fn gossip_checks(
+        &self,
+        message: &MempoolMessage,
+        source: &MempoolSource,
+    ) -> Result<(), HubError> {
+        let (MempoolMessage::UserMessage(user_message), MempoolSource::Gossip) = (message, source)
+        else {
+            return Ok(());
+        };
+        validate_gossiped_message(user_message, self.network)
+            .map_err(|err| HubError::validation_failure(&err.to_string()))?;
+        self.verify_gossiped_signer(user_message)
+    }
+
     fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
@@ -568,17 +679,19 @@ impl ReadNodeMempool {
                 MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
                         .count("read_mempool.messages_received", 1, vec![]);
-                    let results: Vec<Result<(), HubError>> = self
-                        .route_mempool_message(&message)
-                        .iter()
-                        .map(|shard| self.message_is_valid(*shard, &message))
-                        .collect();
-                    // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
-                    let result = if results.iter().any(|res| res.is_ok()) {
-                        Ok(())
-                    } else {
-                        results[0].clone()
-                    };
+                    let result = self.gossip_checks(&message, &source).and_then(|()| {
+                        let results: Vec<Result<(), HubError>> = self
+                            .route_mempool_message(&message)
+                            .iter()
+                            .map(|shard| self.message_is_valid(*shard, &message))
+                            .collect();
+                        // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
+                        if results.iter().any(|res| res.is_ok()) {
+                            Ok(())
+                        } else {
+                            results[0].clone()
+                        }
+                    });
                     if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client
@@ -602,6 +715,180 @@ impl ReadNodeMempool {
     }
 }
 
+fn is_prunable(msg_type: MessageType) -> bool {
+    matches!(
+        msg_type,
+        MessageType::CastAdd
+            | MessageType::CastRemove
+            | MessageType::LinkAdd
+            | MessageType::LinkRemove
+            | MessageType::LinkCompactState
+            | MessageType::ReactionAdd
+            | MessageType::ReactionRemove
+            | MessageType::UserDataAdd
+            | MessageType::VerificationAddEthAddress
+            | MessageType::VerificationRemove
+            | MessageType::UsernameProof
+    )
+}
+
+/// The number of stored messages merging `message` would prune, judged from committed state.
+fn estimated_prune_sweep(stores: &Stores, message: &proto::Message) -> u32 {
+    let msg_type = message.msg_type();
+    if !is_prunable(msg_type) {
+        return 0;
+    }
+    stores
+        .get_usage(message.fid(), msg_type, &mut RocksDbTransactionBatch::new())
+        .map_or(0, |(count, max)| (count + 1).saturating_sub(max))
+}
+
+/// The number of messages merging `message` would prune, if that is more than
+/// `MAX_PRUNE_SWEEP_PER_MESSAGE` and `version` does not yet bound sweeps per block.
+pub(crate) fn prune_sweep_over_limit(
+    stores: &Stores,
+    message: &proto::Message,
+    version: EngineVersion,
+) -> Option<u32> {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+        return None;
+    }
+    let sweep = estimated_prune_sweep(stores, message);
+    (sweep > MAX_PRUNE_SWEEP_PER_MESSAGE).then_some(sweep)
+}
+
+/// One fid's usage of one store, counting messages already chosen for a proposal.
+struct ProjectedStoreUsage {
+    count: u32,
+    max: u32,
+    /// Prune work already charged to the proposal's budget for this store.
+    charged: u32,
+}
+
+impl ProjectedStoreUsage {
+    fn committed(stores: &Stores, fid: u64, msg_type: MessageType) -> Self {
+        // Unreadable usage is treated as never over the limit, matching `estimated_prune_sweep`.
+        let (count, max) = stores
+            .get_usage(fid, msg_type, &mut RocksDbTransactionBatch::new())
+            .unwrap_or((0, u32::MAX));
+        Self {
+            count,
+            max,
+            charged: 0,
+        }
+    }
+
+    /// The prune work one more message adds to this store's sweep.
+    fn added_sweep(&self) -> u32 {
+        self.count
+            .saturating_add(1)
+            .saturating_sub(self.max)
+            .saturating_sub(self.charged)
+    }
+}
+
+/// Fids whose storage limit a storage lend in `messages` changes.
+fn fids_with_storage_lends(messages: &[MempoolMessage]) -> HashSet<u64> {
+    let mut fids = HashSet::new();
+    for message in messages {
+        let MempoolMessage::BlockEvent { message, .. } = message else {
+            continue;
+        };
+        let Some(proto::block_event_data::Body::MergeMessageEventBody(body)) =
+            message.data.as_ref().and_then(|data| data.body.as_ref())
+        else {
+            continue;
+        };
+        let Some(lend) = body.message.as_ref() else {
+            continue;
+        };
+        if lend.msg_type() != MessageType::LendStorage {
+            continue;
+        }
+        fids.insert(lend.fid());
+        if let Some(proto::message_data::Body::LendStorageBody(lend_body)) =
+            lend.data.as_ref().and_then(|data| data.body.as_ref())
+        {
+            fids.insert(lend_body.to_fid);
+        }
+    }
+    fids
+}
+
+/// Splits messages pulled for one proposal into those to propose now and those to keep for a
+/// later block, so their prune sweeps total at most `MAX_PRUNE_SWEEP_PER_BLOCK` until
+/// `BoundedPruneSweep` activates. Estimates come from committed state, so prunable messages
+/// from a fid whose storage a lend in the same proposal changes are also kept back: the lend
+/// can raise their sweep past the estimate.
+///
+/// The engine merges all of a fid's messages before it sweeps, so each message is charged the
+/// prune work it adds on top of the messages already chosen for the same fid and store.
+pub(crate) fn defer_excess_prune_sweeps(
+    stores: &Stores,
+    messages: Vec<MempoolMessage>,
+    version: EngineVersion,
+) -> (Vec<MempoolMessage>, Vec<MempoolMessage>) {
+    if version.is_enabled(ProtocolFeature::BoundedPruneSweep) {
+        return (messages, vec![]);
+    }
+    let lent_fids = fids_with_storage_lends(&messages);
+    let mut budget_left = MAX_PRUNE_SWEEP_PER_BLOCK;
+    let mut projected: HashMap<(u64, StoreType), ProjectedStoreUsage> = HashMap::new();
+    let mut proposed = Vec::with_capacity(messages.len());
+    let mut deferred = vec![];
+    for message in messages {
+        if let MempoolMessage::UserMessage(user_msg) = &message {
+            let msg_type = user_msg.msg_type();
+            if is_prunable(msg_type) {
+                let fid = user_msg.fid();
+                if lent_fids.contains(&fid) {
+                    deferred.push(message);
+                    continue;
+                }
+                let usage = projected
+                    .entry((fid, Limits::message_type_to_store_type(msg_type)))
+                    .or_insert_with(|| ProjectedStoreUsage::committed(stores, fid, msg_type));
+                let sweep = usage.added_sweep();
+                if sweep > budget_left {
+                    deferred.push(message);
+                    continue;
+                }
+                budget_left -= sweep;
+                usage.count += 1;
+                usage.charged += sweep;
+            }
+        }
+        proposed.push(message);
+    }
+    (proposed, deferred)
+}
+
+fn verify_signer_on_home_shard(
+    message_router: &dyn MessageRouter,
+    num_shards: u32,
+    shard_stores: &HashMap<u32, Stores>,
+    message: &proto::Message,
+) -> Result<(), HubError> {
+    let shard = message_router.route_fid(message.fid(), num_shards);
+    let stores = shard_stores.get(&shard).ok_or_else(|| {
+        HubError::invalid_internal_state(&format!("no stores for shard {}", shard))
+    })?;
+    verify_message_signer(
+        &stores.onchain_event_store,
+        &stores.db,
+        &RocksDbTransactionBatch::new(),
+        message,
+    )
+    .map_err(|err| HubError::validation_failure(&err.to_string()))
+}
+
+/// Whether `message` counts against its fid's storage-derived rate limit. LIVE_AT heartbeats
+/// and KEY_REMOVE have their own limiters instead; KEY_REMOVE is kept off the quota so traffic
+/// from a signer can't block that signer's revocation.
+fn charges_storage_quota(message: &proto::Message) -> bool {
+    !is_live_at(message) && key_remove_body(message).is_none()
+}
+
 /// Stateless checks for a user message received over gossip: data present and decodable,
 /// hash, signature, network, size and body. Uses the wall clock and the current engine
 /// version, since there is no block yet.
@@ -623,6 +910,13 @@ pub fn validate_gossiped_message(
 /// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
 /// message without `data` cannot be a KEY_ADD and therefore shouldn't trip the KEY_ADD limiter;
 /// it will fail later validation on its own.
+fn key_remove_body(message: &proto::Message) -> Option<&proto::KeyRemoveBody> {
+    match message.data.as_ref()?.body.as_ref()? {
+        proto::message_data::Body::KeyRemoveBody(body) => Some(body),
+        _ => None,
+    }
+}
+
 fn is_key_add(message: &proto::Message) -> bool {
     match &message.data {
         Some(data) => matches!(data.body, Some(proto::message_data::Body::KeyAddBody(_))),
@@ -658,10 +952,14 @@ pub struct Mempool {
     block_decision_rx: broadcast::Receiver<Block>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
-    rate_limits: Option<RateLimits>,
+    rate_limits: Option<Arc<RateLimits>>,
+    // Set once the RPC server has taken the storage-quota limiter and charges RPC submissions
+    // itself, so the mempool must not charge them a second time.
+    storage_quota_charged_at_rpc: bool,
     // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
     // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
     key_add_rate_limits: KeyAddRateLimits,
+    key_remove_rate_limits: KeyRemoveRateLimits,
     live_at_rate_limits: LiveAtRateLimits,
     live_at_messages_by_fid: HashMap<(u32, u64), MempoolKey>,
 }
@@ -685,17 +983,19 @@ impl Mempool {
             messages_request_rx,
             shard_decision_rx,
             block_decision_rx,
+            storage_quota_charged_at_rpc: false,
             rate_limits: if config.enable_rate_limits {
-                Some(RateLimits::new(
+                Some(Arc::new(RateLimits::new(
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
                     num_shards,
-                ))
+                )))
             } else {
                 None
             },
             key_add_rate_limits: KeyAddRateLimits::new(statsd_client.clone()),
+            key_remove_rate_limits: KeyRemoveRateLimits::new(statsd_client.clone()),
             live_at_rate_limits: LiveAtRateLimits::new(
                 shard_stores.clone(),
                 statsd_client.clone(),
@@ -716,16 +1016,39 @@ impl Mempool {
         }
     }
 
-    fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
+    /// Hands the storage-quota limiter to the RPC server, which then charges RPC submissions
+    /// before simulating them. From then on the mempool stops charging RPC-sourced messages
+    /// against it so they aren't counted twice. Returns `None` when rate limits are disabled.
+    pub fn rate_limits_for_rpc(&mut self) -> Option<Arc<RateLimits>> {
+        let rate_limits = self.rate_limits.clone()?;
+        self.storage_quota_charged_at_rpc = true;
+        Some(rate_limits)
+    }
+
+    fn message_exceeds_rate_limits(
+        &mut self,
+        message: &MempoolMessage,
+        source: &MempoolSource,
+    ) -> bool {
         match message {
             MempoolMessage::UserMessage(user_msg) => {
                 let fid = user_msg.fid();
 
+                // KEY_REMOVE only counts against its own per-key limit, never the storage quota,
+                // so a compromised signer cannot use up the quota to block its own revocation.
+                if let Some(key_remove) = key_remove_body(user_msg) {
+                    if !self.key_remove_rate_limits.consume(fid, key_remove) {
+                        self.statsd_client
+                            .count("mempool.key_remove_rate_limit_hit", 1, vec![]);
+                        return true;
+                    }
+                    return false;
+                }
+
                 // KEY_ADD-specific 1/min limit (NEYN-10579). Gated in the mempool — not at RPC —
                 // so both RPC-submitted and gossip-forwarded KEY_ADDs are dropped without
-                // re-propagation when over limit. KEY_REMOVE is intentionally NEVER rate-limited:
-                // revocation of a compromised key must not be blockable. Non-key user messages
-                // fall through to the storage-quota limiter below.
+                // re-propagation when over limit. Non-key user messages fall through to the
+                // storage-quota limiter below.
                 // TODO(#10): this is also the hook for lazy `registration_tx_hash` replacement
                 // eviction — wire in once the pending-FID flow lands.
                 if is_key_add(user_msg) {
@@ -742,13 +1065,16 @@ impl Mempool {
                             .count("mempool.live_at_rate_limit_hit", 1, vec![]);
                         return true;
                     }
-                    return false;
                 }
 
-                if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(fid)
-                } else {
-                    false
+                if !charges_storage_quota(user_msg)
+                    || (*source == MempoolSource::RPC && self.storage_quota_charged_at_rpc)
+                {
+                    return false;
+                }
+                match &self.rate_limits {
+                    Some(rate_limits) => !rate_limits.consume_for_fid(fid),
+                    None => false,
                 }
             }
             MempoolMessage::OnchainEvent(_)
@@ -764,26 +1090,37 @@ impl Mempool {
     }
 
     async fn pull_messages(&mut self, request: MempoolMessagesRequest) {
+        let version = EngineVersion::current(self.read_node_mempool.network);
+        let messages =
+            self.take_messages(request.shard_id, request.max_messages_per_block, version);
+        if let Err(_) = request.message_tx.send(messages) {
+            error!("Unable to send message from mempool");
+        }
+    }
+
+    /// Removes and returns the messages for one proposal on `shard_id`. Messages kept back by
+    /// `defer_excess_prune_sweeps` go back into the mempool for a later proposal.
+    pub(crate) fn take_messages(
+        &mut self,
+        shard_id: u32,
+        max_messages_per_block: u32,
+        version: EngineVersion,
+    ) -> Vec<MempoolMessage> {
         let mut messages = vec![];
-        while messages.len() < request.max_messages_per_block as usize {
-            let shard_messages = self.messages.get_mut(&request.shard_id);
+        while messages.len() < max_messages_per_block as usize {
+            let shard_messages = self.messages.get_mut(&shard_id);
             match shard_messages {
                 None => break,
                 Some(shard_messages) => {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((key, next_message)) => {
-                            self.remove_live_at_index_for_message(
-                                request.shard_id,
-                                &key,
-                                &next_message,
-                            );
+                            self.remove_live_at_index_for_message(shard_id, &key, &next_message);
                             // `at_admission = false`: keeps the feature-gate, BlockEvent-shard,
                             // and post-merge duplicate checks but skips the token-consuming
                             // rate limiter. The token was already consumed at insertion; a
                             // second check would always fail and permanently drop the message.
-                            let result =
-                                self.message_is_valid(request.shard_id, &next_message, false);
+                            let result = self.message_is_valid(shard_id, &next_message, false);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -793,9 +1130,26 @@ impl Mempool {
             }
         }
 
-        if let Err(_) = request.message_tx.send(messages) {
-            error!("Unable to send message from mempool");
+        let Some(stores) = self.read_node_mempool.shard_stores.get(&shard_id) else {
+            return messages;
+        };
+        let (proposed, deferred) = defer_excess_prune_sweeps(stores, messages, version);
+        if !deferred.is_empty() {
+            self.statsd_client.count_with_shard(
+                shard_id,
+                "mempool.prune_sweep_deferred",
+                deferred.len() as u64,
+                vec![],
+            );
         }
+        for message in deferred {
+            self.index_live_at_insert(shard_id, &message);
+            self.messages
+                .entry(shard_id)
+                .or_default()
+                .insert(message.mempool_key(), message);
+        }
+        proposed
     }
 
     pub fn message_is_valid(
@@ -803,6 +1157,20 @@ impl Mempool {
         shard: u32,
         message: &MempoolMessage,
         at_admission: bool,
+    ) -> Result<(), HubError> {
+        self.message_is_valid_from(
+            shard,
+            message,
+            at_admission.then_some(&MempoolSource::Local),
+        )
+    }
+
+    /// `admission_source` is `None` at pull time, which skips the token-consuming rate limits.
+    fn message_is_valid_from(
+        &mut self,
+        shard: u32,
+        message: &MempoolMessage,
+        admission_source: Option<&MempoolSource>,
     ) -> Result<(), HubError> {
         // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
         // NEYN-10619 consolidates feature-gating into a single validate_user_message
@@ -851,12 +1219,42 @@ impl Mempool {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
+        if let MempoolMessage::UserMessage(user_msg) = message {
+            let sweep = self
+                .read_node_mempool
+                .shard_stores
+                .get(&shard)
+                .and_then(|stores| {
+                    prune_sweep_over_limit(
+                        stores,
+                        user_msg,
+                        EngineVersion::current(self.read_node_mempool.network),
+                    )
+                });
+            if let Some(sweep) = sweep {
+                self.statsd_client.count_with_shard(
+                    shard,
+                    "mempool.prune_sweep_over_limit",
+                    1,
+                    vec![],
+                );
+                return Err(HubError::validation_failure(&format!(
+                    "message would prune {} messages over the fid's storage limit; at most {} \
+                     can be pruned by one message",
+                    sweep, MAX_PRUNE_SWEEP_PER_MESSAGE
+                )));
+            }
+        }
         // Rate-limit checks are token-consuming (the KEY_ADD limiter uses
         // `governor::RateLimiter::check`, which decrements the bucket). They must run
         // exactly once, at admission. Re-running them at pull time would double-charge
         // the 1/min KEY_ADD quota and silently drop every accepted message before it
         // ever reached the engine.
-        if at_admission && self.message_exceeds_rate_limits(message) {
+        let exceeds_rate_limits = match admission_source {
+            Some(source) => self.message_exceeds_rate_limits(message, source),
+            None => false,
+        };
+        if exceeds_rate_limits {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
@@ -937,7 +1335,7 @@ impl Mempool {
         }
     }
 
-    async fn insert(
+    pub(crate) async fn insert(
         &mut self,
         message: MempoolMessage,
         source: MempoolSource,
@@ -952,6 +1350,11 @@ impl Mempool {
                 self.statsd_client
                     .count("mempool.gossip_validation_failure", 1, vec![]);
                 return Err(HubError::validation_failure(&err.to_string()));
+            }
+            if let Err(err) = self.read_node_mempool.verify_gossiped_signer(user_message) {
+                self.statsd_client
+                    .count("mempool.gossip_signer_rejected", 1, vec![]);
+                return Err(err);
             }
         }
 
@@ -996,6 +1399,29 @@ impl Mempool {
             None => {}
         }
 
+        let live_at_to_replace = self.prepare_live_at_insert(shard_id, &message)?;
+
+        // Validator messages (onchain events, fname transfers, block events) are exempt so that
+        // a pool full of user messages can't hold up storage rent or signer changes. A LIVE_AT
+        // that replaces the fid's pending one doesn't grow the shard, so it is exempt too.
+        if let (MempoolMessage::UserMessage(_), None) = (&message, &live_at_to_replace) {
+            let shard_size = self
+                .messages
+                .get(&shard_id)
+                .map_or(0, |messages| messages.len() as u64);
+            if !self.config.allow_unlimited_mempool_size
+                && shard_size >= self.config.capacity_per_shard
+            {
+                self.statsd_client.count_with_shard(
+                    shard_id,
+                    "mempool.capacity_limited",
+                    1,
+                    vec![],
+                );
+                return Err(HubError::unavailable("mempool is full for this shard"));
+            }
+        }
+
         // TODO(topocount): Maybe we don't need to run validations here? Related: rate-limit
         // checks (the only token-consuming part of `message_is_valid`) should ideally be
         // pulled out of `message_is_valid` entirely and run once, inline at this admission
@@ -1003,8 +1429,7 @@ impl Mempool {
         // a pure idempotent `message_is_valid` with no risk of accidentally re-charging the
         // limiter. The flag exists today as the minimal-surgery fix; the cleaner split is
         // deferred until the surrounding admission validations are reworked.
-        let live_at_to_replace = self.prepare_live_at_insert(shard_id, &message)?;
-        let result = self.message_is_valid(shard_id, &message, true);
+        let result = self.message_is_valid_from(shard_id, &message, Some(&source));
         if result.is_ok() {
             if let Some(old_key) = live_at_to_replace {
                 if let Some(shard_messages) = self.messages.get_mut(&shard_id) {
@@ -1056,7 +1481,7 @@ impl Mempool {
                                 .invalidate_rate_limiter_for_fid(data.fid);
                             self.live_at_rate_limits
                                 .invalidate_rate_limiter_for_fid(lend_storage.to_fid);
-                            if let Some(rate_limits) = &mut self.rate_limits {
+                            if let Some(rate_limits) = &self.rate_limits {
                                 rate_limits.invalidate_rate_limiter_for_fid(data.fid);
                                 rate_limits.invalidate_rate_limiter_for_fid(lend_storage.to_fid);
                             }
@@ -1084,7 +1509,7 @@ impl Mempool {
                     if let Some(onchain_event) = &system_message.on_chain_event {
                         if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent {
                             // If the user buys more storage, we should bump their rate limit
-                            if let Some(rate_limits) = &mut self.rate_limits {
+                            if let Some(rate_limits) = &self.rate_limits {
                                 rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
                             }
                             self.live_at_rate_limits
@@ -1154,36 +1579,31 @@ impl Mempool {
                     let total_messages: u64 = self.messages.values().map(|m| m.len() as u64).sum();
                     self.statsd_client.gauge("mempool.total_messages", total_messages, vec![]);
                     for _ in 0..256 {
-                        if self.config.allow_unlimited_mempool_size || total_messages < self.config.capacity_per_shard {
-                            match self.read_node_mempool.mempool_rx.try_recv() {
-                                Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
-                                    let result = self.insert(message, source).await;
-                                    if let Some(sender) = reply_to {
-                                        if let Err(_) = sender.send(result) {
-                                            error!("Unable to reply to add message request from mempool");
-                                        }
+                        match self.read_node_mempool.mempool_rx.try_recv() {
+                            Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
+                                let result = self.insert(message, source).await;
+                                if let Some(sender) = reply_to {
+                                    if let Err(_) = sender.send(result) {
+                                        error!("Unable to reply to add message request from mempool");
                                     }
                                 }
-                                Ok(MempoolRequest::GetSize(reply_to)) => {
-                                    let mut sizes = HashMap::new();
-                                    for (shard_id, messages) in &self.messages {
-                                        sizes.insert(*shard_id, messages.len() as u64);
-                                    }
-                                    if let Err(_) = reply_to.send(sizes) {
-                                        error!("Unable to reply to message size request from mempool");
-                                    }
-                                }
-                                Err(mpsc::error::TryRecvError::Disconnected) => {
-                                    panic!("Mempool tx is disconnected")
-                                }
-                                Err(mpsc::error::TryRecvError::Empty) => {
-                                    break;
-                                },
-
                             }
-                        } else {
-                            self.statsd_client.count("mempool.capacity_limited", 1, vec![]);
-                            break;
+                            Ok(MempoolRequest::GetSize(reply_to)) => {
+                                let mut sizes = HashMap::new();
+                                for (shard_id, messages) in &self.messages {
+                                    sizes.insert(*shard_id, messages.len() as u64);
+                                }
+                                if let Err(_) = reply_to.send(sizes) {
+                                    error!("Unable to reply to message size request from mempool");
+                                }
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("Mempool tx is disconnected")
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                break;
+                            },
+
                         }
                     }
                 }
