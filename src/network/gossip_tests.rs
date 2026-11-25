@@ -1442,3 +1442,22 @@ fn bootstrap_redial_skips_only_connected_peers() {
 
     assert_eq!(redial, vec![never_reached, dropped]);
 }
+
+#[test]
+fn only_read_node_status_without_subscribers_is_an_expected_publish_failure() {
+    use super::gossip::publish_failure_is_expected;
+    use libp2p::gossipsub::PublishError;
+
+    assert!(publish_failure_is_expected(
+        "read-node-peers",
+        &PublishError::NoPeersSubscribedToTopic
+    ));
+    assert!(
+        !publish_failure_is_expected("consensus", &PublishError::NoPeersSubscribedToTopic),
+        "a validator with no consensus subscribers must still warn"
+    );
+    assert!(!publish_failure_is_expected(
+        "read-node-peers",
+        &PublishError::AllQueuesFull(1)
+    ));
+}
